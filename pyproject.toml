@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sunsponge-capture"
+version = "0.1.0"
+description = "Rested-state website screenshot batch tool — settled, animation-free full-page shots across viewports and color schemes."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "SunSponge LLC" }]
+keywords = ["screenshot", "playwright", "website", "responsive", "qa", "capture", "visual-regression"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Multimedia :: Graphics :: Capture :: Screen Capture",
+]
+dependencies = ["playwright>=1.40"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+sunsponge-capture = "sunsponge_capture.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/deariencampbell1-sys/sunsponge-capture"
+Source = "https://github.com/deariencampbell1-sys/sunsponge-capture"
+Issues = "https://github.com/deariencampbell1-sys/sunsponge-capture/issues"
+
+[tool.setuptools]
+packages = ["sunsponge_capture"]
