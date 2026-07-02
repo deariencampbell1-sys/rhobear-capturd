@@ -38,6 +38,9 @@ from capturd.walk.ai_pipeline import (
     DemoAI,
     DemoAIError,
     DemoEnrichManager,
+    _build_client,
+    _load_screenshot_b64,
+    _llm_vision,
     _synthesize_one,
 )
 from capturd.walk.recorder import DemoManager, run_async
@@ -360,6 +363,209 @@ class DemoForge:
                 step["voiceoverWords"] = [asdict(wt) for wt in words]
         self.save_spec(demo_id, data)
         return step
+
+    # ------------------------------------------------------------------
+    # Camera timeline helpers (W4 — MCP surface)
+    # ------------------------------------------------------------------
+
+    def append_animation_keyframe(
+        self,
+        demo_id: str,
+        step_index: int,
+        action: str,
+        *,
+        target: str | None = None,
+        zoom_level: float | None = None,
+        duration: int = 500,
+        easing: str = "ease-in-out",
+    ) -> dict[str, Any]:
+        """Append an AnimationKeyframe to the demo's aiAnnotations.animationTimeline."""
+        data = self.load_spec(demo_id)
+        ann = data.setdefault("aiAnnotations", {})
+        timeline = ann.setdefault("animationTimeline", [])
+        kf: dict[str, Any] = {
+            "stepIndex": step_index,
+            "action": action,
+            "duration": duration,
+            "easing": easing,
+        }
+        if target is not None:
+            kf["target"] = target
+        if zoom_level is not None:
+            kf["zoomLevel"] = zoom_level
+        timeline.append(kf)
+        self.save_spec(demo_id, data)
+        return kf
+
+    def set_step_overlay(
+        self,
+        demo_id: str,
+        step_index: int,
+        text: str,
+        position: str = "center",
+        style: str = "callout",
+    ) -> dict[str, Any]:
+        """Set a text callout overlay on a step (free dict key)."""
+        data = self.load_spec(demo_id)
+        steps = data.get("steps") or []
+        if step_index < 0 or step_index >= len(steps):
+            raise DemoForgeError(f"stepIndex {step_index} out of range (have {len(steps)} steps)")
+        steps[step_index]["overlay"] = {
+            "text": text,
+            "position": position,
+            "style": style,
+        }
+        self.save_spec(demo_id, data)
+        return steps[step_index]["overlay"]
+
+    def reorder_steps(self, demo_id: str, new_order: list[int]) -> dict[str, Any]:
+        """Reorder steps in-place and rewrite each step.index to match position."""
+        data = self.load_spec(demo_id)
+        steps = data.get("steps") or []
+        n = len(steps)
+        if sorted(new_order) != list(range(n)):
+            raise DemoForgeError(
+                f"newStepOrder must be a permutation of 0..{n - 1}, got {new_order}"
+            )
+        reordered = [steps[i] for i in new_order]
+        for idx, step in enumerate(reordered):
+            step["index"] = idx
+        data["steps"] = reordered
+        self.save_spec(demo_id, data)
+        return {"stepCount": n, "order": new_order}
+
+    def trim_steps(self, demo_id: str, start: int, end: int) -> dict[str, Any]:
+        """Keep only steps in [start, end] inclusive and re-index."""
+        data = self.load_spec(demo_id)
+        steps = data.get("steps") or []
+        n = len(steps)
+        if start < 0 or end >= n or start > end:
+            raise DemoForgeError(
+                f"trim range [{start}, {end}] invalid for {n} steps"
+            )
+        trimmed = steps[start : end + 1]
+        for idx, step in enumerate(trimmed):
+            step["index"] = idx
+        data["steps"] = trimmed
+        self.save_spec(demo_id, data)
+        return {"originalCount": n, "newCount": len(trimmed), "kept": [start, end]}
+
+    def add_branch(self, demo_id: str, at_step: int, alt_path: list[dict[str, Any]]) -> dict[str, Any]:
+        """Record an alternate path from at_step under step.branches."""
+        data = self.load_spec(demo_id)
+        steps = data.get("steps") or []
+        if at_step < 0 or at_step >= len(steps):
+            raise DemoForgeError(f"atStep {at_step} out of range (have {len(steps)} steps)")
+        branches = steps[at_step].setdefault("branches", [])
+        branches.append(alt_path)
+        self.save_spec(demo_id, data)
+        return {"atStep": at_step, "branchCount": len(branches)}
+
+    # ------------------------------------------------------------------
+    # Stylize (W4)
+    # ------------------------------------------------------------------
+
+    async def stylize_demo(self, demo_id: str, style: str) -> dict[str, Any]:
+        """Update aiAnnotations.style and re-run animation timeline generation."""
+        data = self.load_spec(demo_id)
+        ann = data.setdefault("aiAnnotations", {})
+        ann["style"] = style
+        self.save_spec(demo_id, data)
+
+        # Re-run the animation timeline generator with the new style.
+        ai = self.enrich_manager.ai
+        client = _build_client()
+        await ai._generate_animation_timeline(client, data)
+        self.save_spec(demo_id, data)
+        return {"style": style, "demoId": demo_id}
+
+    # ------------------------------------------------------------------
+    # Regenerate (W4)
+    # ------------------------------------------------------------------
+
+    async def regenerate_step(
+        self,
+        demo_id: str,
+        step_index: int,
+        aspects: list[str],
+    ) -> dict[str, Any]:
+        """Re-run specific AI-pipeline stages for one step.
+
+        Aspects:
+          - "narration" — re-annotate the step via vision LLM
+          - "voice"     — re-synthesize voiceover audio for the step
+          - "cursor"    — recompute cursor paths for the full spec
+          - "zoom"      — regenerate the full animation timeline
+        """
+        data = self.load_spec(demo_id)
+        steps = data.get("steps") or []
+        if step_index < 0 or step_index >= len(steps):
+            raise DemoForgeError(f"stepIndex {step_index} out of range (have {len(steps)} steps)")
+        valid = {"narration", "voice", "cursor", "zoom"}
+        unknown = set(aspects) - valid
+        if unknown:
+            raise DemoForgeError(f"unknown aspects: {sorted(unknown)}; valid: {sorted(valid)}")
+
+        ai = self.enrich_manager.ai
+        proj = self.demos_dir.parent
+        results: list[str] = []
+
+        if "narration" in aspects:
+            client_v = _build_client()
+            step = steps[step_index]
+            img = _load_screenshot_b64(data, step, proj)
+            if img:
+                target = (step.get("interaction") or {}).get("target") or {}
+                hotspot = (step.get("interaction") or {}).get("hotspot") or {}
+                prompt = (
+                    "You are analyzing a screenshot from a product demo recording.\n\n"
+                    f"Page: {step.get('pageUrl', '')}\n"
+                    f"Page title: {step.get('pageTitle', '')}\n"
+                    f"User clicked: {target.get('selector', '?')} "
+                    f"({target.get('tagName', '?')}, text: \"{target.get('text', '')}\")\n"
+                    f"Click position: {round(hotspot.get('xPct', 0), 1)}%, "
+                    f"{round(hotspot.get('yPct', 0), 1)}% of element bounding box\n\n"
+                    "Describe in ONE sentence (max 18 words) what the user did, "
+                    "from their perspective. Be specific — name the button/field/text "
+                    "they clicked. Output ONLY the sentence, no other text."
+                )
+                try:
+                    text = await _llm_vision(
+                        client_v,
+                        model=ai.model_vision,
+                        prompt=prompt,
+                        image_b64=img,
+                        max_tokens=500,
+                    )
+                    first = text.strip().split(".")[0].strip() + "." if text.strip() else ""
+                    if first:
+                        step["annotation"] = first
+                        results.append("narration")
+                except Exception as exc:
+                    logger.warning("regenerate narration failed for step %d: %s", step_index, exc)
+            else:
+                logger.warning("regenerate narration: no screenshot for step %d", step_index)
+
+        if "voice" in aspects:
+            text = (steps[step_index].get("annotation") or "").strip()
+            if text:
+                audio = await _synthesize_one(text, voice=ai.voice)
+                if audio:
+                    import base64 as _b64
+                    steps[step_index]["voiceoverBase64"] = _b64.b64encode(audio).decode("ascii")
+                    results.append("voice")
+
+        if "cursor" in aspects:
+            ai._compute_cursor_paths(data)
+            results.append("cursor")
+
+        if "zoom" in aspects:
+            client_z = _build_client()
+            await ai._generate_animation_timeline(client_z, data)
+            results.append("zoom")
+
+        self.save_spec(demo_id, data)
+        return {"regenerated": results, "demoId": demo_id, "stepIndex": step_index}
 
     # ------------------------------------------------------------------
     # Export

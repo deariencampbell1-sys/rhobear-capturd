@@ -1,15 +1,29 @@
-"""DemoForge MCP server — exposes the demo pipeline as 7 MCP tools.
+"""DemoForge MCP server — exposes the demo + capture pipeline as 19 MCP tools.
 
-Tools (all under the ``demo.`` namespace so the agent's tool list stays
-uncluttered):
+Demo tools (``demo.*`` namespace):
 
-* ``demo.record``   — open a headful browser and start capturing clicks
-* ``demo.stop``     — close the browser, persist the spec, kick off AI enrichment
-* ``demo.status``   — check pipeline progress for a demo
-* ``demo.list``     — enumerate every recorded demo on disk
-* ``demo.edit``     — rewrite a step's annotation and optionally re-synthesize voiceover
-* ``demo.delete``   — remove a demo and its files
-* ``demo.export``   — render a standalone HTML viewer
+* ``demo.record``     — open a headful browser and start capturing clicks
+* ``demo.stop``       — close the browser, persist the spec, kick off AI enrichment
+* ``demo.status``     — check pipeline progress for a demo
+* ``demo.list``       — enumerate every recorded demo on disk
+* ``demo.edit``       — rewrite a step's annotation and optionally re-synthesize voiceover
+* ``demo.delete``     — remove a demo and its files
+* ``demo.export``     — render a standalone HTML viewer
+* ``demo.zoom``       — append a ZOOM_TO camera keyframe
+* ``demo.pan``        — append a PAN_TO camera keyframe
+* ``demo.hold``       — append a HOLD camera keyframe
+* ``demo.spotlight``  — append SPOTLIGHT_ON or SPOTLIGHT_OFF
+* ``demo.overlay``    — add a text callout overlay to a step
+* ``demo.reorder``    — reorder steps and rewrite indexes
+* ``demo.trim``       — remove steps outside a range
+* ``demo.branch``     — record an alternate path from a step
+* ``demo.stylize``    — change camera style and re-run timeline generation
+* ``demo.regenerate`` — re-run AI pipeline stages for a step
+
+Capture tools (``capture.*`` namespace):
+
+* ``capture.crawl``   — crawl a site and capture rested-state stills
+* ``capture.rested``  — capture rested-state stills for a list of URLs
 
 Transport: stdio JSON-RPC 2.0 (the FastMCP default). The server is launched
 via ``python -m capturd.mcp.server``.
@@ -320,37 +334,389 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
             "format": format,
         }
 
-    # ---- TODO(W4) — expanded surface ---------------------------------------
-    #
-    # Spine has demo.record/stop/status/list/edit/delete/export (the prev 7).
-    # W4 adds:
-    #
-    #   demo.zoom(stepIndex, target, level, duration, easing)
-    #   demo.pan(stepIndex, fromSelector, toSelector, duration)
-    #   demo.hold(stepIndex, ms)
-    #   demo.spotlight(stepIndex, on|off, target)
-    #   demo.overlay(stepIndex, text, position, style)
-    #   demo.reorder(newStepOrder)
-    #   demo.trim(startStep, endStep)
-    #   demo.branch(atStep, altPath)
-    #   demo.stylize(demoId, "snappy"|"cinematic"|"professional")
-    #   demo.regenerate(stepIndex, {voice|cursor|zoom|narration})
-    #
-    # And the capture.* mirror tools for the stills side so one server covers
-    # both modes and any RHOBEAR agent has ONE tool surface:
-    #
-    #   capture.crawl(url, viewports, schemes, format, out_dir)
-    #   capture.rested(urls, viewports, schemes, out_dir)
-    #
-    # W6 hooks (voice mode):
-    #
-    #   voice.start(sessionId, config)   # opens Whisper push-to-talk loop
-    #   voice.stop(sessionId)
-    #
-    # Keep all tools under one FastMCP server; expand `mcp.state` if the tools
-    # need shared handles beyond the forge (e.g. voice loop registry, capture
-    # manager). Do NOT split into multiple servers — the agent tool surface
-    # stays flat.
+    # ---- W4: demo.zoom ---------------------------------------------------
+
+    @mcp.tool(
+        name="demo.zoom",
+        description=(
+            "Append a ZOOM_TO camera keyframe to the demo's animation timeline. "
+            "The viewer uses this to zoom into a target element at the given step."
+        ),
+        timeout=15.0,
+    )
+    async def demo_zoom(
+        demo_id: str,
+        step_index: int,
+        target: str,
+        level: float = 1.5,
+        duration: int = 500,
+        easing: str = "ease-in-out",
+    ) -> dict[str, Any]:
+        if not demo_id:
+            raise ValueError("demoId is required")
+        if not isinstance(step_index, int) or step_index < 0:
+            raise ValueError("stepIndex must be a non-negative integer")
+        try:
+            kf = forge.append_animation_keyframe(
+                demo_id, step_index, "zoomTo",
+                target=target, zoom_level=level,
+                duration=duration, easing=easing,
+            )
+        except DemoNotFound:
+            raise ValueError(f"demo not found: {demo_id}")
+        return {"ok": True, "keyframe": kf}
+
+    # ---- W4: demo.pan ----------------------------------------------------
+
+    @mcp.tool(
+        name="demo.pan",
+        description=(
+            "Append a PAN_TO camera keyframe to move the view from one "
+            "selector to another at the given step."
+        ),
+        timeout=15.0,
+    )
+    async def demo_pan(
+        demo_id: str,
+        step_index: int,
+        from_selector: str,
+        to_selector: str,
+        duration: int = 500,
+    ) -> dict[str, Any]:
+        if not demo_id:
+            raise ValueError("demoId is required")
+        if not isinstance(step_index, int) or step_index < 0:
+            raise ValueError("stepIndex must be a non-negative integer")
+        try:
+            kf = forge.append_animation_keyframe(
+                demo_id, step_index, "panTo",
+                target=to_selector, duration=duration,
+            )
+        except DemoNotFound:
+            raise ValueError(f"demo not found: {demo_id}")
+        return {"ok": True, "keyframe": kf, "from": from_selector, "to": to_selector}
+
+    # ---- W4: demo.hold ---------------------------------------------------
+
+    @mcp.tool(
+        name="demo.hold",
+        description=(
+            "Append a HOLD camera keyframe — the camera stays still for "
+            "the specified number of milliseconds at this step."
+        ),
+        timeout=15.0,
+    )
+    async def demo_hold(
+        demo_id: str,
+        step_index: int,
+        ms: int,
+    ) -> dict[str, Any]:
+        if not demo_id:
+            raise ValueError("demoId is required")
+        if not isinstance(step_index, int) or step_index < 0:
+            raise ValueError("stepIndex must be a non-negative integer")
+        if not isinstance(ms, int) or ms <= 0:
+            raise ValueError("ms must be a positive integer")
+        try:
+            kf = forge.append_animation_keyframe(
+                demo_id, step_index, "hold", duration=ms,
+            )
+        except DemoNotFound:
+            raise ValueError(f"demo not found: {demo_id}")
+        return {"ok": True, "keyframe": kf}
+
+    # ---- W4: demo.spotlight ----------------------------------------------
+
+    @mcp.tool(
+        name="demo.spotlight",
+        description=(
+            "Add a SPOTLIGHT_ON or SPOTLIGHT_OFF camera keyframe. When on, "
+            "the viewer dims everything except the target element."
+        ),
+        timeout=15.0,
+    )
+    async def demo_spotlight(
+        demo_id: str,
+        step_index: int,
+        on: bool,
+        target: str,
+    ) -> dict[str, Any]:
+        if not demo_id:
+            raise ValueError("demoId is required")
+        if not isinstance(step_index, int) or step_index < 0:
+            raise ValueError("stepIndex must be a non-negative integer")
+        action = "spotlightOn" if on else "spotlightOff"
+        try:
+            kf = forge.append_animation_keyframe(
+                demo_id, step_index, action, target=target,
+            )
+        except DemoNotFound:
+            raise ValueError(f"demo not found: {demo_id}")
+        return {"ok": True, "keyframe": kf}
+
+    # ---- W4: demo.overlay ------------------------------------------------
+
+    @mcp.tool(
+        name="demo.overlay",
+        description=(
+            "Add a text callout overlay to a step. The viewer renders this "
+            "as a positioned annotation on top of the screenshot."
+        ),
+        timeout=15.0,
+    )
+    async def demo_overlay(
+        demo_id: str,
+        step_index: int,
+        text: str,
+        position: str = "center",
+        style: str = "callout",
+    ) -> dict[str, Any]:
+        if not demo_id:
+            raise ValueError("demoId is required")
+        if not isinstance(step_index, int) or step_index < 0:
+            raise ValueError("stepIndex must be a non-negative integer")
+        if not text or not text.strip():
+            raise ValueError("text is required")
+        valid_positions = {"top-left", "top-right", "bottom-left", "bottom-right", "center"}
+        if position not in valid_positions:
+            raise ValueError(f"position must be one of {sorted(valid_positions)}")
+        try:
+            overlay = forge.set_step_overlay(demo_id, step_index, text.strip(), position, style)
+        except DemoNotFound:
+            raise ValueError(f"demo not found: {demo_id}")
+        except DemoForgeError as exc:
+            raise ValueError(str(exc))
+        return {"ok": True, "overlay": overlay}
+
+    # ---- W4: demo.reorder ------------------------------------------------
+
+    @mcp.tool(
+        name="demo.reorder",
+        description=(
+            "Reorder demo steps. newStepOrder must be a permutation of "
+            "0..N-1. Step indexes are rewritten to match their new position."
+        ),
+        timeout=15.0,
+    )
+    async def demo_reorder(
+        demo_id: str,
+        new_step_order: list[int],
+    ) -> dict[str, Any]:
+        if not demo_id:
+            raise ValueError("demoId is required")
+        if not isinstance(new_step_order, list) or not new_step_order:
+            raise ValueError("newStepOrder must be a non-empty list of integers")
+        try:
+            result = forge.reorder_steps(demo_id, new_step_order)
+        except DemoNotFound:
+            raise ValueError(f"demo not found: {demo_id}")
+        except DemoForgeError as exc:
+            raise ValueError(str(exc))
+        return {"ok": True, **result}
+
+    # ---- W4: demo.trim ---------------------------------------------------
+
+    @mcp.tool(
+        name="demo.trim",
+        description=(
+            "Remove steps outside the range [startStep, endStep] inclusive. "
+            "Remaining steps are re-indexed from 0."
+        ),
+        timeout=15.0,
+    )
+    async def demo_trim(
+        demo_id: str,
+        start_step: int,
+        end_step: int,
+    ) -> dict[str, Any]:
+        if not demo_id:
+            raise ValueError("demoId is required")
+        if not isinstance(start_step, int) or start_step < 0:
+            raise ValueError("startStep must be a non-negative integer")
+        if not isinstance(end_step, int) or end_step < 0:
+            raise ValueError("endStep must be a non-negative integer")
+        try:
+            result = forge.trim_steps(demo_id, start_step, end_step)
+        except DemoNotFound:
+            raise ValueError(f"demo not found: {demo_id}")
+        except DemoForgeError as exc:
+            raise ValueError(str(exc))
+        return {"ok": True, **result}
+
+    # ---- W4: demo.branch -------------------------------------------------
+
+    @mcp.tool(
+        name="demo.branch",
+        description=(
+            "Record an alternate path branching from atStep. altPath is a "
+            "list of DemoStep-shaped dicts representing the branched flow."
+        ),
+        timeout=15.0,
+    )
+    async def demo_branch(
+        demo_id: str,
+        at_step: int,
+        alt_path: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if not demo_id:
+            raise ValueError("demoId is required")
+        if not isinstance(at_step, int) or at_step < 0:
+            raise ValueError("atStep must be a non-negative integer")
+        if not isinstance(alt_path, list):
+            raise ValueError("altPath must be a list")
+        try:
+            result = forge.add_branch(demo_id, at_step, alt_path)
+        except DemoNotFound:
+            raise ValueError(f"demo not found: {demo_id}")
+        except DemoForgeError as exc:
+            raise ValueError(str(exc))
+        return {"ok": True, **result}
+
+    # ---- W4: demo.stylize ------------------------------------------------
+
+    @mcp.tool(
+        name="demo.stylize",
+        description=(
+            "Change the demo's camera style and regenerate the animation "
+            "timeline. Valid styles: snappy, smooth, professional, cinematic."
+        ),
+        timeout=60.0,
+    )
+    async def demo_stylize(
+        demo_id: str,
+        style: str,
+    ) -> dict[str, Any]:
+        if not demo_id:
+            raise ValueError("demoId is required")
+        valid = {"snappy", "smooth", "professional", "cinematic"}
+        if style not in valid:
+            raise ValueError(f"style must be one of {sorted(valid)}, got {style!r}")
+        try:
+            result = await forge.stylize_demo(demo_id, style)
+        except DemoNotFound:
+            raise ValueError(f"demo not found: {demo_id}")
+        except DemoForgeError as exc:
+            raise ValueError(str(exc))
+        return {"ok": True, **result}
+
+    # ---- W4: demo.regenerate ---------------------------------------------
+
+    @mcp.tool(
+        name="demo.regenerate",
+        description=(
+            "Re-run AI pipeline stages for a single step. aspects can include "
+            "any subset of: narration (vision annotation), voice (TTS audio), "
+            "cursor (bezier path), zoom (animation timeline)."
+        ),
+        timeout=120.0,
+    )
+    async def demo_regenerate(
+        demo_id: str,
+        step_index: int,
+        aspects: list[str],
+    ) -> dict[str, Any]:
+        if not demo_id:
+            raise ValueError("demoId is required")
+        if not isinstance(step_index, int) or step_index < 0:
+            raise ValueError("stepIndex must be a non-negative integer")
+        if not isinstance(aspects, list) or not aspects:
+            raise ValueError("aspects must be a non-empty list")
+        try:
+            result = await forge.regenerate_step(demo_id, step_index, aspects)
+        except DemoNotFound:
+            raise ValueError(f"demo not found: {demo_id}")
+        except DemoForgeError as exc:
+            raise ValueError(str(exc))
+        return {"ok": True, **result}
+
+    # ---- W4: capture.crawl -----------------------------------------------
+
+    @mcp.tool(
+        name="capture.crawl",
+        description=(
+            "Crawl a website and capture rested-state stills across viewports "
+            "and color schemes. Returns jobId for tracking progress."
+        ),
+        timeout=30.0,
+    )
+    async def capture_crawl(
+        url: str,
+        viewports: list[str] | None = None,
+        schemes: list[str] | None = None,
+        format: str = "png",
+        out_dir: str = "",
+    ) -> dict[str, Any]:
+        if not url:
+            raise ValueError("url is required")
+        try:
+            from capturd.shots.capture import RestedCaptureManager
+        except ImportError as exc:
+            raise RuntimeError(f"capture module not available: {exc}") from exc
+
+        payload: dict[str, Any] = {
+            "crawl_url": url,
+            "crawl": True,
+            "viewports": viewports or ["desktop", "mobile"],
+            "schemes": schemes or ["light", "dark"],
+            "format": format or "png",
+            "name": url,
+        }
+        if out_dir:
+            payload["export_dir"] = out_dir
+            payload["export_mode"] = "folder"
+
+        manager = RestedCaptureManager()
+        job = manager.start(payload)
+        return {
+            "job_id": job["job_id"],
+            "output_dir": job.get("output_dir") or job.get("work_dir", ""),
+            "count": job["total"],
+            "status": job["status"],
+        }
+
+    # ---- W4: capture.rested ----------------------------------------------
+
+    @mcp.tool(
+        name="capture.rested",
+        description=(
+            "Capture rested-state stills for a list of URLs (no crawl). "
+            "Returns jobId for tracking progress."
+        ),
+        timeout=30.0,
+    )
+    async def capture_rested(
+        urls: list[str],
+        viewports: list[str] | None = None,
+        schemes: list[str] | None = None,
+        format: str = "png",
+        out_dir: str = "",
+    ) -> dict[str, Any]:
+        if not urls:
+            raise ValueError("urls is required and must be non-empty")
+        try:
+            from capturd.shots.capture import RestedCaptureManager
+        except ImportError as exc:
+            raise RuntimeError(f"capture module not available: {exc}") from exc
+
+        payload: dict[str, Any] = {
+            "urls": urls,
+            "viewports": viewports or ["desktop", "mobile"],
+            "schemes": schemes or ["light", "dark"],
+            "format": format or "png",
+            "name": urls[0] if urls else "capture",
+        }
+        if out_dir:
+            payload["export_dir"] = out_dir
+            payload["export_mode"] = "folder"
+
+        manager = RestedCaptureManager()
+        job = manager.start(payload)
+        return {
+            "job_id": job["job_id"],
+            "output_dir": job.get("output_dir") or job.get("work_dir", ""),
+            "count": job["total"],
+            "status": job["status"],
+        }
 
     # Stash the forge on the server so tests / integration helpers can grab
     # it without rebuilding the server from scratch.
