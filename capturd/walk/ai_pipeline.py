@@ -336,7 +336,7 @@ def _load_screenshot_b64(spec: dict, step: dict, project_root: Path) -> str | No
 
 async def _synthesize_one(
     text: str, voice: str = "en-US-AriaNeural"
-) -> tuple[bytes, list]:
+) -> tuple[bytes, list[WordTimestamp]]:
     """Synthesize one annotation to MP3 bytes + per-word timestamps via Edge TTS.
 
     edge-tts streams chunks of two types:
