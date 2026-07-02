@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mixed Page — form + 15% canvas</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: sans-serif; display: flex; min-height: 100vh; }
+  #form-col { flex: 1; padding: 24px; }
+  #canvas-col { width: 400px; padding: 24px; }
+  #viz-canvas {
+    width: 100%; height: 200px; border: 1px solid #ccc;
+    background: #f0f0f0;
+  }
+  h1 { margin-bottom: 16px; }
+  label { display: block; margin: 8px 0 4px; font-weight: 600; }
+  input, textarea { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
+  button { margin-top: 12px; padding: 10px 24px; background: #3366cc; color: #fff;
+    border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }
+</style>
+</head>
+<body>
+<div id="form-col">
+  <h1>Contact Us</h1>
+  <form id="contact-form">
+    <label for="name">Name</label>
+    <input id="name" type="text" placeholder="Your name">
+    <label for="email">Email</label>
+    <input id="email" type="email" placeholder="you@example.com">
+    <label for="message">Message</label>
+    <textarea id="message" rows="4" placeholder="Your message"></textarea>
+    <button id="submit-btn" type="button">Send Message</button>
+  </form>
+  <div id="thanks" style="display:none; margin-top: 20px; color: green; font-size: 18px;">
+    Thanks! We'll be in touch.
+  </div>
+</div>
+<div id="canvas-col">
+  <h3>Live Preview</h3>
+  <canvas id="viz-canvas"></canvas>
+</div>
+<script>
+  const c = document.getElementById('viz-canvas');
+  c.width = c.offsetWidth;
+  c.height = c.offsetHeight;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#e0e0ff';
+  ctx.fillRect(0, 0, c.width, c.height);
+  ctx.fillStyle = '#3366cc';
+  ctx.font = '14px sans-serif';
+  ctx.fillText('Preview Area (~15%)', 20, 80);
+
+  document.getElementById('submit-btn').addEventListener('click', () => {
+    document.getElementById('thanks').style.display = 'block';
+  });
+</script>
+</body>
+</html>

@@ -10,9 +10,11 @@ Windows) but does not modify ``capture_service.py``.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -23,6 +25,8 @@ from typing import Any, Callable
 
 from capturd.walk.schema import (
     BoundingRect,
+    ContentMetadata,
+    ContentMode,
     DemoSpec,
     DemoStep,
     Hotspot,
@@ -228,15 +232,24 @@ OVERLAY_JS = r"""
 # capture_service because that one is hardcoded to headless=True.
 # ---------------------------------------------------------------------------
 
-async def _launch_demo_browser(playwright: Any) -> Any:
-    """Launch a headful Chromium, falling back to Edge/Chrome on Windows."""
+async def _launch_demo_browser(playwright: Any, headless: bool = False) -> Any:
+    """Launch a Chromium browser, falling back to system Chrome channel.
+
+    On Linux/Windows where Playwright-managed Chromium may not be installed,
+    falls back to the system Chrome channel. On Windows also tries Edge.
+    """
     launch_args: list[str] = []
-    attempts: list[dict[str, Any]] = [{"headless": False, "args": launch_args}]
+    attempts: list[dict[str, Any]] = [
+        {"headless": headless, "args": launch_args}
+    ]
+    # Fallback: system Chrome channel (available on most Linux + Win).
+    attempts.append(
+        {"headless": headless, "channel": "chrome", "args": launch_args}
+    )
     if os.name == "nt":
-        attempts.extend([
-            {"headless": False, "channel": "msedge", "args": launch_args},
-            {"headless": False, "channel": "chrome", "args": launch_args},
-        ])
+        attempts.append(
+            {"headless": headless, "channel": "msedge", "args": launch_args}
+        )
     last_error: Exception | None = None
     for kwargs in attempts:
         try:
@@ -245,8 +258,153 @@ async def _launch_demo_browser(playwright: Any) -> Any:
             last_error = exc
             logger.warning("demo launch attempt failed (%s): %s", kwargs, exc)
     raise RuntimeError(
-        f"unable to launch a headful browser for demo recording: {last_error}"
+        f"unable to launch a browser for demo recording: {last_error}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Content-mode detection (W1)
+# ---------------------------------------------------------------------------
+
+
+async def _detect_content_mode(page) -> ContentMetadata:
+    """Probe the current page for canvas / video / iframe / mutation rate.
+
+    Returns a ContentMetadata dataclass with raw signals. Threshold
+    classification is done by ``_classify_content_mode()``.
+    """
+    try:
+        signals = await page.evaluate("""() => {
+            const vw = window.innerWidth;
+            const vh = window.innerHeight;
+            const vpArea = Math.max(1, vw * vh);
+
+            // Largest <canvas> area / viewport area.
+            let maxCanvasArea = 0;
+            const canvases = document.querySelectorAll('canvas');
+            canvases.forEach(c => {
+                const r = c.getBoundingClientRect();
+                const w = Math.max(0, Math.min(r.width, vw) - Math.max(0, -r.x));
+                const h = Math.max(0, Math.min(r.height, vh) - Math.max(0, -r.y));
+                if (r.width > 0 && r.height > 0) {
+                    maxCanvasArea = Math.max(maxCanvasArea, r.width * r.height);
+                }
+            });
+            const canvasAreaPct = (maxCanvasArea / vpArea) * 100;
+
+            const hasVideo = document.querySelectorAll('video').length > 0;
+            const hasIframe = document.querySelectorAll('iframe').length > 0;
+
+            return {
+                canvasAreaPct: +canvasAreaPct.toFixed(2),
+                hasCanvas: canvases.length > 0,
+                hasVideo: hasVideo,
+                hasIframe: hasIframe,
+                mutationRate: 0  // populated below
+            };
+        }""")
+    except Exception as exc:
+        logger.warning("content-mode probe failed: %s", exc)
+        return ContentMetadata()
+
+    # Mutation rate: install a MutationObserver for ~500ms, count mutations.
+    try:
+        mut_count = await page.evaluate("""() => {
+            return new Promise((resolve, reject) => {
+                const body = document.body;
+                if (!body) { resolve(0); return; }
+                let count = 0;
+                const obs = new MutationObserver(() => { count++; });
+                obs.observe(body, { childList: true, subtree: true, attributes: true });
+                const started = performance.now();
+                const timer = setInterval(() => {
+                    const elapsed = performance.now() - started;
+                    if (elapsed >= 400) {
+                        clearInterval(timer);
+                        obs.disconnect();
+                        const rate = (count / elapsed) * 1000;
+                        resolve(+rate.toFixed(2));
+                    }
+                }, 50);
+                // Failsafe: resolve after 1s.
+                setTimeout(() => {
+                    clearInterval(timer);
+                    obs.disconnect();
+                    const elapsed = performance.now() - started;
+                    const rate = (count / Math.max(1, elapsed)) * 1000;
+                    resolve(+rate.toFixed(2));
+                }, 1000);
+            });
+        }""")
+    except Exception:
+        mut_count = 0.0
+
+    return ContentMetadata(
+        hasCanvas=signals.get("hasCanvas", False),
+        canvasAreaPct=signals.get("canvasAreaPct", 0.0),
+        hasVideo=signals.get("hasVideo", False),
+        hasIframe=signals.get("hasIframe", False),
+        mutationRate=float(mut_count),
+    )
+
+
+def _classify_content_mode(cm: ContentMetadata) -> str:
+    """Classify ContentMetadata into a ContentMode string.
+
+    Thresholds:
+      - canvasAreaPct >= 30  → VIDEO (likely a canvas app / game)
+      - 0 < canvasAreaPct < 30 and has DOM chrome → HYBRID
+      - else → DOM
+    """
+    if cm.canvasAreaPct >= 30:
+        return ContentMode.VIDEO.value
+    if cm.canvasAreaPct > 0:
+        return ContentMode.HYBRID.value
+    return ContentMode.DOM.value
+
+
+# ---------------------------------------------------------------------------
+# Agent reply parser (W1)
+# ---------------------------------------------------------------------------
+
+_AGENT_REPLY_JSON_RE = re.compile(r"\{[^}]*\}", re.DOTALL)
+
+
+def _parse_agent_reply(reply: str) -> tuple[str | None, str | None, str | None]:
+    """Parse the LLM's JSON reply into (action, selector, value).
+
+    Returns (None, None, None) if parsing fails.
+    """
+    if not reply:
+        return None, None, None
+
+    # Strip markdown fences.
+    cleaned = re.sub(r"```(?:json)?\s*|\s*```", "", reply).strip()
+
+    # Try direct parse.
+    try:
+        obj = json.loads(cleaned)
+    except json.JSONDecodeError:
+        # Try to find a JSON object in the text.
+        m = _AGENT_REPLY_JSON_RE.search(cleaned)
+        if not m:
+            return None, None, None
+        try:
+            obj = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            return None, None, None
+
+    if not isinstance(obj, dict):
+        return None, None, None
+
+    action = obj.get("action", "").strip().lower()
+    if action not in ("click", "input", "navigate", "done"):
+        return None, None, None
+
+    selector = (obj.get("selector") or "").strip()
+    value = (obj.get("value") or "").strip() if obj.get("value") else None
+
+    return action, selector, value
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +432,7 @@ class DemoRecorder:
       clicks the agent asks "what are you illustrating?" via TTS
       (:mod:`capturd.walk.voice`) and extracts intent from the spoken reply.
 
-    Content-mode detection — TODO(W1). At each step, probe:
+    Content-mode detection — W1. At each step, probe:
       - hasCanvas + canvasAreaPct (largest <canvas> area / viewport area)
       - hasVideo (<video> element present)
       - hasIframe (embedded iframe — YouTube etc.)
@@ -324,6 +482,264 @@ class DemoRecorder:
         self._stopped = threading.Event()
         self._last_url: str | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+
+    # ----- lifecycle ---------------------------------------------------------
+
+    # ----- agent-driven recording (W1) ---------------------------------------
+
+    async def agent_record(self) -> DemoSpec:
+        """Agent-driven recording: LLM picks each next action until done.
+
+        Flow per turn:
+        1. Screenshot + visible DOM text excerpt
+        2. LLM call via RHOBEAR Vertex Gateway
+        3. Execute action (click / input / navigate / done)
+        4. Loop until done or max 30 steps
+
+        The overlay JS capture loop runs in the background; clicks initiated
+        by the agent via page.click() are captured by the overlay bridge and
+        recorded as DemoStep entries with full selectors and hotspots.
+        """
+        from capturd.walk.ai_pipeline import _build_client, _llm_vision
+
+        if self._capture_task is not None:
+            raise DemoRecorderError("recorder already started")
+
+        # ---- Launch browser + capture loop (same as start()) ----------------
+        from playwright.async_api import async_playwright
+
+        self._loop = asyncio.get_running_loop()
+        self._playwright = await async_playwright().start()
+        self._browser = await _launch_demo_browser(self._playwright, headless=True)
+        self._context = await self._browser.new_context(
+            viewport={"width": self.viewport["width"], "height": self.viewport["height"]},
+            device_scale_factor=1,
+            locale="en-US",
+        )
+        self._page = await self._context.new_page()
+        await self._page.expose_function("recordClick", self._on_click)
+        await self._page.add_init_script(OVERLAY_JS)
+        await self._page.goto(self.url, wait_until="domcontentloaded")
+        self._last_url = self._page.url
+        self._started_at_ms = int(time.time() * 1000)
+        self._capture_task = asyncio.create_task(
+            self._capture_loop(), name=f"demo-cap-{self.session_id}"
+        )
+        logger.info("agent recorder launched: session=%s url=%s", self.session_id, self.url)
+
+        # Wait a tick so the overlay installs and first paints settle.
+        await asyncio.sleep(0.3)
+
+        # ---- Agent loop -----------------------------------------------------
+        client = _build_client()
+        model = "rhobear-gw/gemini-3.5-flash"
+        step_history: list[dict[str, Any]] = []
+        previous_dom_hash: int | None = None
+
+        max_steps = 30
+        for turn in range(max_steps):
+            assert self._page is not None
+
+            # ---- 1. Screenshot + DOM ----------------------------------------
+            try:
+                png_bytes = await self._page.screenshot(full_page=False, type="png")
+            except Exception as exc:
+                logger.warning("agent step %d: screenshot failed: %s", turn, exc)
+                png_bytes = b""
+            screenshot_b64 = (
+                base64.b64encode(png_bytes).decode("ascii") if png_bytes else ""
+            )
+
+            # Extract visible viewport outerHTML (truncated for token budget).
+            try:
+                dom_snippet = await self._page.evaluate("""() => {
+                    const body = document.body;
+                    if (!body) return '<body missing>';
+                    const clone = body.cloneNode(true);
+                    clone.querySelectorAll('script, style, noscript, link, meta, svg')
+                        .forEach(e => e.remove());
+                    let html = clone.outerHTML || body.outerHTML || '';
+                    return html.length > 5000 ? html.slice(0, 5000) + '...' : html;
+                }""")
+            except Exception:
+                dom_snippet = "(DOM unavailable)"
+
+            # ---- 2. Content-mode detection ----------------------------------
+            cm = await _detect_content_mode(self._page)
+            content_mode = _classify_content_mode(cm)
+
+            # ---- 3. LLM call ------------------------------------------------
+            history_text = ""
+            for h in step_history:
+                history_text += (
+                    f"  Step {h['index']}: {h['type']} on {h.get('selector', '?')}"
+                    f"{' = ' + h['value'] if h.get('value') else ''}\n"
+                )
+
+            prompt = (
+                f"You are an agent driving a browser to record a product demo "
+                f"walkthrough.\n\n"
+                f"Demo name: {self.name}\n"
+                f"Demo goal: {self.goal}\n"
+                f"Current URL: {self._safe_url_sync()}\n"
+                f"Page title: {self._safe_title_sync()}\n"
+                f"Content mode: {content_mode} (canvas={cm.canvasAreaPct:.1f}%, "
+                f"video={cm.hasVideo}, iframe={cm.hasIframe}, "
+                f"mutRate={cm.mutationRate:.1f}/s)\n\n"
+                f"Steps taken so far ({len(step_history)}/30):\n{history_text}\n"
+                f"Relevant DOM excerpt (outerHTML, truncated):\n"
+                f"```html\n{dom_snippet}\n```\n\n"
+                f"Decide the NEXT action to advance the demo toward the goal. "
+                f"Output valid JSON only (no prose, no fences):\n"
+                f'{{"action": "click"|"input"|"navigate"|"done", '
+                f'"selector": "CSS selector", '
+                f'"value": "text for input or URL for navigate"}}\n\n'
+                f"Rules:\n"
+                f"- Use precise, stable CSS selectors (prefer #id, then .class, "
+                f"then tag[name='...']).\n"
+                f"- For input fields: action=input, selector=the field, "
+                f"value=the text to type.\n"
+                f"- For navigation: action=navigate, value=the full URL.\n"
+                f"- If the flow is complete, return action=done.\n"
+                f"- If you hit a dead end or error page, return action=done.\n"
+                f"- Do NOT repeat the same action on the same selector more "
+                f"than twice consecutively.\n"
+                f"- If the same DOM appears 3 times in a row, return action=done.\n"
+            )
+
+            try:
+                reply = await _llm_vision(
+                    client,
+                    model=model,
+                    prompt=prompt,
+                    image_b64=screenshot_b64,
+                    max_tokens=300,
+                )
+            except Exception as exc:
+                logger.warning("agent step %d: LLM call failed: %s", turn, exc)
+                break
+
+            # ---- 4. Parse LLM response -------------------------------------
+            action, selector, value = _parse_agent_reply(reply)
+            logger.info(
+                "agent step %d: action=%s selector=%s value=%s",
+                turn, action, selector, value,
+            )
+
+            if action == "done":
+                logger.info("agent finished after %d steps", len(step_history))
+                break
+
+            if not action or not selector:
+                logger.warning(
+                    "agent step %d: unparseable reply: %s", turn, reply
+                )
+                step_history.append(
+                    {"index": turn, "type": "unparseable", "selector": "?"}
+                )
+                continue
+
+            # ---- 5. Execute action ------------------------------------------
+            try:
+                await self._execute_agent_action(action, selector, value)
+            except Exception as exc:
+                logger.warning("agent step %d: action failed: %s", turn, exc)
+                step_history.append({
+                    "index": turn, "type": action, "selector": selector,
+                    "value": value, "error": str(exc),
+                })
+                continue
+
+            # ---- 6. Wait for the capture loop to process the click ----------
+            await asyncio.sleep(0.5)
+
+            # ---- 7. Emit DemoStep with content metadata ---------------------
+            step_index = len(self.spec.steps) - 1
+            if step_index >= 0:
+                step = self.spec.steps[step_index]
+                step.contentMode = content_mode
+                step.contentMetadata = asdict(cm)
+
+            # ---- 8. Detect stuck loop ---------------------------------------
+            try:
+                current_dom_hash = await self._page.evaluate(
+                    "() => document.body ? document.body.outerHTML.length : 0"
+                )
+            except Exception:
+                current_dom_hash = None
+
+            if current_dom_hash == previous_dom_hash:
+                self._stuck_same_dom_count = (
+                    getattr(self, "_stuck_same_dom_count", 0) + 1
+                )
+                if self._stuck_same_dom_count >= 3:
+                    logger.info("agent: same DOM 3x in a row — finishing")
+                    break
+            else:
+                self._stuck_same_dom_count = 0
+            previous_dom_hash = current_dom_hash
+
+            step_history.append({
+                "index": turn, "type": action, "selector": selector, "value": value,
+            })
+
+        # ---- Teardown -------------------------------------------------------
+        self._stopped.set()
+        try:
+            await asyncio.wait_for(self._capture_task, timeout=5.0)
+        except asyncio.TimeoutError:
+            self._capture_task.cancel()
+        await self._teardown_browser()
+        self._write_outputs()
+        logger.info(
+            "agent_record complete: session=%s steps=%d",
+            self.session_id, len(self.spec.steps),
+        )
+        return self.spec
+
+    async def _execute_agent_action(
+        self, action: str, selector: str, value: str | None
+    ) -> None:
+        """Execute a single agent-chosen action via Playwright."""
+        assert self._page is not None
+
+        if action == "click":
+            # Ensure element is visible before clicking.
+            try:
+                await self._page.wait_for_selector(selector, state="visible", timeout=3000)
+            except Exception:
+                pass  # Element might be present but offscreen; try anyway.
+            await self._page.click(selector, timeout=5000)
+            await asyncio.sleep(0.3)  # Let the page react.
+
+        elif action == "input":
+            await self._page.wait_for_selector(selector, state="visible", timeout=3000)
+            await self._page.fill(selector, value or "", timeout=5000)
+            await asyncio.sleep(0.2)
+
+        elif action == "navigate":
+            if value and (value.startswith("http://") or value.startswith("https://")):
+                await self._page.goto(value, wait_until="domcontentloaded", timeout=15000)
+                self._last_url = self._page.url
+                await asyncio.sleep(0.5)
+
+    def _safe_url_sync(self) -> str:
+        """Get current URL without awaiting (for prompt building)."""
+        try:
+            return self._page.url if self._page else self._last_url or ""
+        except Exception:
+            return self._last_url or ""
+
+    def _safe_title_sync(self) -> str:
+        """Get current title (sync — may be stale)."""
+        # Best-effort: for the LLM prompt, a slightly stale title is fine.
+        try:
+            if self._page:
+                # We can't await here; use last known.
+                return getattr(self, "_last_title", "")
+        except Exception:
+            pass
+        return ""
 
     # ----- lifecycle ---------------------------------------------------------
 
@@ -381,26 +797,34 @@ class DemoRecorder:
             await asyncio.wait_for(self._capture_task, timeout=5.0)
         except asyncio.TimeoutError:
             self._capture_task.cancel()
-        try:
-            if self._context:
-                await self._context.close()
-        except Exception:
-            pass
-        try:
-            if self._browser:
-                await self._browser.close()
-        except Exception:
-            pass
-        try:
-            if self._playwright:
-                await self._playwright.stop()
-        except Exception:
-            pass
+        await self._teardown_browser()
         self._write_outputs()
         logger.info(
-            "demo recorder stopped: session=%s steps=%d", self.session_id, len(self.spec.steps)
+            "demo recorder stopped: session=%s steps=%d",
+            self.session_id, len(self.spec.steps),
         )
         return self.spec
+
+    async def _teardown_browser(self) -> None:
+        """Close browser context, browser, and playwright. Idempotent."""
+        if self._context:
+            try:
+                await self._context.close()
+            except Exception:
+                pass
+            self._context = None
+        if self._browser:
+            try:
+                await self._browser.close()
+            except Exception:
+                pass
+            self._browser = None
+        if self._playwright:
+            try:
+                await self._playwright.stop()
+            except Exception:
+                pass
+            self._playwright = None
 
     # ----- click bridge ------------------------------------------------------
 
@@ -513,10 +937,17 @@ class DemoManager:
     def new_session_id(self) -> str:
         return uuid.uuid4().hex[:12]
 
-    def start(self, payload: dict[str, Any]) -> tuple[DemoRecorder, str]:
+    def start(self, payload: dict[str, Any]) -> tuple[Any, str, str]:
+        """Create a DemoRecorder and return (recorder, session_id, mode).
+
+        mode is 'human' (default — headful, user drives) or 'agent' (LLM picks
+        each next click via agent_record). The caller uses this to decide
+        whether to call ``recorder.start()`` or ``recorder.agent_record()``.
+        """
         url = (payload.get("url") or "").strip()
         name = (payload.get("name") or "Untitled demo").strip()
         goal = (payload.get("goal") or "").strip()
+        mode = payload.get("mode", "human")
         if not url:
             raise DemoRecorderError("url is required")
         if not (url.startswith("http://") or url.startswith("https://")):
@@ -536,7 +967,7 @@ class DemoManager:
         )
         with self._lock:
             self._sessions[session_id] = recorder
-        return recorder, session_id
+        return recorder, session_id, mode
 
     def get(self, session_id: str) -> DemoRecorder:
         with self._lock:
@@ -584,6 +1015,8 @@ def run_async(coro: Any) -> Any:
 
 __all__ = [
     "BoundingRect",
+    "ContentMetadata",
+    "ContentMode",
     "DemoManager",
     "DemoRecorder",
     "DemoRecorderError",
@@ -592,5 +1025,8 @@ __all__ = [
     "Hotspot",
     "Interaction",
     "OVERLAY_JS",
+    "_detect_content_mode",
+    "_classify_content_mode",
+    "_parse_agent_reply",
     "run_async",
 ]

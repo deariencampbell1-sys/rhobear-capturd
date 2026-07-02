@@ -138,7 +138,7 @@ class DemoForge:
     # Recording (Phase 1 — delegating to DemoManager)
     # ------------------------------------------------------------------
 
-    def start_recording(self, payload: dict[str, Any]) -> tuple[Any, str]:
+    def start_recording(self, payload: dict[str, Any]) -> tuple[Any, str, str]:
         return self.demo_manager.start(payload)
 
     def get_recorder(self, session_id: str) -> Any:

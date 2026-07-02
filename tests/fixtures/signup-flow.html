@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Sign Up Flow</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: sans-serif; display: flex; justify-content: center;
+    align-items: center; min-height: 100vh; background: #f5f5f5; }
+  .card { background: #fff; padding: 32px; border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1); width: 360px; }
+  h1 { margin-bottom: 20px; font-size: 24px; }
+  label { display: block; margin: 12px 0 4px; font-weight: 600; font-size: 14px; }
+  input { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 16px; }
+  button { margin-top: 16px; padding: 12px 0; width: 100%; background: #3366cc;
+    color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 18px; }
+  button:hover { background: #254ea0; }
+  .step { display: none; }
+  .step.active { display: block; }
+  .confirm-box { text-align: center; padding: 20px 0; }
+  .confirm-box p { margin: 10px 0; }
+  #confirm-btn { background: #28a745; }
+  #confirm-btn:hover { background: #1e7e34; }
+</style>
+</head>
+<body>
+
+<div class="card">
+  <div id="step-signup" class="step active">
+    <h1>Create Account</h1>
+    <form id="signup-form">
+      <label for="username">Username</label>
+      <input id="username" type="text" placeholder="Choose a username">
+      <label for="password">Password</label>
+      <input id="password" type="password" placeholder="Min 8 characters">
+      <button id="signup-btn" type="button">Sign Up</button>
+    </form>
+  </div>
+
+  <div id="step-confirm" class="step">
+    <div class="confirm-box">
+      <h1>Confirm Sign Up</h1>
+      <p>Please confirm your account creation.</p>
+      <button id="confirm-btn" type="button">Confirm</button>
+    </div>
+  </div>
+
+  <div id="step-done" class="step">
+    <div class="confirm-box">
+      <h1>Welcome!</h1>
+      <p>Your account has been created successfully.</p>
+      <p style="color: green; font-size: 24px;">✓</p>
+    </div>
+  </div>
+</div>
+
+<script>
+  document.getElementById('signup-btn').addEventListener('click', () => {
+    document.getElementById('step-signup').classList.remove('active');
+    document.getElementById('step-confirm').classList.add('active');
+  });
+
+  document.getElementById('confirm-btn').addEventListener('click', () => {
+    document.getElementById('step-confirm').classList.remove('active');
+    document.getElementById('step-done').classList.add('active');
+  });
+</script>
+
+</body>
+</html>

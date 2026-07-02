@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from typing import Any
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -59,12 +60,91 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
-    # Spine stub: workers W1-W4 replace this with real dispatch to the coordinator.
-    # We keep the argparse contract stable so their diff stays small.
+
+    if args.cmd == "record":
+        return _cmd_record(args)
+
+    # Other subcommands — spine stubs until W2-W4.
     sys.stderr.write(
-        f"[spine-stub] `capturd walk {args.cmd}` — implementation lands in W1-W4.\n"
+        f"[spine-stub] `capturd walk {args.cmd}` — implementation lands in W2-W4.\n"
     )
-    sys.stdout.write(json.dumps(vars(args), indent=2) + "\n")
+    return 0
+
+
+def _cmd_record(args: argparse.Namespace) -> int:
+    """Dispatch `capturd walk record` — agent or human mode."""
+    import asyncio
+
+    from capturd.walk.recorder import DemoManager, DemoRecorderError
+
+    parts = args.viewport.split("x")
+    viewport = {"width": 1440, "height": 900}
+    if len(parts) == 2:
+        try:
+            viewport = {"width": int(parts[0]), "height": int(parts[1])}
+        except ValueError:
+            sys.stderr.write(f"invalid viewport: {args.viewport}\n")
+            return 1
+
+    payload: dict[str, Any] = {
+        "url": args.url,
+        "name": args.name,
+        "goal": args.goal,
+        "viewport": viewport,
+        "mode": "agent" if args.agent else "human",
+    }
+
+    mgr = DemoManager()
+
+    try:
+        recorder, session_id, mode = mgr.start(payload)
+    except DemoRecorderError as exc:
+        sys.stderr.write(f"record failed: {exc}\n")
+        return 1
+
+    if mode == "agent":
+        sys.stderr.write(f"Recording (agent mode) session={session_id}...\n")
+        try:
+            spec = asyncio.run(recorder.agent_record())
+        except DemoRecorderError as exc:
+            sys.stderr.write(f"agent record failed: {exc}\n")
+            return 1
+        sys.stdout.write(json.dumps({
+            "sessionId": session_id,
+            "mode": "agent",
+            "steps": len(spec.steps),
+        }, indent=2) + "\n")
+        sys.stderr.write(
+            f"Done. {len(spec.steps)} steps recorded → "
+            f"demos/{session_id}/demo.json\n"
+        )
+    else:
+        sys.stderr.write(
+            f"Recording (human mode) session={session_id}.\n"
+            f"Open the browser and click through the flow. "
+            f"Send SIGINT or call `capturd walk stop --session-id {session_id}` to finish.\n"
+        )
+        try:
+            asyncio.run(recorder.start())
+        except DemoRecorderError as exc:
+            sys.stderr.write(f"human record failed: {exc}\n")
+            return 1
+        # Human mode: the recorder loop runs in background. The user stops
+        # it from another terminal. We keep the event loop alive.
+        try:
+            asyncio.get_event_loop().run_forever()
+        except KeyboardInterrupt:
+            spec = recorder.stop()
+            sys.stdout.write(json.dumps({
+                "sessionId": session_id,
+                "mode": "human",
+                "steps": len(spec.steps),
+            }, indent=2) + "\n")
+            sys.stderr.write(
+                f"Done. {len(spec.steps)} steps recorded → "
+                f"demos/{session_id}/demo.json\n"
+            )
+
     return 0
 
 
