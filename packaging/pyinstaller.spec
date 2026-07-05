@@ -173,7 +173,7 @@ for name in ('ffmpeg.exe', 'ffprobe.exe'):
 # ── icon ────────────────────────────────────────────────────────────────────
 _icon_path = SPEC_DIR / 'capturd.ico'
 if not _icon_path.is_file():
-    logo_src = ROOT / 'assets' / 'sunsponge-logo-wide.png'
+    logo_src = ROOT / 'assets' / 'capturd-logo-wide.png'
     if logo_src.is_file():
         try:
             from PIL import Image

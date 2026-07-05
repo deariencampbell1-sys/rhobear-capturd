@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "capturd"
 version = "0.2.0"
-description = "Captur'd by Sun Sponge — post-work product capture. Rested-state stills + agent-made walkthrough demos with voice-synced zoom, live DOM fidelity, and an MCP surface any RHOBEAR agent can drive."
+description = "RHOBEAR Captur'd — post-work product capture. Rested-state stills + agent-made walkthrough demos with voice-synced zoom, live DOM fidelity, and an MCP surface any RHOBEAR agent can drive."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

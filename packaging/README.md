@@ -1,7 +1,7 @@
 # Capturd MSIX Packaging
 
 Build a self-contained `.msix` installer so users can double-click to install
-**Captur'd by Sun Sponge** on Windows 10+.
+**RHOBEAR Captur'd** on Windows 10+.
 
 ## Prerequisites
 
@@ -89,7 +89,7 @@ Get-AppxPackageManifest -Package (Get-AppxPackage -Name "SunSpongeLLC.Capturd")
 | Playwright Chromium | Bundled from the local `ms-playwright` cache. |
 | faster-whisper `small.en` | Bundled from HF cache (~500 MB). Enables voice mode offline. |
 | `ffmpeg.exe` / `ffprobe.exe` | Static builds from gyan.dev, bundled inside the binary. |
-| App icons | `assets/sunsponge-logo-wide.png` and `assets/sunsponge-mark.png`. |
+| App icons | `assets/capturd-logo-wide.png` and `assets/capturd-bear.png`. |
 
 ## Capabilities declared
 

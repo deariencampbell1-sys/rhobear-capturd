@@ -11,10 +11,10 @@
     Version="0.2.0.0" />
 
   <Properties>
-    <DisplayName>Captur'd by Sun Sponge</DisplayName>
+    <DisplayName>RHOBEAR Captur'd</DisplayName>
     <PublisherDisplayName>SunSponge LLC</PublisherDisplayName>
     <Description>Post-work product capture — stills and agent-made walkthroughs.</Description>
-    <Logo>assets\sunsponge-mark.png</Logo>
+    <Logo>assets\capturd-bear.png</Logo>
   </Properties>
 
   <Dependencies>
@@ -34,13 +34,13 @@
       Executable="capturd.exe"
       EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
-        DisplayName="Captur'd by Sun Sponge"
+        DisplayName="RHOBEAR Captur'd"
         Description="Post-work product capture — stills and agent-made walkthroughs."
-        Square150x150Logo="assets\sunsponge-mark.png"
-        Square44x44Logo="assets\sunsponge-mark.png"
+        Square150x150Logo="assets\capturd-bear.png"
+        Square44x44Logo="assets\capturd-bear.png"
         BackgroundColor="transparent">
-        <uap:DefaultTile Wide310x150Logo="assets\sunsponge-logo-wide.png" />
-        <uap:SplashScreen Image="assets\sunsponge-logo-wide.png" />
+        <uap:DefaultTile Wide310x150Logo="assets\capturd-logo-wide.png" />
+        <uap:SplashScreen Image="assets\capturd-logo-wide.png" />
       </uap:VisualElements>
     </Application>
   </Applications>

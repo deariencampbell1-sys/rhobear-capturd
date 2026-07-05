@@ -46,7 +46,7 @@ DEFAULT_CRAWL_CONCURRENCY = 6
 DEFAULT_DISCOVERY_TIMEOUT_MS = 15000
 DEFAULT_DISCOVERY_WAIT_MS = 150
 
-USER_AGENT = "SunSponge Capture/0.1 (+https://github.com/deariencampbell1-sys/sunsponge-capture)"
+USER_AGENT = "Capturd/0.2"
 
 NON_PAGE_EXTENSIONS = {
     ".7z",

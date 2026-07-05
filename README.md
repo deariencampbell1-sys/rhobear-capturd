@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="assets/sunsponge-logo-wide.png" alt="Captur'd by Sun Sponge" width="420">
+  <img src="assets/capturd-logo-wide.png" alt="RHOBEAR Captur'd" width="420">
 </p>
 
-<h1 align="center">Captur'd by Sun Sponge</h1>
+<h1 align="center">RHOBEAR Captur'd</h1>
 
 <p align="center">
   <b>Post-work product capture. Stills and walkthroughs, made by an agent, not a human.</b><br>
@@ -23,7 +23,7 @@
 ## Two modes, one lane
 
 ### `capturd shots` — rested-state screenshots, in bulk
-The original SunSponge Capture, unchanged. Most screenshot tools fire too early — mid-animation,
+The original RHOBEAR Captur'd, unchanged. Most screenshot tools fire too early — mid-animation,
 before fonts load, while a carousel is sliding — and you get junk. Captur'd takes **rested** shots:
 animations disabled, fonts awaited, motion stopped, scroll reset, then every page × every viewport ×
 every color scheme, in one run.
