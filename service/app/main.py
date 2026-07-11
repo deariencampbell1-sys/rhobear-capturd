@@ -203,5 +203,23 @@ async def mobile_studio():
     return HTMLResponse("<h1>Captur'd</h1><p>mobile studio missing</p>")
 
 
+@app.get("/manifest.webmanifest")
+async def manifest():
+    p = WEB / "manifest.webmanifest"
+    if p.is_file():
+        return FileResponse(str(p), media_type="application/manifest+json")
+    return JSONResponse({"error": "no manifest"}, status_code=404)
+
+
+@app.get("/sw.js")
+async def service_worker():
+    """PWA service worker — served at root with root scope so it controls the whole app."""
+    p = WEB / "sw.js"
+    if p.is_file():
+        return FileResponse(str(p), media_type="application/javascript",
+                            headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"})
+    return JSONResponse({"error": "no sw"}, status_code=404)
+
+
 if (WEB / "assets").is_dir():
     app.mount("/assets", StaticFiles(directory=str(WEB / "assets")), name="assets")

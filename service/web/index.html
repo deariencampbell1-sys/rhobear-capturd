@@ -6,6 +6,14 @@
 <title>RHOBEAR Captur'd — Studio</title>
 <meta name="description" content="Your app, filmed by an agent — human typing, tight zooms, HD voiceover. The Captur'd studio.">
 <link rel="icon" type="image/png" href="/assets/capturd-bear.png">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#ff7d1f">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Captur'd">
+<link rel="apple-touch-icon" href="/assets/icons/apple-touch-icon.png">
+<script>if('serviceWorker' in navigator){window.addEventListener('load',function(){navigator.serviceWorker.register('/sw.js').catch(function(){})});}</script>
 <script>
   // Device-explicit surfaces: phones get the purpose-built mobile studio.
   (function () {

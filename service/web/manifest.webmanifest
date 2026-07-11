@@ -1,0 +1,22 @@
+{
+  "id": "rhobear-capturd",
+  "name": "RHOBEAR Captur'd",
+  "short_name": "Captur'd",
+  "description": "Agent-made product capture — deterministic screenshots (free) and AI walkthrough demo videos with HD voiceover. A 4-hour job in ~4 minutes.",
+  "start_url": "/?src=pwa",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone"],
+  "orientation": "any",
+  "background_color": "#120c02",
+  "theme_color": "#ff7d1f",
+  "lang": "en",
+  "dir": "ltr",
+  "categories": ["productivity", "graphics", "developer"],
+  "icons": [
+    { "src": "/assets/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/assets/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/assets/icons/icon-192-maskable.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "/assets/icons/icon-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
