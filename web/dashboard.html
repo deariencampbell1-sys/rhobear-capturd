@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Captur'd — dashboard</title>
+<title>RHOBEAR Captur'd — dashboard</title>
 <meta name="description" content="Your Captur'd account: generation history, usage, and hosted MCP endpoint." />
 
 <!--
@@ -35,7 +35,7 @@
     --bg-glass: rgba(15,21,28,0.86);
     --line: rgba(151,183,196,0.12); --line-strong: rgba(151,183,196,0.24);
     --text: #e8eef2; --text-2: #9db0bb; --text-3: #5f7280;
-    --accent: #f2c230; --accent-press: #dfae2c; --accent-soft: rgba(242,194,48,0.13); --accent-ink: #1a1206;
+    --accent: #4a9eff; --accent-press: #2e7fdd; --accent-soft: rgba(74,158,255,0.13); --accent-ink: #04121f;
     --warn: #e0743a; --warn-soft: rgba(224,116,58,0.14);
     --danger: #e05252; --danger-soft: rgba(224,82,82,0.13);
     --ok: #53c98b; --ok-soft: rgba(83,201,139,0.13);
@@ -189,17 +189,34 @@
   }
   .toast.show { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
 </style>
+<!-- RHOBEAR premium material: Nacelle (served CORS from capturd.rhobear.ai) + liquid glass -->
+<link rel="stylesheet" href="https://capturd.rhobear.ai/assets/nacelle/nacelle-x.css">
+<style>
+  :root{
+    --glass-c1:#00dfff; --glass-c2:#7c5cff; --glass-c3:#d83fff;
+    --glass-body:linear-gradient(168deg,rgba(255,255,255,.058),rgba(255,255,255,.022) 52%,rgba(255,255,255,.04));
+    --glass-blur:blur(22px) saturate(1.4);
+    --glass-rim:inset 0 1px 0 rgba(255,255,255,.16),inset 0 -1px 0 rgba(255,255,255,.04);
+    --glass-lift:0 10px 34px rgba(0,0,0,.42);
+  }
+  .card{position:relative;background:var(--glass-body),rgba(9,10,12,.45);
+    backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);
+    border:none;box-shadow:var(--glass-rim),var(--glass-lift)}
+  .card::before{content:"";position:absolute;top:0;left:9%;right:9%;height:1px;
+    pointer-events:none;background:linear-gradient(90deg,transparent,rgba(255,255,255,.5),transparent)}
+  .rail-top{background:var(--glass-body),rgba(8,8,16,.75);
+    backdrop-filter:blur(16px) saturate(1.4);-webkit-backdrop-filter:blur(16px) saturate(1.4)}
+  .btn-primary{background:var(--glass-body),rgba(74,158,255,.30) !important;color:#fff !important;
+    box-shadow:var(--glass-rim),0 8px 24px -10px rgba(74,158,255,.35)}
+  .btn-primary:hover{background:var(--glass-body),rgba(74,158,255,.42) !important}
+</style>
 </head>
 <body>
 
 <div class="rail-top">
-  <a class="brand" href="index.html" aria-label="Captur'd home">
-    <svg class="mark" width="20" height="20" viewBox="0 0 32 32" fill="none" aria-hidden="true">
-      <rect x="1.2" y="1.2" width="29.6" height="29.6" rx="8" stroke="#f2c230" stroke-width="1.6"/>
-      <circle cx="16" cy="16" r="7.4" stroke="#f7d669" stroke-width="1.6"/>
-      <circle cx="16" cy="16" r="2.4" fill="#f2c230"/>
-    </svg>
-    <span class="wordmark">CAPTUR'D</span>
+  <a class="brand" href="index.html" aria-label="RHOBEAR Captur'd home">
+    <img class="mark" src="assets/capturd-bear.png" alt="" width="20" height="20" style="filter:drop-shadow(0 0 6px rgba(74,158,255,.5))">
+    <span class="wordmark">RHOBEAR <span style="color:var(--accent)">CAPTUR'D</span></span>
   </a>
   <div class="rail-right">
     <span class="session-pill" id="session-pill" data-state="loading"><i class="dot"></i><span id="session-pill-label">Checking session…</span></span>
@@ -221,11 +238,7 @@
   </section>
 
   <section id="view-signed-out">
-    <svg class="mark-lg" viewBox="0 0 32 32" fill="none" aria-hidden="true">
-      <rect x="1.2" y="1.2" width="29.6" height="29.6" rx="8" stroke="#f2c230" stroke-width="1.6"/>
-      <circle cx="16" cy="16" r="7.4" stroke="#f7d669" stroke-width="1.6"/>
-      <circle cx="16" cy="16" r="2.4" fill="#f2c230"/>
-    </svg>
+    <img class="mark-lg" src="assets/capturd-bear.png" alt="" style="filter:drop-shadow(0 8px 28px rgba(74,158,255,.45))">
     <h1>Sign in to see your generations</h1>
     <p>Your Captur'd account holds generation history, usage, and your hosted MCP endpoint. The local CLI never needs this — it's unlimited on its own.</p>
     <button class="btn btn-primary" id="btn-sign-in">Sign in</button>

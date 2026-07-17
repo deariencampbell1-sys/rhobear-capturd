@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Captur'd - your product films its own demo</title>
+<title>RHOBEAR Captur'd — your product films its own demo</title>
 <meta name="description" content="Point Captur'd at your site, say what to show, and get a polished walkthrough video. Agent-made product demos with cinematic zoom, a live cursor, and voiceover. No editing." />
 
 <!--
@@ -37,10 +37,10 @@
     --text: #eceef1;
     --muted: #9aa2ad;
     --muted-2: #6c7480;
-    --accent: #f2c230;
-    --accent-2: #dfae2c;
-    --accent-ink: #1a1206;
-    --good: #35c47a;
+    --accent: #4a9eff;
+    --accent-2: #2e7fdd;
+    --accent-ink: #04121f;
+    --good: #00ff88;
     --r: 16px;
     --r-sm: 12px;
     --pill: 999px;
@@ -60,7 +60,7 @@
   h1, h2, h3 { margin: 0; letter-spacing: -0.02em; line-height: 1.05; font-weight: 680; }
   p { margin: 0; }
   img, video { max-width: 100%; display: block; }
-  ::selection { background: rgba(242,194,48,0.35); }
+  ::selection { background: rgba(74,158,255,0.35); }
 
   .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 24px; }
   .section { padding: 96px 0; }
@@ -177,7 +177,7 @@
   }
   .textarea { min-height: 84px; resize: vertical; line-height: 1.5; }
   .input::placeholder, .textarea::placeholder { color: var(--muted-2); }
-  .input:focus, .textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(242,194,48,0.18); }
+  .input:focus, .textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(74,158,255,0.18); }
 
   .gh-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   .gh-pill { display: none; align-items: center; gap: 8px; font-size: 13.5px; color: var(--text); background: #0b0e13; border: 1px solid var(--line-2); border-radius: var(--pill); padding: 8px 14px; }
@@ -214,7 +214,7 @@
   }
   .card:hover { transform: translateY(-3px); border-color: var(--line-2); }
   .card[aria-pressed="true"] { border-color: var(--accent); background: var(--panel-2); box-shadow: 0 0 0 1px var(--accent) inset; }
-  .card .ic { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; background: rgba(242,194,48,0.12); color: var(--accent-2); }
+  .card .ic { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; background: rgba(74,158,255,0.12); color: var(--accent-2); }
   .card h3 { font-size: 17px; font-weight: 640; }
   .card p { color: var(--muted); font-size: 13.5px; }
   .card .tick { position: absolute; top: 16px; right: 16px; color: var(--accent); opacity: 0; transition: opacity .15s ease; }
@@ -288,19 +288,65 @@
   .reveal.in { opacity: 1; transform: none; }
   @media (prefers-reduced-motion: reduce) { .reveal { opacity: 1; transform: none; transition: none; } }
 </style>
+<!-- RHOBEAR premium material: Nacelle (served CORS from capturd.rhobear.ai) + liquid glass -->
+<link rel="stylesheet" href="https://capturd.rhobear.ai/assets/nacelle/nacelle-x.css">
+<style>
+  /* ══ PREMIUM PASS — liquid glass. BODY (frosted blur) + RIM (specular) + EDGE
+     (plasma stroke, FIXED trio = Rho). Captur'd blue lives only in the bloom. ══ */
+  :root{
+    --glass-c1:#00dfff; --glass-c2:#7c5cff; --glass-c3:#d83fff;
+    --glass-body:linear-gradient(168deg,rgba(255,255,255,.058),rgba(255,255,255,.022) 52%,rgba(255,255,255,.04));
+    --glass-blur:blur(22px) saturate(1.4);
+    --glass-rim:inset 0 1px 0 rgba(255,255,255,.16),inset 0 -1px 0 rgba(255,255,255,.04);
+    --glass-lift:0 10px 34px rgba(0,0,0,.42);
+    --glass-edge-w:1.1px; --glass-ease:cubic-bezier(.4,0,.2,1);
+  }
+  @property --edge-angle{syntax:'<angle>';initial-value:200deg;inherits:false}
+  @keyframes edgeflow{to{--edge-angle:560deg}}
+  .panel,.card,.acc-item{position:relative;
+    background:var(--glass-body),rgba(9,10,12,.45);
+    backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);
+    border:none;box-shadow:var(--glass-rim),var(--glass-lift)}
+  header.nav{background:var(--glass-body),rgba(8,8,16,.72);
+    backdrop-filter:blur(18px) saturate(1.5);-webkit-backdrop-filter:blur(18px) saturate(1.5)}
+  .panel::before,.card::before{content:"";position:absolute;top:0;left:9%;right:9%;height:1px;
+    pointer-events:none;background:linear-gradient(90deg,transparent,rgba(255,255,255,.6),transparent)}
+  /* plasma edge — masked conic ring on the main form; arrives on card hover */
+  .panel::after,.card::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+    padding:var(--glass-edge-w);
+    background:conic-gradient(from var(--edge-angle,200deg) at 50% 50%,
+      var(--glass-c1),var(--glass-c2) 28%,var(--glass-c3) 52%,var(--glass-c2) 76%,var(--glass-c1));
+    -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+    -webkit-mask-composite:xor;
+    mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask-composite:exclude;
+    opacity:.4;transition:opacity .28s var(--glass-ease)}
+  .card::after{opacity:0}
+  .card:hover::after{opacity:.45}
+  .panel:focus-within{box-shadow:var(--glass-rim),var(--glass-lift),0 0 34px -8px rgba(74,158,255,.4)}
+  .panel:focus-within::after{opacity:1;animation:edgeflow 7s linear infinite}
+  /* CTAs = raised glass ringed in accent — label crisp, never a solid blob */
+  .btn-primary{background:var(--glass-body),rgba(74,158,255,.30);color:#fff;
+    backdrop-filter:blur(12px) saturate(1.2);-webkit-backdrop-filter:blur(12px) saturate(1.2);
+    box-shadow:var(--glass-rim),0 8px 24px -10px rgba(74,158,255,.35)}
+  .btn-primary:hover{background:var(--glass-body),rgba(74,158,255,.42);
+    box-shadow:var(--glass-rim),0 10px 30px -8px rgba(74,158,255,.45)}
+  .input,.textarea{background:rgba(13,13,26,.55);
+    backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.05)}
+  .input:focus,.textarea:focus{box-shadow:inset 0 1px 0 rgba(255,255,255,.05),
+    0 0 0 3px rgba(74,158,255,.14),0 0 18px -4px rgba(74,158,255,.35)}
+  .freestrip .chk{color:var(--good)}
+  @media (prefers-reduced-motion:reduce){.panel:focus-within::after{animation:none}}
+</style>
 </head>
 <body>
 
 <!-- ============================ NAV ============================ -->
 <header class="nav">
   <div class="wrap nav-inner">
-    <a class="brand" href="#top" aria-label="Captur'd home">
-      <svg class="mark" viewBox="0 0 32 32" fill="none" aria-hidden="true">
-        <rect x="1.2" y="1.2" width="29.6" height="29.6" rx="8" stroke="#f2c230" stroke-width="1.6"/>
-        <circle cx="16" cy="16" r="7.4" stroke="#dfae2c" stroke-width="1.6"/>
-        <circle cx="16" cy="16" r="2.4" fill="#f2c230"/>
-      </svg>
-      Captur'd
+    <a class="brand" href="#top" aria-label="RHOBEAR Captur'd home">
+      <img class="mark" src="assets/capturd-bear.png" alt="" style="filter:drop-shadow(0 0 7px rgba(74,158,255,.5))">
+      RHOBEAR&nbsp;<span style="color:var(--accent)">Captur'd</span>
     </a>
     <nav class="nav-links" aria-label="Primary">
       <a href="#how">How it works</a>
@@ -547,8 +593,8 @@
 <footer>
   <div class="wrap foot">
     <span class="brand" style="display:flex;align-items:center;gap:9px;">
-      <svg width="22" height="22" viewBox="0 0 32 32" fill="none" aria-hidden="true"><rect x="1.2" y="1.2" width="29.6" height="29.6" rx="8" stroke="#f2c230" stroke-width="1.6"/><circle cx="16" cy="16" r="7.4" stroke="#dfae2c" stroke-width="1.6"/><circle cx="16" cy="16" r="2.4" fill="#f2c230"/></svg>
-      Captur'd
+      <img src="assets/capturd-bear.png" alt="" width="22" height="22" style="filter:drop-shadow(0 0 6px rgba(74,158,255,.5))">
+      RHOBEAR&nbsp;<span style="color:var(--accent)">Captur'd</span>
     </span>
     <a href="#how">How it works</a>
     <a href="#results">Results</a>
