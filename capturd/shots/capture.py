@@ -875,6 +875,10 @@ def build_capture_plan(payload: dict[str, Any]) -> tuple[list[str], list[Capture
         # named here is silently dropped — which is why auth has to be threaded through
         # explicitly rather than just passed in the payload.
         "cookies": list(payload.get("cookies") or []),
+        # Deterministic state sweep — click every mapped control and capture what it opens.
+        "states": bool(payload.get("states", False)),
+        "states_limit": max(1, min(60, int(payload.get("states_limit") or 20))),
+        "state_wait_ms": max(200, int(payload.get("state_wait_ms") or 900)),
         "capture_count": len(targets),
         "crawl": crawl_enabled,
         "local": local_enabled,
@@ -920,6 +924,129 @@ def _target_context_key(target: CaptureTarget) -> tuple[str, str, int, int, str]
     return (_site_host_key(parsed.hostname), target.viewport_id, target.width, target.height, target.scheme)
 
 
+# ── deterministic state sweep ────────────────────────────────────────────────
+# A resting screenshot only ever shows a page with everything closed. Every modal,
+# dropdown, tab panel, accordion and toggle is invisible to a page-level capture — which
+# is most of what a designer actually needs. This maps the interactive controls, clicks
+# each one, captures what it opens, then restores the baseline. No model involved: the
+# DOM already says which elements are interactive.
+
+_MAP_CONTROLS_JS = """() => {
+  const vis = el => {
+    const r = el.getBoundingClientRect(); const s = getComputedStyle(el);
+    return r.width > 2 && r.height > 2 && s.visibility !== 'hidden' &&
+           s.display !== 'none' && s.opacity !== '0';
+  };
+  const label = el => (el.innerText || el.getAttribute('aria-label') ||
+                       el.getAttribute('title') || el.value || '')
+                       .trim().replace(/\\s+/g, ' ').slice(0, 40);
+  const SEL = [
+    'button', '[role=button]', '[role=tab]', 'summary', 'details',
+    '[aria-expanded]', '[aria-haspopup]', '[data-toggle]', '[data-modal]',
+    '[class*=toggle]', '[class*=tab]', '[class*=accordion]', '[class*=dropdown]',
+    '[class*=swatch]', '[class*=chip]', '[class*=menu-item]'
+  ].join(',');
+  const out = []; const seen = new Set();
+  document.querySelectorAll(SEL).forEach((el, i) => {
+    if (!vis(el)) return;
+    const t = label(el);
+    if (!t) return;
+    // skip destructive / navigational controls that would end the sweep
+    if (/^(sign out|log ?out|delete|remove|back|←)/i.test(t)) return;
+    const key = t + '|' + el.tagName;
+    if (seen.has(key)) return;
+    seen.add(key);
+    el.setAttribute('data-capturd-sweep', 'c' + i);
+    out.push({ id: 'c' + i, label: t, tag: el.tagName,
+               expands: el.getAttribute('aria-expanded') === 'false' ||
+                        el.hasAttribute('aria-haspopup') });
+  });
+  return out;
+}"""
+
+_FINGERPRINT_JS = """() => {
+  // A state change is not always textual: picking a theme swatch or flipping a toggle can
+  // leave the copy identical while the page looks completely different. So fingerprint
+  // text AND the signals that carry visual state.
+  const t = (document.body.innerText || '').slice(0, 3000);
+  const open = document.querySelectorAll(
+    '[aria-expanded=true],[open],dialog[open],[role=dialog],[class*=modal]:not([hidden])').length;
+  const root = document.documentElement;
+  const themeBits = [root.getAttribute('data-theme'), root.className,
+                     document.body.className, root.getAttribute('data-mode')].join(',');
+  const selected = document.querySelectorAll(
+    '[aria-selected=true],[aria-checked=true],[aria-current],.is-on,.is-active,.active,.selected').length;
+  const bg = getComputedStyle(document.body).backgroundColor;
+  const vis = document.querySelectorAll('body *').length;
+  return [t.length, open, selected, vis, themeBits, bg, t.slice(0, 300)].join('|');
+}"""
+
+
+def _state_slug(text: str) -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+    return (s or "state")[:40]
+
+
+async def _sweep_states(page: Any, target: CaptureTarget, settings: dict[str, Any],
+                        base_path: Path) -> list[dict[str, Any]]:
+    """Click each mapped control, capture the state it opens, restore, and move on."""
+    limit = int(settings.get("states_limit") or 20)
+    shots: list[dict[str, Any]] = []
+    try:
+        controls = await page.evaluate(_MAP_CONTROLS_JS)
+    except Exception:
+        return shots
+    try:
+        baseline = await page.evaluate(_FINGERPRINT_JS)
+    except Exception:
+        return shots
+    seen = {baseline}
+    base_url = page.url
+    shot_kwargs = {"type": settings["format"], "animations": "disabled",
+                   "full_page": settings["full_page"]}
+    if settings["format"] == "jpeg":
+        shot_kwargs["quality"] = settings["jpeg_quality"]
+
+    for control in controls[:limit]:
+        try:
+            el = page.locator(f"[data-capturd-sweep={control['id']}]").first
+            if await el.count() == 0 or not await el.is_visible():
+                continue
+            await el.click(timeout=2500)
+            await page.wait_for_timeout(int(settings.get("state_wait_ms") or 900))
+            fingerprint = await page.evaluate(_FINGERPRINT_JS)
+            if fingerprint not in seen:
+                seen.add(fingerprint)
+                name = f"{base_path.stem}--open--{_state_slug(control['label'])}{base_path.suffix}"
+                out = base_path.with_name(name)
+                await page.screenshot(path=str(out), **shot_kwargs)
+                shots.append({
+                    "url": target.url, "state_id": target.state_id,
+                    "viewport": target.viewport_id, "scheme": target.scheme,
+                    "width": target.width, "height": target.height,
+                    "status": "ok", "file": out.name, "bytes": out.stat().st_size,
+                    "state": "open", "control": control["label"], "control_tag": control["tag"],
+                })
+            # restore: Escape, then re-click, then reload as the last resort
+            await page.keyboard.press("Escape")
+            await page.wait_for_timeout(250)
+            if await page.evaluate(_FINGERPRINT_JS) != baseline:
+                try:
+                    if await el.count() and await el.is_visible():
+                        await el.click(timeout=1500)
+                        await page.wait_for_timeout(250)
+                except Exception:
+                    pass
+            if page.url != base_url or await page.evaluate(_FINGERPRINT_JS) != baseline:
+                await page.goto(base_url, wait_until="domcontentloaded",
+                                timeout=int(settings["timeout_ms"]))
+                await _settle_page(page, settings["wait_ms"])
+                await page.evaluate(_MAP_CONTROLS_JS)   # re-tag after reload
+        except Exception:
+            continue
+    return shots
+
+
 async def _capture_one(context: Any, target: CaptureTarget, settings: dict[str, Any], path: Path) -> dict[str, Any]:
     started = time.perf_counter()
     attempts = max(1, int(settings.get("retries", DEFAULT_RETRIES)) + 1)
@@ -948,8 +1075,12 @@ async def _capture_one(context: Any, target: CaptureTarget, settings: dict[str, 
                 screenshot_kwargs["quality"] = settings["jpeg_quality"]
             await page.screenshot(**screenshot_kwargs)
             stat = path.stat()
+            extra_states: list[dict[str, Any]] = []
+            if settings.get("states"):
+                extra_states = await _sweep_states(page, target, settings, path)
             return {
                 "url": target.url,
+                "states": extra_states,
                 "state_id": target.state_id,
                 "viewport": target.viewport_id,
                 "scheme": target.scheme,

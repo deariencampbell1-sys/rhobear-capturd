@@ -48,6 +48,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Send a cookie so signed-in pages can be captured, e.g. "
                              "--cookie 'session=abc123;app.example.com'. Repeatable. Without this "
                              "the batch can only shoot pages a logged-out visitor can reach.")
+    parser.add_argument("--states", action="store_true",
+                        help="Also capture every state a page can be put into: click each "
+                             "interactive control (modals, dropdowns, tabs, accordions, "
+                             "toggles), shoot what it opens, then restore. No LLM involved.")
+    parser.add_argument("--states-limit", type=int, default=20, metavar="N",
+                        help="Max controls to sweep per page (default: 20)")
+    parser.add_argument("--state-wait-ms", type=int, default=900, metavar="MS",
+                        help="Wait after each click before shooting (default: 900)")
     parser.add_argument("--settle-ms", type=int, default=600,
                         help="Settle wait per page, in ms, before the shot (default: 600)")
     return parser
@@ -91,6 +99,9 @@ def main(argv: list[str] | None = None) -> int:
         "concurrency": args.workers,
         "wait_ms": args.settle_ms,
         "cookies": _parse_cookies(args.cookie),
+        "states": args.states,
+        "states_limit": args.states_limit,
+        "state_wait_ms": args.state_wait_ms,
         "name": "sunsponge-captures",
     }
 
