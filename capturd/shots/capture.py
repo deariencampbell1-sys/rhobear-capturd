@@ -987,11 +987,36 @@ def _state_slug(text: str) -> str:
     return (s or "state")[:40]
 
 
+_DISMISS_LABELS = ("Skip intro", "Skip", "Got it", "Dismiss", "Close", "No thanks", "Maybe later")
+
+
+async def _dismiss_overlays(page: Any) -> None:
+    """Clear intro/splash overlays before sweeping.
+
+    An intro video or welcome splash sits ON TOP of the app: every control underneath
+    still reports visible and enabled, but the click is intercepted. The sweep then finds
+    nothing and reports zero states, which looks like a page with no interactivity rather
+    than a page behind a curtain.
+    """
+    for label in _DISMISS_LABELS:
+        for _ in range(2):
+            try:
+                el = page.get_by_text(label, exact=True).first
+                if await el.count() and await el.is_visible():
+                    await el.click(timeout=1500, force=True)
+                    await page.wait_for_timeout(700)
+                else:
+                    break
+            except Exception:
+                break
+
+
 async def _sweep_states(page: Any, target: CaptureTarget, settings: dict[str, Any],
                         base_path: Path) -> list[dict[str, Any]]:
     """Click each mapped control, capture the state it opens, restore, and move on."""
     limit = int(settings.get("states_limit") or 20)
     shots: list[dict[str, Any]] = []
+    await _dismiss_overlays(page)
     try:
         controls = await page.evaluate(_MAP_CONTROLS_JS)
     except Exception:
