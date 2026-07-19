@@ -44,9 +44,31 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--depth", type=int, default=8, help="Crawl depth for --site (default: 8)")
     parser.add_argument("--max-pages", type=int, default=1000, help="Max pages to discover (default: 1000)")
     parser.add_argument("--workers", type=int, default=3, help="Concurrent capture workers (default: 3)")
+    parser.add_argument("--cookie", metavar="NAME=VALUE;DOMAIN", action="append", default=[],
+                        help="Send a cookie so signed-in pages can be captured, e.g. "
+                             "--cookie 'session=abc123;app.example.com'. Repeatable. Without this "
+                             "the batch can only shoot pages a logged-out visitor can reach.")
     parser.add_argument("--settle-ms", type=int, default=600,
                         help="Settle wait per page, in ms, before the shot (default: 600)")
     return parser
+
+
+def _parse_cookies(raw: list[str]) -> list[dict]:
+    """`name=value;domain` -> the cookie dicts Playwright wants.
+
+    Without this the batch can only ever capture what a logged-out visitor sees, which
+    leaves every authenticated product — the actual app — impossible to screenshot.
+    """
+    out = []
+    for item in raw or []:
+        pair, _, domain = item.partition(";")
+        name, _, value = pair.partition("=")
+        name, value, domain = name.strip(), value.strip(), domain.strip()
+        if not (name and value and domain):
+            raise SystemExit(f"error: --cookie must look like NAME=VALUE;DOMAIN (got {item!r})")
+        out.append({"name": name, "value": value, "domain": domain,
+                    "path": "/", "secure": True, "httpOnly": False})
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -68,6 +90,7 @@ def main(argv: list[str] | None = None) -> int:
         "export_dir": args.out or None,
         "concurrency": args.workers,
         "wait_ms": args.settle_ms,
+        "cookies": _parse_cookies(args.cookie),
         "name": "sunsponge-captures",
     }
 

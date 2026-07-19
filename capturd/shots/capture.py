@@ -871,6 +871,10 @@ def build_capture_plan(payload: dict[str, Any]) -> tuple[list[str], list[Capture
             int(payload.get("retry_timeout_ms") or DEFAULT_RETRY_TIMEOUT_MS),
         ),
         "jpeg_quality": max(40, min(100, int(payload.get("jpeg_quality") or 88))),
+        # Cookies for signed-in capture. This builder whitelists keys, so anything not
+        # named here is silently dropped — which is why auth has to be threaded through
+        # explicitly rather than just passed in the payload.
+        "cookies": list(payload.get("cookies") or []),
         "capture_count": len(targets),
         "crawl": crawl_enabled,
         "local": local_enabled,
@@ -1036,6 +1040,12 @@ async def _run_capture_async(
                         locale="en-US",
                         user_agent=USER_AGENT,
                     )
+                    # Signed-in capture: without cookies the batch can only ever shoot
+                    # what a logged-out visitor sees, so authenticated products are
+                    # impossible to screenshot.
+                    cookies = settings.get("cookies") or []
+                    if cookies:
+                        await context.add_cookies(cookies)
                     contexts[key] = context
                 return context
 
