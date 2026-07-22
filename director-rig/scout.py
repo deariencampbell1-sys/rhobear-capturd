@@ -45,7 +45,7 @@ CTA_WORDS = ("get started", "start free", "sign up", "signup", "try ", "get demo
 def _digest(url: str, prewait: int = 16) -> list[dict]:
     env = dict(os.environ)
     env.setdefault("PYTHONIOENCODING", "utf-8")
-    env.pop("RHOBEAR_GW_API_KEY", None)
+    env.pop("RHOBEAR_GW_API_KEY", None)  # keyless: deterministic enrichment + Edge-TTS
     client = McpStdioClient([sys.executable, str(_BOOT)], env=env, cwd=REPO)
     try:
         client.request("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},

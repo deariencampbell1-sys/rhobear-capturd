@@ -165,11 +165,13 @@ def main() -> int:
               + (", music" if args.music else "")
               + (f", intro/outro" if (args.intro or args.outro) else ""))
     finally:
+        cleanup_failed = False
         try:
             shutil.rmtree(tmp)
         except OSError as exc:
-            print(f"[finish] WARN cleanup failed for {tmp}: {exc}")
-    return 0
+            cleanup_failed = True
+            print(f"[finish] ERROR cleanup failed for {tmp}: {exc}")
+    return 1 if cleanup_failed else 0
 
 
 if __name__ == "__main__":

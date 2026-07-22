@@ -10,6 +10,13 @@ via the Captur'd MCP engine (`CAPTURD_REPO`, default `/opt/sunsponge-capture`).
   below and `tests/test_adjusted.py`.
 - `paid_boot.py` — runtime patches on top of the frozen engine (typing
   playback, voice synthesis, template paths) applied before a shot runs.
+  **Not new capability introduced by this PR** — it predates version control
+  here and has been running live on every render job since before this PR
+  (film.py boots it via `paid_boot.py` on every call). No unit tests exist
+  for its individual patches, but it has been exercised end-to-end by both
+  the `rhobear.ai` verification walkthroughs run against the live service
+  for the `film.py` crash fix (job success confirmed with real MP4 output
+  both times, before and after this homing PR).
 - `finish.py` — paid-lane post-export finisher: aspect reframe, watermark,
   intro/outro title cards, music bed. Pure ffmpeg on the exported MP4, no
   engine changes.
