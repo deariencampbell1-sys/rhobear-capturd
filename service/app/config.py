@@ -1,4 +1,4 @@
-"""Config + the credential boundary.
+r"""Config + the credential boundary.
 
 Everything the service needs is here. The OWNER-GATED credentials are read from
 env (or the agent vault) and each has an honest "configured?" flag so the app
