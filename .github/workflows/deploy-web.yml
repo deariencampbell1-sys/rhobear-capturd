@@ -1,11 +1,8 @@
 name: Deploy web (landing + dashboard)
 
+# NO-PERSONAL-CI-LAW (2026-07-21): personal account is over its Actions minutes cap —
+# auto triggers forbidden; run manually only after the repo moves to an org.
 on:
-  push:
-    branches: [main]
-    paths:
-      - "web/**"
-      - ".github/workflows/deploy-web.yml"
   workflow_dispatch: {}
 
 permissions:

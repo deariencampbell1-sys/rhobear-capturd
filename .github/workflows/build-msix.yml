@@ -1,13 +1,9 @@
 name: Build MSIX
 
+# NO-PERSONAL-CI-LAW (2026-07-21): personal account is over its Actions minutes cap —
+# auto triggers forbidden; run manually only after the repo moves to an org.
 on:
-  push:
-    branches:
-      - main
-      - 'feat/*'
-    tags:
-      - 'v*'
-  workflow_dispatch:
+  workflow_dispatch: {}
 
 permissions:
   contents: write
