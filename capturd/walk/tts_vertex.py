@@ -20,13 +20,21 @@ enough for camera keyframes and captions at narration pace.
 from __future__ import annotations
 
 import io
+import logging
 import os
 import re
 import shutil
 import subprocess
+import time
 import wave
 
 import httpx
+
+log = logging.getLogger(__name__)
+
+#: Vertex TTS reads at most this many characters per clip; longer annotation
+#: text is truncated (and logged) — demo narration lines are far shorter.
+MAX_CHARS = 900
 
 VERTEX_PROJECT = os.environ.get("CAPTURD_VERTEX_PROJECT", "rhobear")
 VERTEX_LOCATION = os.environ.get("CAPTURD_VERTEX_LOCATION", "us-central1")
@@ -75,7 +83,17 @@ def parse_voice(voice: str) -> tuple[str, str]:
     return name, style
 
 
+#: (token, monotonic-expiry) — gcloud tokens live ~1h; refresh at 50 min so a
+#: long walkthrough never spawns a gcloud subprocess per narration line.
+_token_cache: tuple[str, float] = ("", 0.0)
+_TOKEN_TTL_S = 50 * 60
+
+
 def _access_token() -> str:
+    global _token_cache
+    token, expiry = _token_cache
+    if token and time.monotonic() < expiry:
+        return token
     gcloud = shutil.which("gcloud") or shutil.which("gcloud.cmd")
     if not gcloud:
         raise VertexTTSError("gcloud not found — Vertex TTS needs ADC on this machine")
@@ -85,7 +103,9 @@ def _access_token() -> str:
     )
     if out.returncode != 0:
         raise VertexTTSError(f"gcloud token failed: {out.stderr.strip()[:200]}")
-    return out.stdout.strip()
+    token = out.stdout.strip()
+    _token_cache = (token, time.monotonic() + _TOKEN_TTL_S)
+    return token
 
 
 def _pcm_to_wav(pcm: bytes, rate: int) -> bytes:
@@ -138,25 +158,39 @@ def synthesize(text: str, voice: str = "Charon") -> tuple[bytes, list]:
         return b"", []
     name, style = parse_voice(voice)
     style_prefix = STYLES.get(style, "")
-    spoken = text[:900]
+    if len(text) > MAX_CHARS:
+        log.warning("vertex tts: truncating %d-char text to %d", len(text), MAX_CHARS)
+    spoken = text[:MAX_CHARS]
     prompt = f"{style_prefix}: {spoken}" if style_prefix else spoken
 
     url = (f"https://{VERTEX_LOCATION}-aiplatform.googleapis.com/v1/projects/"
            f"{VERTEX_PROJECT}/locations/{VERTEX_LOCATION}/publishers/google/models/"
            f"{TTS_MODEL}:generateContent")
+    body = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": name}}},
+        },
+    }
     resp = httpx.post(
         url,
         headers={"Authorization": f"Bearer {_access_token()}",
                  "Content-Type": "application/json"},
-        json={
-            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "responseModalities": ["AUDIO"],
-                "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": name}}},
-            },
-        },
+        json=body,
         timeout=60.0,
     )
+    if resp.status_code == 401:
+        # Cached token revoked mid-session — refresh once and retry.
+        global _token_cache
+        _token_cache = ("", 0.0)
+        resp = httpx.post(
+            url,
+            headers={"Authorization": f"Bearer {_access_token()}",
+                     "Content-Type": "application/json"},
+            json=body,
+            timeout=60.0,
+        )
     if resp.status_code != 200:
         raise VertexTTSError(f"vertex tts {resp.status_code}: {resp.text[:200]}")
     data = resp.json()

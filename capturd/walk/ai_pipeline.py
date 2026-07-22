@@ -381,7 +381,11 @@ async def _synthesize_one(
     from capturd.walk import tts_vertex
     if tts_vertex.is_vertex_voice(voice) or _os.environ.get("CAPTURD_TTS_BACKEND", "").lower() == "vertex":
         vertex_voice = voice if tts_vertex.is_vertex_voice(voice) else "Charon"
-        return await asyncio.to_thread(tts_vertex.synthesize, text.strip(), vertex_voice)
+        try:
+            return await asyncio.to_thread(tts_vertex.synthesize, text.strip(), vertex_voice)
+        except tts_vertex.VertexTTSError as exc:
+            # Same error contract as the Edge path — callers only handle DemoAIError.
+            raise DemoAIError(f"Vertex TTS failed: {exc}") from exc
 
     try:
         import edge_tts
