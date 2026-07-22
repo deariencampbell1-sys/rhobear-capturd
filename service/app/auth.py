@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
 from . import config, store
+from ._http import read_json
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 COOKIE = "capturd_session"
@@ -40,7 +41,7 @@ def require_user(request: Request) -> dict:
 @router.post("/central")
 async def central_login(request: Request):
     """Exchange a rhobear_session token from central auth for a local session."""
-    body = await request.json()
+    body = await read_json(request, max_bytes=10 * 1024)   # 10 KB cap — just a token
     token = (body.get("rhobear_session") or "").strip()
     if not token:
         raise HTTPException(status_code=400, detail="rhobear_session required")
@@ -85,7 +86,11 @@ async def central_login(request: Request):
         "plan": user["plan"],
         "entitled": entitled,
     })
-    resp.set_cookie(COOKIE, local_token, httponly=True, samesite="lax",
+    # samesite=strict: central auth (auth.rhobear.ai) and this service
+    # (capturd.<tld>) share a registrable domain, so the SSO redirect + the
+    # in-page /auth/central exchange are same-site and the cookie still travels.
+    # strict adds CSRF cover for any genuinely cross-site request.
+    resp.set_cookie(COOKIE, local_token, httponly=True, samesite="strict",
                     secure=secure, max_age=60 * 60 * 24 * 30)
     return resp
 

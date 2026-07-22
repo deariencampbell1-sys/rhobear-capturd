@@ -7,6 +7,12 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/opt/capturd-service
 EnvironmentFile=/opt/capturd-service/.env
+# the engine repo + rig paths the service actually reads (render_worker.RIG /
+# ENGINE_REPO and app.main.RIG). Defaults already point here, but set them
+# explicitly so the deploy is self-describing.
+Environment=CAPTURD_ENGINE_REPO=/opt/sunsponge-capture
+Environment=CAPTURD_RIG_DIR=/opt/capturd-rig
+# legacy alias kept for back-compat with older deploy scripts (no service code reads it)
 Environment=CAPTURD_REPO=/opt/sunsponge-capture
 ExecStart=/opt/capturd-service/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8099
 Restart=always
