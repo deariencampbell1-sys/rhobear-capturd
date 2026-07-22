@@ -12,11 +12,12 @@ Unlock is a launch CODE or a signed LICENSE, stored in ``~/.capturd/license`` (o
 ``RHOBEAR_CAPTURD_LICENSE`` env var). A paid unlock is what authorizes the gateway AI.
 
 ─────────────────────────────────────────────────────────────────────────────
-OWNER — the only things to fill before this sells (nothing here moves money or
-unlocks the AI until you do):
-  * PRO_CONFIG['checkout_url'] : your Stripe/PayPal buy link (shown on the upgrade prompt).
-  * PRO_CONFIG['codes']        : launch codes you email on purchase.
-  * PRO_CONFIG['pubkey_b64']   : Ed25519 public key (raw 32B, base64) to verify signed licenses.
+OWNER — the only things to set before this sells (all environment variables, so
+nothing is hardcoded in the repo; nothing here moves money or unlocks the AI
+until you do):
+  * CAPTURD_PRO_CHECKOUT_URL : your Stripe/PayPal buy link (shown on the upgrade prompt).
+  * CAPTURD_PRO_CODES        : comma-separated launch codes you email on purchase.
+  * CAPTURD_PRO_PUBKEY_B64   : Ed25519 public key (raw 32B, base64) to verify signed licenses.
 ─────────────────────────────────────────────────────────────────────────────
 """
 
@@ -39,11 +40,16 @@ def _resolve_checkout_url() -> str:
             or (os.environ.get("RHOBEAR_PRO_CHECKOUT_URL") or "").strip())
 
 
+# Codes + license pubkey are env-driven like the checkout URL, so nothing is
+# hardcoded in the repo and a deployment (or a buyer's own fork) configures its
+# gate with environment alone:
+#   CAPTURD_PRO_CODES      — comma-separated launch codes
+#   CAPTURD_PRO_PUBKEY_B64 — Ed25519 public key (raw 32 bytes, base64) for signed licenses
 PRO_CONFIG = {
     "product_name": "RHOBEAR Captur'd Pro",
     "price_label": "$19 / mo",
-    "codes": [],          # <-- OWNER: ["CAPTURD-LAUNCH-2026", ...]
-    "pubkey_b64": "",     # <-- OWNER: Ed25519 public key (raw 32 bytes, base64) for signed licenses
+    "codes": [c.strip() for c in (os.environ.get("CAPTURD_PRO_CODES") or "").split(",") if c.strip()],
+    "pubkey_b64": (os.environ.get("CAPTURD_PRO_PUBKEY_B64") or "").strip(),
 }
 
 
