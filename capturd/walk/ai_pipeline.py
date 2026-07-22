@@ -371,14 +371,27 @@ async def _synthesize_one(
     # Lazy import so the module doesn't break at import time.
     from capturd.walk.schema import WordTimestamp
 
+    if not text or not text.strip():
+        return b"", []
+
+    # Vertex HD voice (the house engine, same one behind Rho) — selected by a
+    # Vertex voice name ("Kore", "vertex:Charon:trailer") or forced via
+    # CAPTURD_TTS_BACKEND=vertex. Edge TTS stays the zero-config fallback.
+    from capturd.walk import tts_vertex
+    if tts_vertex.is_vertex_voice(voice) or os.environ.get("CAPTURD_TTS_BACKEND", "").lower() == "vertex":
+        vertex_voice = voice if tts_vertex.is_vertex_voice(voice) else "Charon"
+        try:
+            return await asyncio.to_thread(tts_vertex.synthesize, text.strip(), vertex_voice)
+        except tts_vertex.VertexTTSError as exc:
+            # Same error contract as the Edge path — callers only handle DemoAIError.
+            raise DemoAIError(f"Vertex TTS failed: {exc}") from exc
+
     try:
         import edge_tts
     except ImportError as exc:  # pragma: no cover - import-time guard
         raise DemoAIError(
             "The 'edge-tts' package is not installed. Run `pip install edge-tts>=6.0`."
         ) from exc
-    if not text or not text.strip():
-        return b"", []
     com = edge_tts.Communicate(text.strip(), voice, boundary="WordBoundary")
     import io
     sink = io.BytesIO()
