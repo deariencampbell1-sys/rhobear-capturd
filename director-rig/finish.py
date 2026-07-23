@@ -22,6 +22,7 @@ real font file.
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import subprocess
 import sys
@@ -61,6 +62,34 @@ def _ff_font(path: str) -> str:
     return path.replace("\\", "/").replace(":", "\\:")
 
 
+def _ff_text(text: str) -> str:
+    # drawtext text= is single-quoted; escape ffmpeg's filter-syntax special
+    # chars (\ : ' %) so a title containing any of them can't break out of
+    # the quoted value or start a new filter clause.
+    escaped = (text.replace("\\", "\\\\")
+                    .replace(":", "\\:")
+                    .replace("%", "\\%")
+                    .replace("'", r"'\''"))
+    return escaped
+
+
+# ffmpeg treats a leading "scheme:" as a protocol (concat:, http:, pipe:,
+# tcp:, data:, subfile:, ...), not a literal filename. Legitimate local
+# paths on this box never contain a colon, so reject any input value that
+# does before it ever reaches an ffmpeg subprocess arg.
+_UNSAFE_PATH_RE = re.compile(r":")
+
+
+def _safe_input_path(raw: str, label: str) -> str:
+    if _UNSAFE_PATH_RE.search(raw):
+        sys.exit(f"finish.py: --{label} contains ':' -- rejected "
+                  f"(ffmpeg would interpret this as a protocol, not a file path)")
+    p = Path(raw)
+    if not p.is_file():
+        sys.exit(f"finish.py: --{label} {raw!r} is not a real file")
+    return str(p.resolve())
+
+
 def _title_card(text: str, wh: tuple[int, int], brand: str, font: str | None,
                 seconds: float, out: Path) -> None:
     w, h = wh
@@ -69,7 +98,7 @@ def _title_card(text: str, wh: tuple[int, int], brand: str, font: str | None,
     # fontconfig family name so this works without a platform-specific
     # hardcoded path (drawtext resolves `font=` via libfontconfig).
     font_clause = f"fontfile='{_ff_font(font)}'" if font and Path(font).is_file() else "font='sans-serif'"
-    draw = (f"drawtext={font_clause}:text='{text}':"
+    draw = (f"drawtext={font_clause}:text='{_ff_text(text)}':"
             f"fontcolor=white:fontsize={fs}:x=(w-text_w)/2:y=(h-text_h)/2")
     _run([FFMPEG, "-y", "-f", "lavfi", "-i",
           f"color=c={brand}:s={w}x{h}:d={seconds}:r=30",
@@ -105,17 +134,19 @@ def main() -> int:
                     help="path to a font file; omit to use the system sans-serif family")
     args = ap.parse_args()
 
-    src = Path(args.infile)
+    infile = _safe_input_path(args.infile, "infile")
     out = Path(args.outfile)
     out.parent.mkdir(parents=True, exist_ok=True)
     wh = ASPECTS[args.aspect]
+    watermark = _safe_input_path(args.watermark, "watermark") if args.watermark else ""
+    music = _safe_input_path(args.music, "music") if args.music else ""
     tmp = Path(tempfile.mkdtemp(prefix="capturd-finish-"))
     try:
         # 1) reframe (+ optional watermark) into the target canvas
         body = tmp / "body.mp4"
-        inputs = ["-i", str(src)]
-        if args.watermark:
-            inputs += ["-i", str(args.watermark)]
+        inputs = ["-i", infile]
+        if watermark:
+            inputs += ["-i", watermark]
             wm_w = int(wh[0] * args.wm_scale)
             fc = (_reframe_filter(wh)
                   + f";[1:v]scale={wm_w}:-1[wm];[v][wm]overlay={CORNERS[args.wm_corner]}[vo]")
@@ -129,9 +160,9 @@ def main() -> int:
 
         # 2) music bed (duck under existing audio)
         staged = body
-        if args.music:
+        if music:
             with_music = tmp / "music.mp4"
-            _run([FFMPEG, "-y", "-i", str(body), "-i", str(args.music),
+            _run([FFMPEG, "-y", "-i", str(body), "-i", music,
                   "-filter_complex",
                   f"[1:a]volume={args.music_db}dB[m];[0:a][m]amix=inputs=2:duration=first:dropout_transition=3[a]",
                   "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", str(with_music)])
@@ -165,13 +196,14 @@ def main() -> int:
               + (", music" if args.music else "")
               + (f", intro/outro" if (args.intro or args.outro) else ""))
     finally:
-        cleanup_failed = False
+        # Cleanup failure doesn't mean the render failed -- log it loudly
+        # (so leaked temp dirs on the VPS get noticed) but don't tell the
+        # caller the video itself failed when it didn't.
         try:
             shutil.rmtree(tmp)
         except OSError as exc:
-            cleanup_failed = True
             print(f"[finish] ERROR cleanup failed for {tmp}: {exc}")
-    return 1 if cleanup_failed else 0
+    return 0
 
 
 if __name__ == "__main__":
