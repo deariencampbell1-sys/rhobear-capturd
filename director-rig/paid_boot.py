@@ -60,8 +60,11 @@ async def _exec_with_typing(self, action: str, selector: str, value: str | None)
     except Exception:
         try:
             await page.click(selector, timeout=5000)
-        except Exception:
-            pass
+        except Exception as exc:
+            # Both click attempts failed -- typing below proceeds into an
+            # unfocused field (empty-looking recording) with no other
+            # signal that anything went wrong. Log it.
+            print(f"[paid_boot] WARNING click failed for selector {selector!r}: {exc}")
     delay = int(os.environ.get("CAPTURD_TYPE_DELAY_MS", "70") or "70")
     text = value or ""
     await page.fill(selector, "", timeout=5000)  # clear, then really type

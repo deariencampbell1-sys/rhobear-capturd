@@ -74,16 +74,23 @@ def _ff_text(text: str) -> str:
 
 
 # ffmpeg treats a leading "scheme:" as a protocol (concat:, http:, pipe:,
-# tcp:, data:, subfile:, ...), not a literal filename. Legitimate local
-# paths on this box never contain a colon, so reject any input value that
-# does before it ever reaches an ffmpeg subprocess arg.
-_UNSAFE_PATH_RE = re.compile(r":")
+# tcp:, data:, subfile:, ...), not a literal filename -- but ONLY when it's
+# at the very start of the string with no leading path separator; ffmpeg
+# never re-parses a colon that appears later in an already-a-path string as
+# a new protocol boundary. So this only rejects bare scheme-looking values
+# (protocol prefixes, or a filename that's genuinely ambiguous to ffmpeg
+# too) -- a real filename containing a colon mid-name (e.g.
+# "logo_v2:final.png") is unaffected, and is_file()+resolve() below is the
+# actual safety net regardless (the resolved absolute path we return always
+# starts with "/", which ffmpeg never treats as a protocol scheme).
+_PROTOCOL_PREFIX_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:")
 
 
 def _safe_input_path(raw: str, label: str) -> str:
-    if _UNSAFE_PATH_RE.search(raw):
-        sys.exit(f"finish.py: --{label} contains ':' -- rejected "
-                  f"(ffmpeg would interpret this as a protocol, not a file path)")
+    if _PROTOCOL_PREFIX_RE.match(raw):
+        sys.exit(f"finish.py: --{label} {raw!r} looks like a protocol prefix "
+                  f"-- rejected (ffmpeg would interpret this as a protocol, "
+                  f"not a file path; use an absolute or ./-relative path)")
     p = Path(raw)
     if not p.is_file():
         sys.exit(f"finish.py: --{label} {raw!r} is not a real file")
