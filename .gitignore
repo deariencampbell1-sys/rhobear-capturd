@@ -28,3 +28,5 @@ service/**/__pycache__/
 *.egg-info/
 taste-run/
 .claude/
+
+.code-graph/
