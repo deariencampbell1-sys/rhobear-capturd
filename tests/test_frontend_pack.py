@@ -365,3 +365,68 @@ def test_mobile_companion_embed(mobile_html):
     """Rho companion embed script is present in mobile."""
     assert "RHOBEAR_COMPANION" in mobile_html
     assert "companion-embed.js" in mobile_html
+
+
+# ---------------------------------------------------------------------------
+# Browser-based contrast assertion (requires server + Playwright)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.slow
+def test_mobile_shot_card_contrast():
+    """Mobile shot card text is light on dark, not black.
+
+    Starts the app, opens the mobile page in a mobile viewport, selects a
+    .tpl card, and asserts the computed color of the <b> text is a light
+    color (not black / default ButtonText). Uses the playwright sync API
+    and the with_server context from capture_screenshots.
+    """
+    from playwright.sync_api import sync_playwright
+    from scripts.capture_screenshots import with_server
+
+    def check(port):
+        base = f"http://127.0.0.1:{port}"
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            ctx = browser.new_context(
+                viewport={"width": 390, "height": 844},
+                device_scale_factor=3,
+                is_mobile=True,
+                has_touch=True,
+            )
+            page = ctx.new_page()
+            page.goto(base + "/m")
+            page.wait_for_load_state("networkidle")
+
+            # Pick the first .tpl card and get the <b> text's computed color
+            color = page.evaluate("""
+                () => {
+                    const tpl = document.querySelector('.tpl b');
+                    if (!tpl) return null;
+                    return getComputedStyle(tpl).color;
+                }
+            """)
+            assert color is not None, "Could not find .tpl b element"
+
+            # Parse the rgb(a) value and verify it's light (not black)
+            # Light colors have high R/G/B values; black = rgb(0,0,0)
+            import re
+            m = re.match(r'rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)', color)
+            assert m, f"Could not parse color value: {color}"
+            r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
+
+            # Dark text on dark bg would be < 100 per channel
+            assert r > 100, f"Shot card text is too dark (red channel {r}): {color}"
+            assert g > 100, f"Shot card text is too dark (green channel {g}): {color}"
+            assert b > 100, f"Shot card text is too dark (blue channel {b}): {color}"
+
+            # Verify no console errors
+            errors = []
+            page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
+            page.goto(base + "/m")
+            page.wait_for_load_state("networkidle")
+            assert len(errors) == 0, f"Console errors on mobile page: {errors}"
+
+            ctx.close()
+            browser.close()
+
+    with_server(check)
