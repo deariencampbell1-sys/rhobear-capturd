@@ -43,4 +43,31 @@ Wiring (`service/app/*.py`, render_worker, mcp_service) is the partner's lane (P
 
 ## Marks (honest note)
 Docroot ships only the **constellation bear** (`/assets/capturd-bear.png`) — the pack's *secondary* mark. The brand sheet (jua0po) also defines an **ink-roar head** (nav logo) and a **standing bear** (onboarding), but those mark files are not in the tree. Per "never draw/hue-rotate a bear," the constellation file is used at every bear slot via named `<img>` seams; drop the head/standing PNGs in and the nav/hero swap with no code change.
+
+## Verification — pack compliance (2026-08-09)
+All checks pass against the FIREFLY pack (`_FIREFLY/03-capturd/`):
+
+| Check | Status |
+|-------|--------|
+| Tokens `--capturd-*` in `:root` | ✅ `service/web/index.html` + `m.html` |
+| Accent `#4B7AC8` blue | ✅ |
+| Ground `#0A0F14` | ✅ |
+| Section labels teal `#2A8FA8` | ✅ |
+| Typekit `sbv5bcv` (rokkitt/lato/droid-sans-mono) | ✅ |
+| birch-std on "Captur'd" word | ✅ |
+| Blue constellation bear asset | ✅ |
+| Liquid-glass panels (`--glass-body`/`--glass-blur`/`--glass-rim`) | ✅ |
+| 2×2 step grid | ✅ |
+| 6 demo type cards | ✅ |
+| 6 voices (5 HD + Aria classic) | ✅ |
+| 3 aspect ratios (16:9 / 9:16 / 1:1) | ✅ |
+| Filming overlay with pulse rings | ✅ |
+| 4-stage progress (Scripting → Navigating → Recording → Rendering) | ✅ |
+| First-run onboarding (4 beats) | ✅ |
+| Signed-out hero | ✅ |
+| Gallery + plan meter | ✅ |
+| Desktop `/` and mobile `/m` | ✅ |
+| PWA manifest + service worker | ✅ |
+| No Nacelle refs in service/web | ✅ |
+| No old accent colors in service/web | ✅ |
 </content>
