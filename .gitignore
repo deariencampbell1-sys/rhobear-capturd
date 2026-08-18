@@ -29,4 +29,5 @@ service/**/__pycache__/
 taste-run/
 .claude/
 
+# Local code-graph index (per-project AST database)
 .code-graph/
