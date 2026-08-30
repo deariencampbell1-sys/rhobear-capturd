@@ -86,8 +86,8 @@ OVERLAY_JS = r"""
       // and would swallow real UI clicks — found filming the studio). Only the
       // pills take pointers, so drag still works (drag handler is on the
       // badge; pill pointerdown bubbles up to it).
-      '#__demo-recorder-indicator { pointer-events: none; }' +
-      '#__demo-recorder-indicator .__demo-hud__pill { pointer-events: auto; }' +
+      '#__demo-recorder-indicator, #__demo-recorder-indicator * { pointer-events: none; }' +
+      '#__demo-recorder-indicator .__demo-hud__grip { pointer-events: auto; cursor: grab; }' +
       '#__demo-recorder-indicator .__demo-hud__pill { color: #9db0bb; }' +
       '#__demo-recorder-indicator .__demo-hud__pill--voice[data-state="listening"],' +
       '#__demo-recorder-indicator .__demo-hud__pill--voice[data-state="transcribing"],' +
@@ -194,6 +194,13 @@ OVERLAY_JS = r"""
     const pillCss = 'display:inline-flex;align-items:center;gap:6px;border:1px solid rgba(151,183,196,0.24);' +
       'border-radius:999px;padding:2px 10px;font-size:12px;white-space:nowrap;';
 
+    const grip = document.createElement('span');
+    grip.className = '__demo-hud__grip';
+    grip.id = BADGE_ID + '__grip';
+    grip.title = 'Drag to move';
+    grip.style.cssText = 'display:inline-block;font-size:10px;line-height:1;' +
+      'color:#5b6b76;margin-right:2px;user-select:none;';
+
     const recPill = document.createElement('span');
     recPill.className = '__demo-hud__pill __demo-hud__pill--rec';
     recPill.style.cssText = pillCss;
@@ -223,6 +230,7 @@ OVERLAY_JS = r"""
       'font:italic 13px/1.5 "New York","Iowan Old Style",Charter,Georgia,"Times New Roman",serif;' +
       'color:#9db0bb;';
 
+    row.prepend(grip);
     badge.appendChild(row);
     badge.appendChild(heard);
     (document.body || document.documentElement).appendChild(badge);
