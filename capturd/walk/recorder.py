@@ -81,6 +81,13 @@ OVERLAY_JS = r"""
     style.id = STYLE_ID;
     style.textContent =
       '@keyframes __demoHudRecPulse { 50% { opacity: .35; } }' +
+      // The HUD is an indicator, not a click target: the badge must NEVER
+      // intercept pointer events on the page being recorded (it sits top-right
+      // and would swallow real UI clicks — found filming the studio). Only the
+      // pills take pointers, so drag still works (drag handler is on the
+      // badge; pill pointerdown bubbles up to it).
+      '#__demo-recorder-indicator { pointer-events: none; }' +
+      '#__demo-recorder-indicator .__demo-hud__pill { pointer-events: auto; }' +
       '#__demo-recorder-indicator .__demo-hud__pill { color: #9db0bb; }' +
       '#__demo-recorder-indicator .__demo-hud__pill--voice[data-state="listening"],' +
       '#__demo-recorder-indicator .__demo-hud__pill--voice[data-state="transcribing"],' +
