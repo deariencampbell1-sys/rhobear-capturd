@@ -25,7 +25,24 @@ def e2e_results(tmp_path_factory) -> dict[str, Any]:
     """Run the E2E proof script in a temp dir and return results."""
     out_dir = tmp_path_factory.mktemp("e2e-proof")
 
-    from e2e_walkthrough_proof import _set_args, main as e2e_main
+    from e2e_walkthrough_proof import (
+        _ensure_gateway_key,
+        _set_args,
+        main as e2e_main,
+    )
+
+    # The E2E proof drives the real agent pipeline, which requires the RHOBEAR
+    # AI gateway. Without a configured gateway the AI path cannot run — skip
+    # cleanly instead of letting the script's sys.exit(1) propagate. A SystemExit
+    # raised during fixture setup previously corrupted pytest's fixture teardown
+    # and surfaced as a misleading `assert not self._finalizers` AssertionError.
+    try:
+        _ensure_gateway_key()
+    except SystemExit:
+        pytest.skip(
+            "RHOBEAR_GW_API_KEY not set (and no gateway key file found) — "
+            "e2e proof requires the RHOBEAR AI gateway"
+        )
 
     # Override args for test run
     _set_args(
@@ -36,8 +53,14 @@ def e2e_results(tmp_path_factory) -> dict[str, Any]:
         headless=True,
     )
 
-    exit_code = asyncio.run(e2e_main())
-    assert exit_code == 0, f"E2E script failed with exit code {exit_code}"
+    try:
+        exit_code = asyncio.run(e2e_main())
+    except SystemExit as exc:  # the script signals failure via sys.exit(n)
+        exit_code = exc.code if isinstance(exc.code, int) else 1
+    assert exit_code == 0, (
+        f"E2E script failed with exit code {exit_code} — see e2e_proof log "
+        "output above for the failing stage"
+    )
 
     results_path = out_dir / "results.json"
     assert results_path.is_file(), f"No results.json at {results_path}"
