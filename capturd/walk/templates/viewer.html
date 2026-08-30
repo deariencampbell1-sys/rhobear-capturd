@@ -459,6 +459,95 @@
       _sequenceCancelled: false, // user-interrupt flag
     };
 
+    // ----------------------------------------------------------------
+    //  Viewer event contract — `capturd:event`
+    //
+    //  Core emits normalized LOCAL events. It never opens a socket, never
+    //  fetches, never beacons — with nobody listening this is a no-op and
+    //  the self-contained viewer stays fully functional offline. A host
+    //  (embed wrapper, hosted service) listens on `window` for the
+    //  `capturd:event` CustomEvent and does its own batching/consumption.
+    //
+    //  window.__capturdEvents is a bounded ring buffer for console
+    //  inspection and test assertions.
+    // ----------------------------------------------------------------
+    const EVENT_VOCABULARY = [
+      'demo_open', 'demo_start',
+      'step_view', 'step_complete', 'step_replay',
+      'branch_view', 'branch_select',
+      'cta_view', 'cta_click',
+      'demo_complete', 'demo_exit',
+      'viewer_pause', 'viewer_resume',
+    ];
+
+    const TELEMETRY = {
+      sessionId: null,
+      t0: 0,
+      started: false,        // demo_start fired (first play)
+      opened: false,         // demo_open fired
+      completedFired: false, // demo_complete fired once per session
+      enteredSteps: {},      // stepIndex -> true (entered at least once)
+    };
+
+    function _deviceClass() {
+      try {
+        const coarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+        const w = window.innerWidth || 0;
+        return (coarse || w < 500) ? 'mobile' : 'desktop';
+      } catch (_) { return 'desktop'; }
+    }
+
+    function emitEvent(name, extra) {
+      if (EVENT_VOCABULARY.indexOf(name) === -1) return null;  // vocabulary guard
+      if (STATE.exportMode) return null;  // deterministic export renderer owns the DOM
+      if (!TELEMETRY.sessionId) {
+        TELEMETRY.sessionId = (window.crypto && window.crypto.randomUUID)
+          ? window.crypto.randomUUID()
+          : 's-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+        TELEMETRY.t0 = Date.now();
+      }
+      const spec = STATE.spec || {};
+      const payload = {
+        event: name,
+        demoId: spec.id || null,
+        versionId: spec.version != null ? spec.version : 1,
+        sessionId: TELEMETRY.sessionId,
+        stepId: (extra && extra.stepIndex != null) ? ('step-' + extra.stepIndex) : null,
+        branchId: (extra && extra.branchId) || null,
+        elapsedMs: Date.now() - TELEMETRY.t0,
+        timestamp: new Date().toISOString(),
+        device: {
+          deviceClass: _deviceClass(),
+          viewportW: window.innerWidth || null,
+          viewportH: window.innerHeight || null,
+          reducedMotion: !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches),
+        },
+      };
+      if (extra) {
+        ['choiceId', 'ctaId', 'url'].forEach(function (k) {
+          if (extra[k] != null) payload[k] = extra[k];
+        });
+      }
+      if (!Array.isArray(window.__capturdEvents)) window.__capturdEvents = [];
+      if (window.__capturdEvents.length >= 500) window.__capturdEvents.shift();
+      window.__capturdEvents.push(payload);
+      try { window.dispatchEvent(new CustomEvent('capturd:event', { detail: payload })); } catch (_) {}
+      return payload;
+    }
+
+    function _markStepEntered(i) {
+      const wasEntered = !!TELEMETRY.enteredSteps[i];
+      TELEMETRY.enteredSteps[i] = true;
+      return wasEntered;
+    }
+
+    function _stepDeparted(i) {
+      if (TELEMETRY.enteredSteps[i]) emitEvent('step_complete', { stepIndex: i });
+    }
+
+    // Exit signal — local event only; the host decides about sendBeacon.
+    window.addEventListener('pagehide', function () { emitEvent('demo_exit'); });
+
     const TRANSITION_MS = 300;   // matches the CSS opacity transition
     const CURSOR_MS     = 400;   // cubic-bezier travel duration
     const AUTOPLAY_MS   = 3000;  // delay between auto-advance ticks
@@ -1108,6 +1197,9 @@
       STATE.phase = 'transitioning';
       STATE.direction = direction;
 
+      // Event contract: actually leaving a previously-entered step = complete.
+      if (next !== STATE.index) _stepDeparted(STATE.index);
+
       const prevStep = STATE.spec.steps[STATE.index] || null;
       const newStep  = STATE.spec.steps[next] || null;
       if (!newStep) { STATE.phase = 'active'; return; }
@@ -1147,6 +1239,12 @@
           STATE.index = next;
           updateInfo(newStep);
           STATE.phase = 'active';
+          // Event contract: entering an already-entered step is a replay.
+          const replayed = _markStepEntered(next);
+          emitEvent(replayed ? 'step_replay' : 'step_view', { stepIndex: next });
+          if (newStep && Array.isArray(newStep.choices) && newStep.choices.length) {
+            emitEvent('branch_view', { stepIndex: next, branchId: newStep.branchId || null });
+          }
           // Fire the animation timeline for this step
           playTimeline(next);
           // Single auto-advance scheduler: paced by the step's real length.
@@ -1167,6 +1265,11 @@
         if (!STATE.isPlaying) return;
         const last = STATE.spec.steps.length - 1;
         if (STATE.index >= last) {
+          // Event contract: natural playback end = demo_complete (once).
+          if (!TELEMETRY.completedFired) {
+            TELEMETRY.completedFired = true;
+            emitEvent('demo_complete', { stepIndex: last });
+          }
           pause();
           return;
         }
@@ -1176,8 +1279,12 @@
 
     function play() {
       if (!STATE.spec || STATE.spec.steps.length === 0) return;
+      const wasPlaying = STATE.isPlaying;
       const last = STATE.spec.steps.length - 1;
       STATE.isPlaying = true;
+      // Event contract: first play starts the demo; later plays resume it.
+      if (!TELEMETRY.started) { TELEMETRY.started = true; emitEvent('demo_start'); }
+      else if (!wasPlaying) emitEvent('viewer_resume');
       $btnPlay.innerHTML = '&#10074;&#10074;&#xFE0E;';  // pause icon
       $btnPlay.setAttribute('aria-label', 'Pause');
       // Re-enter the current step (or restart from 0 at the end) so voiceover,
@@ -1187,6 +1294,8 @@
     }
 
     function pause() {
+      // Event contract: pausing an actually-playing demo.
+      if (STATE.isPlaying) emitEvent('viewer_pause');
       STATE.isPlaying = false;
       clearTimeout(STATE.autoPlayTimeout);
       stopVoiceover();
@@ -1863,6 +1972,11 @@
         // and manual navigation work from a fresh load.
         STATE.phase = 'active';
 
+        // Event contract: the demo opened; its first step is visible.
+        if (!TELEMETRY.opened) { TELEMETRY.opened = true; emitEvent('demo_open'); }
+        _markStepEntered(0);
+        emitEvent('step_view', { stepIndex: 0 });
+
         // Play timeline for step 0 on initial load
         playTimeline(0);
 
@@ -1872,7 +1986,7 @@
         // Expose for browser console / e2e tests.
         window.__demoViewer = { STATE, next, prev, play, pause, togglePlay, toggleMute,
                                  goToStep, playTimeline, cancelSequence, initPanzoom,
-                                 spotlightOn, spotlightOff };
+                                 spotlightOn, spotlightOff, emitEvent };
       } catch (err) {
         console.error('[demo-viewer]', err);
         $empty.classList.add('visible');
