@@ -452,6 +452,32 @@ class DemoForge:
         self.save_spec(demo_id, data)
         return {"atStep": at_step, "branchCount": len(branches)}
 
+    def add_choices(self, demo_id: str, at_step: int, choices: list[dict[str, Any]],
+                    branch_id: str | None = None) -> dict[str, Any]:
+        """Branching V2: attach viewer-facing choice points to a step.
+
+        ``choices`` is validated + normalized via schema.validate_choices.
+        Each choice jumps to ``destination`` (which can itself be a choice
+        step, so nesting composes naturally); the flow rejoins the linear
+        sequence from wherever the destination sits. Existing demos without
+        choices are unaffected.
+        """
+        data = self.load_spec(demo_id)
+        steps = data.get("steps") or []
+        if at_step < 0 or at_step >= len(steps):
+            raise DemoForgeError(f"atStep {at_step} out of range (have {len(steps)} steps)")
+        from .schema import validate_choices
+        try:
+            norm = validate_choices(choices, len(steps))
+        except ValueError as exc:
+            raise DemoForgeError(str(exc)) from exc
+        steps[at_step]["choices"] = norm
+        if branch_id:
+            steps[at_step]["branchId"] = str(branch_id).strip()[:64]
+        self.save_spec(demo_id, data)
+        return {"atStep": at_step, "branchId": steps[at_step].get("branchId"),
+                "choices": [c["id"] for c in norm]}
+
     # ------------------------------------------------------------------
     # Stylize (W4)
     # ------------------------------------------------------------------

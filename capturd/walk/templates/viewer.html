@@ -275,6 +275,40 @@
     #empty-state h1 { margin: 0; font-size: 18px; color: #e8eaed; font-weight: 600; }
     #empty-state p  { margin: 0; font-size: 13px; max-width: 480px; line-height: 1.5; }
     #empty-state code { background: rgba(255,255,255,0.08); padding: 2px 6px; border-radius: 4px; }
+
+    /* Branching V2 — viewer-facing choice points (Phase 5) */
+    #choice-overlay {
+      display: none;
+      position: absolute; inset: 0; z-index: 40;
+      align-items: center; justify-content: center;
+      background: rgba(10, 11, 14, 0.62);
+      backdrop-filter: blur(2px);
+    }
+    #choice-overlay.visible { display: flex; }
+    #choice-panel {
+      display: flex; flex-direction: column; gap: 12px; align-items: stretch;
+      max-width: min(480px, 86vw); padding: 24px;
+      background: rgba(21, 23, 25, 0.92);
+      border: 1px solid rgba(255,255,255,0.12); border-radius: 14px;
+      box-shadow: 0 18px 60px rgba(0,0,0,0.55);
+    }
+    #choice-title { margin: 0 0 4px; font-size: 16px; font-weight: 600; color: #e8eaed; text-align: center; }
+    .choice-btn {
+      appearance: none; border: 1px solid rgba(255,255,255,0.16);
+      background: rgba(255,255,255,0.06); color: #e8eaed;
+      font: inherit; font-size: 14px; font-weight: 500;
+      padding: 12px 18px; border-radius: 10px; cursor: pointer;
+      transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
+      text-align: center;
+    }
+    .choice-btn:hover, .choice-btn:focus-visible {
+      background: rgba(242,194,48,0.16); border-color: #f2c230; outline: none;
+    }
+    .choice-btn:active { transform: scale(0.985); }
+    @media (prefers-reduced-motion: reduce) {
+      .choice-btn { transition: none; }
+      .choice-btn:active { transform: none; }
+    }
   </style>
 </head>
 <body>
@@ -300,6 +334,13 @@
       <div id="empty-state" role="alert">
         <h1>No demo loaded</h1>
         <p>Embed a DemoSpec JSON in <code>&lt;script id="demo-data"&gt;</code> or load this page with <code>?demo=demo.json</code>.</p>
+      </div>
+
+      <div id="choice-overlay" role="dialog" aria-modal="true" aria-label="Choose a path">
+        <div id="choice-panel">
+          <h2 id="choice-title"></h2>
+          <div id="choice-buttons"></div>
+        </div>
       </div>
     </div>
 
@@ -457,6 +498,7 @@
       exportMode: false,    // deterministic export renderer owns the DOM
       _sequenceTimer: null, // current timeline sequence timeout
       _sequenceCancelled: false, // user-interrupt flag
+      vars: {},             // Branching V2 / Phase 9: chosen variable assignments
     };
 
     // ----------------------------------------------------------------
@@ -1157,6 +1199,50 @@
     // ----------------------------------------------------------------
     //  Step state machine
     // ----------------------------------------------------------------
+    // ----------------------------------------------------------------
+    //  Branching V2 — viewer-facing choice points
+    // ----------------------------------------------------------------
+    const $choiceOverlay = document.getElementById('choice-overlay');
+    const $choiceTitle   = document.getElementById('choice-title');
+    const $choiceButtons = document.getElementById('choice-buttons');
+
+    function hideChoices() {
+      $choiceOverlay.classList.remove('visible');
+      $choiceButtons.innerHTML = '';
+    }
+
+    function showChoices(step) {
+      const choices = Array.isArray(step.choices) ? step.choices : [];
+      if (!choices.length) { hideChoices(); return; }
+      $choiceTitle.textContent = step.annotation || 'Choose a path';
+      $choiceButtons.innerHTML = '';
+      choices.forEach((ch) => {
+        const b = document.createElement('button');
+        b.className = 'choice-btn';
+        b.type = 'button';
+        b.textContent = ch.label || ch.id;
+        b.setAttribute('aria-label', ch.label || ch.id);
+        b.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          // Event contract: the viewer picked a path.
+          emitEvent('branch_select', {
+            stepIndex: STATE.index,
+            branchId: step.branchId || null,
+            choiceId: ch.analyticsName || ch.id,
+          });
+          if (ch.variable && typeof ch.variable === 'object') {
+            Object.assign(STATE.vars, ch.variable);
+          }
+          hideChoices();
+          goToStep(ch.destination, 1, true);
+        });
+        $choiceButtons.appendChild(b);
+      });
+      $choiceOverlay.classList.add('visible');
+      const first = $choiceButtons.querySelector('button');
+      if (first) { try { first.focus({ preventScroll: true }); } catch (_) {} }
+    }
+
     function clampIndex(i) {
       const n = STATE.spec.steps.length;
       if (n === 0) return 0;
@@ -1247,8 +1333,14 @@
           }
           // Fire the animation timeline for this step
           playTimeline(next);
-          // Single auto-advance scheduler: paced by the step's real length.
-          if (STATE.isPlaying) scheduleAutoAdvance(stepDwellMs(next));
+          // Branching V2: a choice step waits for the viewer — no auto-advance.
+          if (newStep && Array.isArray(newStep.choices) && newStep.choices.length) {
+            showChoices(newStep);
+          } else {
+            hideChoices();
+            // Single auto-advance scheduler: paced by the step's real length.
+            if (STATE.isPlaying) scheduleAutoAdvance(stepDwellMs(next));
+          }
         }, TRANSITION_MS);
       }, TRANSITION_MS);
     }

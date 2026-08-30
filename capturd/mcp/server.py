@@ -873,34 +873,47 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
             raise ValueError(str(exc))
         return {"ok": True, **result}
 
-    # ---- W4: demo.branch -------------------------------------------------
+    # ---- W4: demo.branch (upgraded in V2 — same tool, viewer-facing choices) --
 
     @mcp.tool(
         name="demo.branch",
         description=(
-            "Record an alternate path branching from atStep. altPath is a "
-            "list of DemoStep-shaped dicts representing the branched flow."
+            "Branch a demo from atStep. Two modes: (legacy) altPath records an "
+            "alternate DemoStep-shaped path for the editor; (V2) choices adds "
+            "viewer-facing choice points — each {id, label, destination, "
+            "analyticsName?, variable?, ctaId?} renders as a button in the "
+            "viewer, emits branch_view/branch_select telemetry, and jumps to "
+            "the destination step (nested choice steps compose; the flow "
+            "rejoins the linear sequence from the destination). Pass exactly "
+            "one of altPath / choices."
         ),
         timeout=15.0,
     )
     async def demo_branch(
         demo_id: str,
         at_step: int,
-        alt_path: list[dict[str, Any]],
+        alt_path: list[dict[str, Any]] | None = None,
+        choices: list[dict[str, Any]] | None = None,
+        branch_id: str | None = None,
     ) -> dict[str, Any]:
         if not demo_id:
             raise ValueError("demoId is required")
         if not isinstance(at_step, int) or at_step < 0:
             raise ValueError("atStep must be a non-negative integer")
-        if not isinstance(alt_path, list):
-            raise ValueError("altPath must be a list")
+        if (alt_path is None) == (choices is None):
+            raise ValueError("pass exactly one of altPath or choices")
         try:
+            if choices is not None:
+                result = forge.add_choices(demo_id, at_step, choices, branch_id)
+                return {"ok": True, "mode": "viewer-choices", **result}
+            if not isinstance(alt_path, list):
+                raise ValueError("altPath must be a list")
             result = forge.add_branch(demo_id, at_step, alt_path)
         except DemoNotFound:
             raise ValueError(f"demo not found: {demo_id}")
         except DemoForgeError as exc:
             raise ValueError(str(exc))
-        return {"ok": True, **result}
+        return {"ok": True, "mode": "alt-path", **result}
 
     # ---- W4: demo.stylize ------------------------------------------------
 

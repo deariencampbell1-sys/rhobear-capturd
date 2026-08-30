@@ -216,6 +216,61 @@ class DemoStep:
     voiceoverWords: list[dict] | None = None  # WordTimestamp[] as dicts
     cursorPath: list[dict] | None = None  # CursorPoint[] as dicts
 
+    # Branching V2 (Phase 5) — viewer-facing choice points. ``branches``
+    # (set by add_branch) records alternate paths for the editor; ``choices``
+    # is what the VIEWER renders as buttons. Both may coexist; old specs
+    # have neither, so everything stays backward compatible.
+    branchId: str | None = None           # analytics name for the choice point
+    choices: list[dict] | None = None     # [{id,label,destination,analyticsName?,variable?,ctaId?}]
+
+
+def validate_choices(choices: Any, step_count: int) -> list[dict]:
+    """Validate + normalize a viewer-facing choice list (Branching V2).
+
+    Each choice needs: stable ``id`` (analytics), human ``label``, integer
+    ``destination`` step index in range. Optional: ``analyticsName``,
+    ``variable`` ({name: value} applied when chosen), ``ctaId``.
+    Raises ValueError on structural problems — callers turn that into tool
+    errors. Returns the normalized list (bounded lengths).
+    """
+    if not isinstance(choices, list) or not choices:
+        raise ValueError("choices must be a non-empty list")
+    if len(choices) > 12:
+        raise ValueError("too many choices (max 12 per step)")
+    out: list[dict] = []
+    seen_ids: set[str] = set()
+    for ch in choices:
+        if not isinstance(ch, dict):
+            raise ValueError("each choice must be an object")
+        cid = str(ch.get("id") or "").strip()
+        if not cid or len(cid) > 64 or not all(c.isalnum() or c in "-_" for c in cid):
+            raise ValueError(f"choice id invalid: {cid!r} (alphanumeric - _ only)")
+        if cid in seen_ids:
+            raise ValueError(f"duplicate choice id: {cid}")
+        seen_ids.add(cid)
+        label = str(ch.get("label") or "").strip()
+        if not label or len(label) > 120:
+            raise ValueError(f"choice {cid}: label required (max 120 chars)")
+        dest = ch.get("destination")
+        if not isinstance(dest, int) or isinstance(dest, bool) \
+                or not (0 <= dest < step_count):
+            raise ValueError(
+                f"choice {cid}: destination must be a step index in [0,{step_count})")
+        norm: dict = {"id": cid, "label": label, "destination": dest}
+        an = ch.get("analyticsName")
+        if isinstance(an, str) and an.strip():
+            norm["analyticsName"] = an.strip()[:64]
+        var = ch.get("variable")
+        if isinstance(var, dict) and var:
+            norm["variable"] = {
+                str(k)[:64]: str(v)[:200] for k, v in list(var.items())[:16]
+            }
+        cta = ch.get("ctaId")
+        if isinstance(cta, str) and cta.strip():
+            norm["ctaId"] = cta.strip()[:64]
+        out.append(norm)
+    return out
+
 
 @dataclass
 class DemoSpec:
@@ -255,4 +310,6 @@ __all__ = [
     # Step + spec
     "DemoStep",
     "DemoSpec",
+    # Branching V2
+    "validate_choices",
 ]
