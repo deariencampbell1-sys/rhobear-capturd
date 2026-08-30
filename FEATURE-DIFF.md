@@ -14,7 +14,7 @@ Wiring (`service/app/*.py`, render_worker, mcp_service) is the partner's lane (P
 | STEP 1 Product URL | `#url` | 1jbdzd / m2c8m7 STEP 1 |
 | STEP 2 Brief the director (textarea + 3 hint chips + wave) | `#ask #brief .hintchip[data-hint] .wave` | 1jbdzd / m2c8m7 STEP 2 |
 | STEP 3 Choose a shot — 6 demo types | `#tpls .tpl[data-tpl]` (saas-walkthrough, ux-showcase, feature-spotlight, tutorial-longform, social-teaser, login-flow) | 1jbdzd / m2c8m7 STEP 3 |
-| STEP 4 Voice — 6 voices (5 HD + Aria classic) | `#voices .voice[data-voice]` (vertex:Charon/Kore/Aoede/Fenrir/Zephyr:…, "") | 1jbdzd / m2c8m7 STEP 4 |
+| STEP 4 Voice — 6 voices (5 HD + Aria classic) | `#voices .voice[data-voice]` (polly:Ruth/Matthew/Danielle/Olivia/Kevin, "edge:Aria") | 1jbdzd / m2c8m7 STEP 4 |
 | STEP 4 Aspect — 16:9 / 9:16 / 1:1 | `#aspect button[data-aspect]` | 1jbdzd / m2c8m7 STEP 4 |
 | Film it (submit) | `#filmBtn` → POST `/api/generate` `{url,template,aspect,voice,brief}` | 1jbdzd (enabled) / m2c8m7 (disabled 40%) |
 | Filming progress | `#prog #progText` + `poll()` on `/api/jobs/{id}` | bice8o (Filming overlay) |
