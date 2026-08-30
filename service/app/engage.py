@@ -309,7 +309,11 @@ async def share(request: Request, demo_id: str, body: ShareRequest):
         # Unattributed fallback — the demo still ships; attribution is opt-in.
         return {"ok": True, "url": public_url, "trackable": False,
                 "attributed": False}
-    url = minted.get("send_url") or public_url
+    # The prospect link is the CAPTUR'D pub URL carrying Frontman's opaque
+    # token (?fm=). Frontman keeps its own card-side tracking; the viewer's
+    # telemetry binds the token server-side and signals back through the
+    # adapter. The token is opaque — no contact data ever rides with it.
+    url = f"{public_url}?fm={minted['token']}"
     return {"ok": True, "url": url, "trackable": True, "attributed": True}
 
 

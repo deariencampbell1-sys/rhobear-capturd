@@ -398,7 +398,10 @@ def test_share_trackable_is_a_frontman_facade(signed_in, frontman_spy, monkeypat
     assert r.status_code == 200
     body = r.json()
     assert body["trackable"] is True and body["attributed"] is True
-    assert "tok-MINT-1" not in body["url"], "token belongs to Frontman's URL, not ours"
+    # Prospect link = Captur'd pub URL + Frontman's opaque token (?fm=),
+    # resolved server-side; no contact data in any URL.
+    assert body["url"].endswith("?fm=tok-MINT-1")
+    assert "Test" not in body["url"] and "c-77" not in body["url"]
     assert minted["target"].endswith(f"/pub/d/{demo_id}")
 
     # Unattributed fallback when the bridge is down.

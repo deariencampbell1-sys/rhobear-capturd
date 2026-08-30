@@ -189,5 +189,7 @@ def test_hosted_share_trackable_is_frontman_facade(hosted, monkeypatch):
 
     res, mint_calls = asyncio.run(main())
     text = str(res.content) if hasattr(res, "content") else str(res)
-    assert "tok-FM-1" not in text, "Frontman's token rides ITS url, not ours"
+    # New contract: the prospect link is Captur'd's pub URL carrying
+    # Frontman's opaque token as ?fm= (resolved server-side only).
+    assert "tok-FM-1" in text and "/pub/d/" in text
     assert mint_calls and mint_calls[0]["url"].endswith(f"/pub/d/{hosted['demo_id']}")

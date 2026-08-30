@@ -132,6 +132,46 @@ async def pub_play(demo_id: str):
                                 status_code=404)
         spec = json.loads(ver["spec_json"])
         html = render_viewer(spec)
+        # Telemetry forwarder (hosted only): batches capturd:event to the
+        # ingest API. Attribution rides the ?fm= query param (Frontman's
+        # opaque token) and is bound server-side — never read by Core.
+        forwarder = """
+<script>
+(function () {
+  var qs = new URLSearchParams(location.search);
+  var FM = qs.get('fm') || '';
+  var SID = (window.crypto && window.crypto.randomUUID)
+    ? window.crypto.randomUUID()
+    : 's-' + Date.now().toString(36) + Math.random().toString(36).slice(2);
+  var DEMO_ID = __DEMO_ID__;
+  var buf = [];
+  var timer = null;
+  function flush(sync) {
+    if (!buf.length) return;
+    var batch = buf.splice(0, buf.length);
+    var body = JSON.stringify({sessionId: SID, demoId: DEMO_ID,
+      versionId: null, events: batch,
+      attributionToken: FM || undefined,
+      deviceClass: (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) ? 'mobile' : 'desktop'});
+    if (sync && navigator.sendBeacon) {
+      try { navigator.sendBeacon('/api/pub/events', new Blob([body], {type: 'application/json'})); return; } catch (e) {}
+    }
+    fetch('/api/pub/events', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: body, keepalive: true}).catch(function () {});
+  }
+  window.addEventListener('capturd:event', function (ev) {
+    if (!ev.detail) return;
+    buf.push({event: ev.detail.event, stepId: ev.detail.stepId,
+      branchId: ev.detail.branchId, choiceId: ev.detail.choiceId,
+      ctaId: ev.detail.ctaId, elapsedMs: ev.detail.elapsedMs});
+    if (!timer) timer = setInterval(flush, 2500);
+    if (buf.length >= 20) flush();
+  });
+  window.addEventListener('pagehide', function () { flush(true); });
+})();
+</script>\n</body>"""
+        forwarder = forwarder.replace("__DEMO_ID__", repr(str(demo_id)))
+        html = html.replace("</body>", forwarder, 1)
         return HTMLResponse(html, status_code=200)
     except Exception:                                    # noqa: BLE001
         return HTMLResponse("<!doctype html><title>404</title><p>not found</p>",

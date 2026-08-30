@@ -204,8 +204,8 @@ def build_server(store, analytics, frontman):
             return {"ok": True, "trackable": False, "attributed": False,
                     "url": public_url,
                     "note": "Frontman bridge unconfigured — unattributed share"}
-        return {"ok": True, "trackable": True, "attributed": True,
-                "url": minted.get("send_url") or public_url,
+        url = f"{public_url}?fm={minted['token']}"
+        return {"ok": True, "trackable": True, "attributed": True, "url": url,
                 "note": "attribution minted BY Frontman; Captur'd keeps detailed "
                         "events, Frontman gets only sales-significant signals"}
 
