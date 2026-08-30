@@ -988,24 +988,25 @@ class DemoRecorder:
         assert self._page is not None
 
         if action == "click":
-            # Ensure element is visible before clicking.
+            # Ensure element is visible before clicking. 12s budget: real
+            # pages smooth-scroll and animate; 5s produced false failures.
             try:
-                await self._page.wait_for_selector(selector, state="visible", timeout=3000)
+                await self._page.wait_for_selector(selector, state="visible", timeout=8000)
             except Exception:
                 pass  # Element might be present but offscreen; try anyway.
-            await self._page.click(selector, timeout=5000)
+            await self._page.click(selector, timeout=12000)
             await asyncio.sleep(0.3)  # Let the page react.
 
         elif action == "input":
-            await self._page.wait_for_selector(selector, state="visible", timeout=3000)
+            await self._page.wait_for_selector(selector, state="visible", timeout=8000)
             # Click to focus first — the overlay bridge records the click, so
             # typing into a field shows up as a real step (hotspot on the
             # field) instead of silently mutating the page.
             try:
-                await self._page.click(selector, timeout=5000)
+                await self._page.click(selector, timeout=12000)
             except Exception:
                 pass  # field may be focus-only; fill still works
-            await self._page.fill(selector, value or "", timeout=5000)
+            await self._page.fill(selector, value or "", timeout=12000)
             await asyncio.sleep(0.3)
 
         elif action == "navigate":

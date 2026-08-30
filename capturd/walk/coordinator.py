@@ -372,7 +372,12 @@ class DemoForge:
     ) -> dict[str, Any]:
         """Append an AnimationKeyframe to the demo's aiAnnotations.animationTimeline."""
         data = self.load_spec(demo_id)
-        ann = data.setdefault("aiAnnotations", {})
+        # Un-enriched demos serialize aiAnnotations as null — normalize instead
+        # of crashing (demo.zoom/spotlight/pan must work on every demo).
+        ann = data.get("aiAnnotations")
+        if not isinstance(ann, dict):
+            ann = {}
+            data["aiAnnotations"] = ann
         timeline = ann.setdefault("animationTimeline", [])
         kf: dict[str, Any] = {
             "stepIndex": step_index,
