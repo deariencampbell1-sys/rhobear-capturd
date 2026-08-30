@@ -224,13 +224,13 @@ def test_index_has_all_templates(index_html):
 
 
 def test_index_has_all_voices(index_html):
-    """All 6 voices (5 HD + Aria classic) are present."""
-    assert "vertex:Charon:warm" in index_html
-    assert "vertex:Kore:warm" in index_html
-    assert "vertex:Aoede:warm" in index_html
-    assert "vertex:Fenrir:trailer" in index_html
-    assert "vertex:Zephyr:warm" in index_html
-    # Aria classic (no HD)
+    """All voices (5 HD Polly + Aria classic) are present — Bedrock-era wiring."""
+    assert "polly:Ruth" in index_html
+    assert "polly:Matthew" in index_html
+    assert "polly:Danielle" in index_html
+    assert "polly:Olivia" in index_html
+    assert "polly:Kevin" in index_html
+    # Aria classic (no HD) — edge fallback stays
     assert 'class="voice classic"' in index_html
 
 

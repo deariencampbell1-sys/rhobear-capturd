@@ -296,11 +296,11 @@
 
         <div class="step__header"><span class="step__badge">Step 4</span><span class="step__label">Voice and format</span></div>
         <div class="voices" id="voices">
-          <button class="voice sel" data-voice="vertex:Charon:warm">Charon <span class="hd">HD</span><span>deep · warm</span></button>
-          <button class="voice" data-voice="vertex:Kore:warm">Kore <span class="hd">HD</span><span>firm</span></button>
-          <button class="voice" data-voice="vertex:Aoede:warm">Aoede <span class="hd">HD</span><span>friendly</span></button>
-          <button class="voice" data-voice="vertex:Fenrir:trailer">Fenrir <span class="hd">HD</span><span>trailer</span></button>
-          <button class="voice" data-voice="vertex:Zephyr:warm">Zephyr <span class="hd">HD</span><span>upbeat</span></button>
+          <button class="voice sel" data-voice="polly:Ruth">Ruth <span class="hd">HD</span><span>warm</span></button>
+          <button class="voice" data-voice="polly:Matthew">Matthew <span class="hd">HD</span><span>deep</span></button>
+          <button class="voice" data-voice="polly:Danielle">Danielle <span class="hd">HD</span><span>firm</span></button>
+          <button class="voice" data-voice="polly:Olivia">Olivia <span class="hd">HD</span><span>friendly</span></button>
+          <button class="voice" data-voice="polly:Kevin">Kevin <span class="hd">HD</span><span>upbeat</span></button>
           <button class="voice classic" data-voice="">Aria<span>classic</span></button>
         </div>
         <div class="aspect" id="aspect" style="margin-top:10px">
@@ -345,7 +345,7 @@ const toast = m => { const t=$('#toast'); t.textContent=m; t.classList.remove('h
   clearTimeout(window._t); window._t=setTimeout(()=>t.classList.add('hide'),3200); };
 const api = (path, opts) => fetch(path, opts);
 
-let ME=null, TPL='saas-walkthrough', ASPECT='9:16', VOICE='vertex:Charon:warm';
+let ME=null, TPL='saas-walkthrough', ASPECT='9:16', VOICE='polly:Ruth';
 
 // If the page just landed from auth.rhobear.ai we have a token to exchange
 // — set the flag so refresh() waits for the exchange before rendering.
@@ -472,7 +472,7 @@ $('#upgrade').onclick = ()=> location.href='/billing/checkout';
 let _tick=null;
 function startFilming(){
   const label=(TPL_LABEL[TPL]||TPL);
-  $('#filmChips').innerHTML=`<span>${esc(label)}</span><span>${esc(voiceName(VOICE))}${VOICE.startsWith('vertex')?' HD':''}</span><span>${esc(ASPECT)}</span>`;
+  $('#filmChips').innerHTML=`<span>${esc(label)}</span><span>${esc(voiceName(VOICE))}${VOICE.startsWith('polly')?' HD':''}</span><span>${esc(ASPECT)}</span>`;
   let pct=4;
   const set=p=>{ p=Math.min(99,p); $('#progFill').style.width=p+'%'; $('#progPct').textContent=Math.round(p)+'%'; $('#progRem').textContent=(100-Math.round(p))+'%'; };
   set(pct); clearInterval(_tick);

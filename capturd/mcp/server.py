@@ -1065,6 +1065,68 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
             "status": job["status"],
         }
 
+    # ---- V2: voice.* — switcher + synthesis over the VoiceProvider layer ----
+
+    @mcp.tool(
+        name="voice.list",
+        description=(
+            "List every voice the switcher can use: HD Polly voices (AWS, "
+            "word-timed for camera sync) and the zero-config edge fallbacks. "
+            "Legacy Vertex voice names are aliased to Polly automatically."
+        ),
+        timeout=10.0,
+    )
+    async def voice_list() -> dict[str, Any]:
+        from capturd.walk.voice_provider import list_all_voices
+        return {"ok": True, "voices": list_all_voices(),
+                "default": "polly:Ruth"}
+
+    @mcp.tool(
+        name="voice.preview",
+        description=(
+            "Render a short sample line in a voice so you can hear the taste "
+            "before narrating a demo. Returns base64 mp3 + duration estimate."
+        ),
+        timeout=60.0,
+    )
+    async def voice_preview(voice: str) -> dict[str, Any]:
+        from capturd.walk.voice_provider import normalize_voice
+        from capturd.walk.ai_pipeline import _synthesize_one as synthesize_speech
+        sample = ("This is what your product demo could sound like — "
+                  "clear, confident, and timed to every click.")
+        audio, words = await synthesize_speech(sample, normalize_voice(voice))
+        import base64
+        return {"ok": True, "voice": normalize_voice(voice),
+                "audio_mp3_base64": base64.b64encode(audio).decode("ascii"),
+                "bytes": len(audio), "words": len(words)}
+
+    @mcp.tool(
+        name="voice.synthesize",
+        description=(
+            "Narrate a line of text with a switcher voice. Returns the mp3 path "
+            "plus word timestamps (voiceoverWords shape) for camera sync."
+        ),
+        timeout=120.0,
+    )
+    async def voice_synthesize(text: str, voice: str = "polly:Ruth",
+                               out_dir: str | None = None) -> dict[str, Any]:
+        if not text or not text.strip():
+            raise ValueError("text is required")
+        if len(text) > 2000:
+            raise ValueError("text too long (max 2000 chars) — narrate per step")
+        from capturd.walk.voice_provider import normalize_voice
+        from capturd.walk.ai_pipeline import _synthesize_one as synthesize_speech
+        audio, words = await synthesize_speech(text.strip(), normalize_voice(voice))
+        import base64
+        import tempfile
+        from pathlib import Path as _P
+        d = _P(out_dir) if out_dir else _P(tempfile.mkdtemp(prefix="capturd-voice-"))
+        d.mkdir(parents=True, exist_ok=True)
+        path = d / "narration.mp3"
+        path.write_bytes(audio)
+        return {"ok": True, "voice": normalize_voice(voice), "audio_path": str(path),
+                "bytes": len(audio), "voiceoverWords": words}
+
     # Stash the forge on the server so tests / integration helpers can grab
     # it without rebuilding the server from scratch.
     mcp.state = {  # type: ignore[attr-defined]

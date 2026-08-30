@@ -562,11 +562,11 @@
             </div>
             <div class="step4">
               <div class="voicegrid" id="voices">
-                <button class="voice sel" data-voice="vertex:Charon:warm"><b>Charon</b><span class="hd">HD</span><span>deep · warm expert</span></button>
-                <button class="voice" data-voice="vertex:Kore:warm"><b>Kore</b><span class="hd">HD</span><span>firm · confident</span></button>
-                <button class="voice" data-voice="vertex:Aoede:warm"><b>Aoede</b><span class="hd">HD</span><span>breezy · friendly</span></button>
-                <button class="voice" data-voice="vertex:Fenrir:trailer"><b>Fenrir</b><span class="hd">HD</span><span>trailer energy</span></button>
-                <button class="voice" data-voice="vertex:Zephyr:warm"><b>Zephyr</b><span class="hd">HD</span><span>bright · upbeat</span></button>
+                <button class="voice sel" data-voice="polly:Ruth"><b>Ruth</b><span class="hd">HD</span><span>warm · natural read</span></button>
+                <button class="voice" data-voice="polly:Matthew"><b>Matthew</b><span class="hd">HD</span><span>deep · authoritative</span></button>
+                <button class="voice" data-voice="polly:Danielle"><b>Danielle</b><span class="hd">HD</span><span>firm · confident</span></button>
+                <button class="voice" data-voice="polly:Olivia"><b>Olivia</b><span class="hd">HD</span><span>breezy · friendly</span></button>
+                <button class="voice" data-voice="polly:Kevin"><b>Kevin</b><span class="hd">HD</span><span>bright · upbeat</span></button>
                 <button class="voice classic" data-voice=""><b>Aria</b><em>classic</em><span>classic (no HD)</span></button>
               </div>
               <div class="aspects" id="aspect">
@@ -626,7 +626,7 @@ const toast = m => { const t=$('#toast'); t.textContent=m; t.classList.remove('h
 const api = (path, opts) => fetch(path, opts);
 
 let ME = null;
-let TPL = 'saas-walkthrough', ASPECT = '16:9', VOICE = 'vertex:Charon:warm';
+let TPL = 'saas-walkthrough', ASPECT = '16:9', VOICE = 'polly:Ruth';
 
 // If the page just landed from auth.rhobear.ai we have a token to exchange
 // — set the flag so refresh() waits for the exchange before rendering.
@@ -711,7 +711,7 @@ async function loadGallery(){
       // optional richer fields — only shown when the wiring lane provides them
       const tags = [];
       if(j.template) tags.push(`<span class="tg tg-tpl">${esc(TPL_LABEL[j.template]||j.template)}</span>`);
-      if(j.voice!==undefined) tags.push(`<span class="tg">${esc(voiceName(j.voice))}${String(j.voice||'').startsWith('vertex')?' <span class="hd">HD</span>':''}</span>`);
+      if(j.voice!==undefined) tags.push(`<span class="tg">${esc(voiceName(j.voice))}${String(j.voice||'').startsWith('polly')?' <span class="hd">HD</span>':''}</span>`);
       if(j.aspect) tags.push(`<span class="tg">${esc(j.aspect)}</span>`);
       const meta = [`<span>${when}</span>`];
       if(j.duration_s) meta.push(`<span>${Math.round(j.duration_s)}s</span>`);
@@ -795,7 +795,7 @@ function stageState(i, active){
 function startFilming(){
   const label = (TPL_LABEL[TPL]||TPL);
   $('#filmChips').innerHTML =
-    `<span>${esc(label)}</span><span>${esc(voiceName(VOICE))}${VOICE.startsWith('vertex')?' HD':''}</span><span>${esc(ASPECT)}</span>`;
+    `<span>${esc(label)}</span><span>${esc(voiceName(VOICE))}${VOICE.startsWith('polly')?' HD':''}</span><span>${esc(ASPECT)}</span>`;
   let pct = 4;
   const set = p => { p=Math.min(99,p); $('#progFill').style.width=p+'%'; $('#progPct').textContent=Math.round(p)+'%';
     $('#progRem').textContent=(100-Math.round(p))+'%'; stageState(Math.min(3,Math.floor(p/25)), p); };

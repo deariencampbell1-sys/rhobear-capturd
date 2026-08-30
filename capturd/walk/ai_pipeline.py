@@ -374,17 +374,22 @@ async def _synthesize_one(
     if not text or not text.strip():
         return b"", []
 
-    # Vertex HD voice (the house engine, same one behind Rho) — selected by a
-    # Vertex voice name ("Kore", "vertex:Charon:trailer") or forced via
-    # CAPTURD_TTS_BACKEND=vertex. Edge TTS stays the zero-config fallback.
-    from capturd.walk import tts_vertex
-    if tts_vertex.is_vertex_voice(voice) or os.environ.get("CAPTURD_TTS_BACKEND", "").lower() == "vertex":
-        vertex_voice = voice if tts_vertex.is_vertex_voice(voice) else "Charon"
+    # Bedrock-era voice layer (V2): polly:* voices via the VoiceProvider
+    # abstraction (native word speech-marks for the synced camera). Legacy
+    # Vertex voice names are aliased so old demos keep regenerating. Edge TTS
+    # stays the zero-config fallback.
+    from capturd.walk import voice_provider
+    canonical = voice_provider.normalize_voice(voice)
+    provider, provider_voice = voice_provider.resolve_provider(canonical)
+    if provider is not None:
         try:
-            return await asyncio.to_thread(tts_vertex.synthesize, text.strip(), vertex_voice)
-        except tts_vertex.VertexTTSError as exc:
-            # Same error contract as the Edge path — callers only handle DemoAIError.
-            raise DemoAIError(f"Vertex TTS failed: {exc}") from exc
+            audio, words = await asyncio.to_thread(
+                provider.synthesize, text.strip(), provider_voice)
+            return audio, [WordTimestamp(**w) for w in words]
+        except RuntimeError as exc:
+            raise DemoAIError(f"{provider.id} TTS failed: {exc}") from exc
+        except Exception as exc:  # boto3/network errors
+            raise DemoAIError(f"{provider.id} TTS failed: {exc}") from exc
 
     try:
         import edge_tts
