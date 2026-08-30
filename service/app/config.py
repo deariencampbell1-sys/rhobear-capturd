@@ -94,3 +94,7 @@ def status() -> dict:
 def ensure_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
+
+# ---- Frontman attribution bridge (server-side only; see app/frontman.py) ----
+FRONTMAN_BASE_URL = _env("FRONTMAN_BASE_URL")            # exact origin, allowlisted
+FRONTMAN_BRIDGE_KEY = _env("FRONTMAN_BRIDGE_KEY")        # server-to-server bearer

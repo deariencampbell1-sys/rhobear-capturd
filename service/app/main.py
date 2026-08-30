@@ -6,6 +6,7 @@ end-to-end today except the owner's payment credentials (see billing.py / config
 """
 from __future__ import annotations
 
+import json
 import socket
 import sys
 from contextlib import asynccontextmanager
@@ -20,10 +21,11 @@ APP_DIR = Path(__file__).resolve().parent
 SERVICE_DIR = APP_DIR.parent
 sys.path.insert(0, str(SERVICE_DIR))
 
-from app import auth, billing, config, store            # noqa: E402
+from app import auth, billing, config, engage, store            # noqa: E402
 from app._http import read_json                          # noqa: E402
 from app.auth import current_user, require_user          # noqa: E402
 from capturd._net import is_private_ip                   # noqa: E402
+from capturd.walk.viewer import render_viewer            # noqa: E402
 from render_worker import CostCap, JobSpec, run_job       # noqa: E402
 
 # the Director scout lives in the rig; add it to path. Same env var + default as
@@ -106,11 +108,34 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Captur'd", lifespan=lifespan)
 app.include_router(auth.router)
 app.include_router(billing.router)
+app.include_router(engage.router)
 
 
 @app.get("/healthz")
 async def healthz():
     return {"ok": True, **config.status()}
+
+
+@app.get("/pub/d/{demo_id}", response_class=HTMLResponse, include_in_schema=False)
+async def pub_play(demo_id: str):
+    """Public playback page for a PUBLISHED demo (Phase-6 surface, minimal).
+
+    Renders the packaged self-contained viewer with the published version's
+    frozen spec. Unknown demo / unpublished demo / any error -> identical 404
+    body; the page never differs on token or existence hints. The viewer itself
+    carries the attribution token from its URL fragment into the event stream;
+    nothing contact-shaped is ever resolved here."""
+    try:
+        ver = store.get_published(demo_id)
+        if not ver:
+            return HTMLResponse("<!doctype html><title>404</title><p>not found</p>",
+                                status_code=404)
+        spec = json.loads(ver["spec_json"])
+        html = render_viewer(spec)
+        return HTMLResponse(html, status_code=200)
+    except Exception:                                    # noqa: BLE001
+        return HTMLResponse("<!doctype html><title>404</title><p>not found</p>",
+                            status_code=404)
 
 
 @app.get("/api/me")
