@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
 import inspect
 import logging
 import threading
@@ -39,6 +40,9 @@ from typing import Any, Callable
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+from capturd.walk.stt import resolve_backend
 
 
 class VoiceLoopError(RuntimeError):
@@ -435,7 +439,22 @@ class VoiceLoop:
         """Transcribe a numpy audio array (int16, mono, 16kHz) to text.
 
         Public for testing — feed a WAV file's samples directly.
+
+        Backend: AWS Transcribe when the account is configured (primary,
+        per the Nova/Bedrock directive); faster-whisper stays as the local
+        fallback so the program always works offline.
         """
+        backend = resolve_backend()
+        if backend == "aws":
+            try:
+                from capturd.walk.stt import AwsTranscribeSTT
+                text = AwsTranscribeSTT().transcribe_pcm16(audio)
+                logger.info("aws transcribe: %d chars", len(text))
+                return text
+            except Exception as exc:                  # noqa: BLE001
+                if (os.environ.get("CAPTURD_STT_BACKEND") or "").lower() == "aws":
+                    raise VoiceLoopError(f"AWS Transcribe failed: {exc}") from exc
+                logger.warning("aws transcribe failed; falling back to whisper: %s", exc)
         self._load_model()
         # faster-whisper expects float32 in [-1.0, 1.0]
         if audio.dtype == np.int16:
