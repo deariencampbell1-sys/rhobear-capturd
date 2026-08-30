@@ -285,6 +285,10 @@ class DemoSpec:
     startUrl: str = ""
     steps: list[DemoStep] = field(default_factory=list)
     aiAnnotations: dict | None = None
+    # Phase 6/7/9: optional end-card CTA. {id, label, url, analyticsName?}.
+    # The viewer shows it when the final step is reached and emits
+    # cta_view / cta_click against its analytics name (falls back to id).
+    cta: dict | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

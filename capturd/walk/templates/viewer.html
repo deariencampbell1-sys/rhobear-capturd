@@ -309,6 +309,28 @@
       .choice-btn { transition: none; }
       .choice-btn:active { transform: none; }
     }
+
+    /* Phase 6/7 — end-card CTA (spec.cta) */
+    #cta-card {
+      display: none;
+      position: absolute; left: 50%; bottom: 72px; transform: translateX(-50%);
+      z-index: 35;
+      padding: 14px 18px;
+      background: rgba(21, 23, 25, 0.92);
+      border: 1px solid rgba(242,194,48,0.45); border-radius: 12px;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+      text-align: center; max-width: min(480px, 86vw);
+    }
+    #cta-card.visible { display: block; }
+    #cta-title { margin: 0 0 10px; font-size: 14px; color: #e8eaed; font-weight: 600; }
+    #cta-btn {
+      appearance: none; border: none; border-radius: 10px; cursor: pointer;
+      background: #f2c230; color: #151719;
+      font: inherit; font-size: 14px; font-weight: 700;
+      padding: 10px 22px;
+    }
+    #cta-btn:hover { filter: brightness(1.06); }
+    @media (prefers-reduced-motion: reduce) { #cta-btn { transition: none; } }
   </style>
 </head>
 <body>
@@ -341,6 +363,11 @@
           <h2 id="choice-title"></h2>
           <div id="choice-buttons"></div>
         </div>
+      </div>
+
+      <div id="cta-card">
+        <p id="cta-title"></p>
+        <button id="cta-btn" type="button"></button>
       </div>
     </div>
 
@@ -500,6 +527,19 @@
       _sequenceCancelled: false, // user-interrupt flag
       vars: {},             // Branching V2 / Phase 9: chosen variable assignments
     };
+
+    // Phase 9 — client-side personalization. Text-only substitution; every
+    // consumer below renders via textContent, never innerHTML, so no variable
+    // can inject markup. Precedence: branch choices > embed/window config.
+    const VAR_RE = /\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\|\s*default:\s*"([^"]*)")?\s*\}\}/g;
+    function personalize(str) {
+      if (typeof str !== 'string' || str.indexOf('{{') === -1) return str;
+      const vars = Object.assign({}, (window.CAPTURD_VARS || {}), STATE.vars || {});
+      return str.replace(VAR_RE, function (m, name, def) {
+        if (Object.prototype.hasOwnProperty.call(vars, name)) return String(vars[name]);
+        return def != null ? def : '';
+      });
+    }
 
     // ----------------------------------------------------------------
     //  Viewer event contract — `capturd:event`
@@ -1214,13 +1254,13 @@
     function showChoices(step) {
       const choices = Array.isArray(step.choices) ? step.choices : [];
       if (!choices.length) { hideChoices(); return; }
-      $choiceTitle.textContent = step.annotation || 'Choose a path';
+      $choiceTitle.textContent = personalize(step.annotation || 'Choose a path');
       $choiceButtons.innerHTML = '';
       choices.forEach((ch) => {
         const b = document.createElement('button');
         b.className = 'choice-btn';
         b.type = 'button';
-        b.textContent = ch.label || ch.id;
+        b.textContent = personalize(ch.label || ch.id);
         b.setAttribute('aria-label', ch.label || ch.id);
         b.addEventListener('click', (ev) => {
           ev.stopPropagation();
@@ -1241,6 +1281,44 @@
       $choiceOverlay.classList.add('visible');
       const first = $choiceButtons.querySelector('button');
       if (first) { try { first.focus({ preventScroll: true }); } catch (_) {} }
+    }
+
+    // ----------------------------------------------------------------
+    //  Phase 6 — end-card CTA (spec.cta): cta_view / cta_click contract
+    // ----------------------------------------------------------------
+    const $ctaCard = document.getElementById('cta-card');
+    const $ctaTitle = document.getElementById('cta-title');
+    const $ctaBtn = document.getElementById('cta-btn');
+    let _ctaViewFired = false;
+
+    function hideCTA() {
+      $ctaCard.classList.remove('visible');
+    }
+
+    function showCTA(cta) {
+      if (!cta || !cta.label) { hideCTA(); return; }
+      $ctaTitle.textContent = personalize(
+        cta.title || 'Ready to see this in your own product?');
+      $ctaBtn.textContent = personalize(cta.label);
+      $ctaBtn.onclick = (ev) => {
+        ev.stopPropagation();
+        emitEvent('cta_click', {
+          stepIndex: STATE.index,
+          ctaId: cta.analyticsName || cta.id || null,
+          url: typeof cta.url === 'string' ? cta.url.slice(0, 512) : null,
+        });
+        if (typeof cta.url === 'string' && /^https?:\/\//.test(cta.url)) {
+          window.open(cta.url, '_blank', 'noopener');
+        }
+      };
+      $ctaCard.classList.add('visible');
+      if (!_ctaViewFired) {
+        _ctaViewFired = true;
+        emitEvent('cta_view', {
+          stepIndex: STATE.index,
+          ctaId: cta.analyticsName || cta.id || null,
+        });
+      }
     }
 
     function clampIndex(i) {
@@ -1335,9 +1413,16 @@
           playTimeline(next);
           // Branching V2: a choice step waits for the viewer — no auto-advance.
           if (newStep && Array.isArray(newStep.choices) && newStep.choices.length) {
+            hideCTA();
             showChoices(newStep);
           } else {
             hideChoices();
+            // Phase 6: end-card CTA on the final step (spec.cta).
+            if (next === n - 1 && STATE.spec && STATE.spec.cta) {
+              showCTA(STATE.spec.cta);
+            } else {
+              hideCTA();
+            }
             // Single auto-advance scheduler: paced by the step's real length.
             if (STATE.isPlaying) scheduleAutoAdvance(stepDwellMs(next));
           }
@@ -1416,9 +1501,10 @@
       $stepInfo.textContent = `Step ${STATE.index + 1} of ${total}`;
 
       if (step && step.annotation) {
-        $annotation.textContent = step.annotation;
+        const pAnn = personalize(step.annotation);
+        $annotation.textContent = pAnn;
         $annotation.classList.add('visible');
-        $annotation.title = step.annotation;
+        $annotation.title = pAnn;
       } else {
         $annotation.textContent = '';
         $annotation.classList.remove('visible');
