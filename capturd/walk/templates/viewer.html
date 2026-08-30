@@ -839,6 +839,54 @@
     // ----------------------------------------------------------------
     //  Target-rect helper (viewport coordinates from step data)
     // ----------------------------------------------------------------
+    // Sanity: is this recorded target worth a semantic zoom? Rejects the
+    // "zoom into the middle of nowhere" class of shot — degenerate rects,
+    // scrollbar-gutter/edge coordinates, and body/html targets.
+    function targetIsFramable(rect, target) {
+      if (!rect || !Number.isFinite(rect.width) || !Number.isFinite(rect.height)) return false;
+      if (rect.width < 6 || rect.height < 6) return false;
+      const tag = target && target.tagName ? String(target.tagName).toLowerCase() : '';
+      if (tag === 'body' || tag === 'html') return false;
+      if (target && target.meaningful === false) return false;
+      const vp = (STATE.spec && STATE.spec.viewport) || { width: 1440, height: 900 };
+      const cx = rect.x + rect.width / 2, cy = rect.y + rect.height / 2;
+      const GUTTER = 17;                                   // scrollbar / edge
+      if (cx < 0 || cy < 0 || cx > vp.width - GUTTER || cy > vp.height - GUTTER) return false;
+      return true;
+    }
+
+    // Frame a control, not a microscope slide: grow small rects to a minimum
+    // focus box and pad, keeping the element's centre as the focus point.
+    function paddedFocusRect(rect, vp) {
+      const MIN_W = vp.width * 0.28, MIN_H = vp.height * 0.28;
+      const PAD = 18;
+      let w = Math.max(rect.width + 2 * PAD, MIN_W);
+      let h = Math.max(rect.height + 2 * PAD, MIN_H);
+      const cx = rect.x + rect.width / 2, cy = rect.y + rect.height / 2;
+      return { x: cx - w / 2, y: cy - h / 2, width: w, height: h, cx: cx, cy: cy };
+    }
+
+    // Resolve the best framable target for a step: its own recorded element,
+    // else the NEXT step's element (the UI state this click produced — e.g.
+    // the modal that opened), else null → hold the wider shot. The padded
+    // focus box must stay (mostly) inside the recorded viewport: a zoom whose
+    // frame hangs off-screen is exactly the "middle of nowhere" shot.
+    function framableTargetFor(stepIndex) {
+      const steps = STATE.spec.steps;
+      const vp = (STATE.spec && STATE.spec.viewport) || { width: 1440, height: 900 };
+      for (let i = stepIndex; i < Math.min(steps.length, stepIndex + 2); i++) {
+        const t = (steps[i] && steps[i].interaction && steps[i].interaction.target) || {};
+        const r = t.boundingRect;
+        if (!targetIsFramable(r, t)) continue;
+        const padded = paddedFocusRect(r, vp);
+        const outX = Math.max(0, -padded.x, padded.x + padded.width - vp.width);
+        const outY = Math.max(0, -padded.y, padded.y + padded.height - vp.height);
+        if (outX > padded.width * 0.25 || outY > padded.height * 0.25) continue;
+        return { rect: r, padded: padded, fromStep: i };
+      }
+      return null;
+    }
+
     function getTargetRect(step) {
       const t = (step && step.interaction && step.interaction.target) || {};
       const r = t.boundingRect;
@@ -1131,12 +1179,11 @@
       const step = STATE.spec.steps[STATE.index];
       if (!step) return;
 
-      // Use specified target or fall back to current step target
-      const sel = targetSel || (step.interaction && step.interaction.target && step.interaction.target.selector);
-      const rect = getTargetRect(step);
-
-      // Even if we can't querySelector (it's a screenshot, not live DOM),
-      // we still know the boundingRect from the recording
+      // Semantic guard: only spotlight framable targets (never body/html,
+      // degenerate rects, or scrollbar-gutter coordinates).
+      const ft = framableTargetFor(STATE.index);
+      if (!ft) return;
+      const rect = ft.rect;
       const vp = STATE.spec.viewport || { width: 1440, height: 900 };
       const pad = 12;
       const x = Math.max(0, rect.x - pad);
@@ -1185,9 +1232,20 @@
 
     function zoomToAction(targetSel, offset, zoomLevel, easing, duration) {
       if (!STATE.panzoom || !STATE.spec.steps[STATE.index]) return;
-      const focus = keyframeFocus(offset);
+      // Semantic targeting: frame the recorded ELEMENT (padded), not a raw
+      // click coordinate. Unframable target -> keep the wider shot.
+      const ft = framableTargetFor(STATE.index);
+      if (!ft) {
+        resetAction(easing, duration);
+        return;
+      }
+      const vp = (STATE.spec && STATE.spec.viewport) || { width: 1440, height: 900 };
+      // Frame the padded rect: the zoom level that fits it, capped at the
+      // requested level so small controls don't go under a microscope.
+      const fitLevel = Math.min(3.0, Math.max(1.0, vp.width / ft.padded.width));
+      const level = Math.max(1.0, Math.min(zoomLevel || 1.5, fitLevel));
       animateCameraTo(
-        cameraTargetFor(focus.cx, focus.cy, zoomLevel || 1.5),
+        cameraTargetFor(ft.padded.cx, ft.padded.cy, level),
         duration || 500,
         easing
       );
@@ -1195,12 +1253,13 @@
 
     function panToAction(targetSel, offset, easing, duration) {
       if (!STATE.panzoom || !STATE.spec.steps[STATE.index]) return;
-      const focus = keyframeFocus(offset);
-      // Keep the current zoom level; only move the centre.
+      const ft = framableTargetFor(STATE.index);
+      if (!ft) return;
+      // Keep the current zoom level; only move the centre to the element.
       const fit = STATE.fit || computeFit();
       const level = STATE.panzoom.getTransform().scale / fit.scale;
       animateCameraTo(
-        cameraTargetFor(focus.cx, focus.cy, level),
+        cameraTargetFor(ft.padded.cx, ft.padded.cy, level),
         duration || 500,
         easing
       );

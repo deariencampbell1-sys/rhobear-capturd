@@ -288,12 +288,23 @@ OVERLAY_JS = r"""
     return !!target.closest('#' + BADGE_ID);
   }
 
+  // The meaningful interactive element for a click: text/svg children of a
+  // control resolve UP to the control itself, so the camera frames "the
+  // button", never "the bold text inside the button".
+  const INTERACTIVE = 'button,a,input,select,textarea,label,summary,[role=button],[role=link],[role=tab],[role=menuitem],[role=switch],[onclick]';
+  function meaningfulElement(el) {
+    if (!el || !el.closest) return el;
+    if (el.matches(INTERACTIVE)) return el;
+    const ctl = el.closest(INTERACTIVE);
+    return ctl || el;
+  }
+
   function describeClick(event) {
-    const el = event.target;
-    if (!el || el.nodeType !== 1) return null;
+    const raw = event.target;
+    if (!raw || raw.nodeType !== 1) return null;
+    const el = meaningfulElement(raw);
     const rect = el.getBoundingClientRect();
-    const clientX = event.clientX;
-    const clientY = event.clientY;
+    const clientX = event.clientX, clientY = event.clientY;
     let xPct = 0, yPct = 0;
     if (rect.width > 0) xPct = ((clientX - rect.left) / rect.width) * 100;
     if (rect.height > 0) yPct = ((clientY - rect.top) / rect.height) * 100;
@@ -311,12 +322,20 @@ OVERLAY_JS = r"""
         selector: buildSelector(el),
         tagName: el.tagName.toLowerCase(),
         text: text || undefined,
+        role: (el.getAttribute && (el.getAttribute('role') || el.getAttribute('aria-label'))) || undefined,
         boundingRect: {
           x: +rect.x.toFixed(2),
           y: +rect.y.toFixed(2),
           width: +rect.width.toFixed(2),
           height: +rect.height.toFixed(2),
         },
+        // Capture context — lets playback re-normalize the framing across
+        // different viewport sizes, zoom levels and scroll positions.
+        viewport: { width: window.innerWidth, height: window.innerHeight },
+        scroll: { x: window.scrollX || 0, y: window.scrollY || 0 },
+        devicePixelRatio: window.devicePixelRatio || 1,
+        pointer: { x: clientX, y: clientY },   // fallback only
+        meaningful: el !== document.body && el !== document.documentElement,
       },
       hotspot: { xPct, yPct },
       value: undefined,
