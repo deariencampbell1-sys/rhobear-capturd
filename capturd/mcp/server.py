@@ -1127,6 +1127,77 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
         return {"ok": True, "voice": normalize_voice(voice), "audio_path": str(path),
                 "bytes": len(audio), "voiceoverWords": words}
 
+    # ---- V2: spec intelligence — audit / optimize / personalize -------------
+
+    @mcp.tool(
+        name="demo.audit",
+        description=(
+            "Audit a demo: deterministic structural checks (pacing, narration "
+            "gaps, hotspot-copy duplication, CTA structure, mobile-safe crop, "
+            "dead-end branches) with severity-weighted category scores. Pass "
+            "real engagement analytics when you have them — behavioral findings "
+            "are never fabricated when analytics are absent."
+        ),
+        timeout=30.0,
+    )
+    async def demo_audit(demo_id: str, analytics: dict[str, Any] | None = None) -> dict[str, Any]:
+        from capturd.walk.audit import audit_spec
+        try:
+            spec = forge.load_spec(demo_id)
+        except DemoNotFound:
+            raise ValueError(f"demo not found: {demo_id}")
+        return {"ok": True, **audit_spec(spec, analytics=analytics)}
+
+    @mcp.tool(
+        name="demo.optimize",
+        description=(
+            "Plan safe, reversible optimizations for a demo (caption cleanup, "
+            "sentence-boundary copy shortening, HOLD pause trims). apply=False "
+            "returns the before/after plan for review; apply=True writes the "
+            "safe subset to the draft. Never deletes steps/branches/media — "
+            "those surface as approval-required findings."
+        ),
+        timeout=30.0,
+    )
+    async def demo_optimize(demo_id: str, apply: bool = False) -> dict[str, Any]:
+        from capturd.walk.optimize import optimize_spec
+        try:
+            spec = forge.load_spec(demo_id)
+        except DemoNotFound:
+            raise ValueError(f"demo not found: {demo_id}")
+        out = optimize_spec(spec, apply=apply)
+        if apply:
+            forge.save_spec(demo_id, out["spec"])
+        return {"ok": True, "plan": out["plan"], "safe_count": out["safe_count"],
+                "applied": out["applied"]}
+
+    @mcp.tool(
+        name="demo.personalize",
+        description=(
+            "Preview a demo with dynamic variables applied ({{var | default:'x'}} "
+            "syntax). Text-only and injection-safe; only title, narration, "
+            "branch intros, choice labels and CTA label are templated — recorded "
+            "product copy is never touched. saveAsDraft writes the personalized "
+            "spec into the draft (default: preview only)."
+        ),
+        timeout=30.0,
+    )
+    async def demo_personalize(demo_id: str, variables: dict[str, str],
+                               save_as_draft: bool = False) -> dict[str, Any]:
+        from capturd.walk.personalize import personalize_spec, sanitize_vars
+        try:
+            spec = forge.load_spec(demo_id)
+        except DemoNotFound:
+            raise ValueError(f"demo not found: {demo_id}")
+        safe_vars = sanitize_vars(variables)
+        if not safe_vars:
+            raise ValueError("no usable variables (names must be [A-Za-z_] identifiers)")
+        out = personalize_spec(spec, safe_vars)
+        if save_as_draft:
+            forge.save_spec(demo_id, out)
+        return {"ok": True, "variables": safe_vars, "spec": out,
+                "saved_to_draft": save_as_draft}
+
     # Stash the forge on the server so tests / integration helpers can grab
     # it without rebuilding the server from scratch.
     mcp.state = {  # type: ignore[attr-defined]
