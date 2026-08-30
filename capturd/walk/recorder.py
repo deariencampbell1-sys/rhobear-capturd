@@ -1205,6 +1205,22 @@ class DemoRecorder:
     # (via the overlay bridge, or synthesized for navigate/scroll), and a
     # fresh frame is streamed back so the harness can show it in chat.
 
+    def run_on_session(self, coro: Any, timeout: float = 20.0) -> Any:
+        """Thread-safe bridge: run ONE coroutine on the recorder's own event
+        loop and wait, bounded.
+
+        This is the ONLY correct way to touch live-session Playwright objects
+        (page, context) from another thread — the MCP handler's thread.
+        Awaiting them from a *different* event loop deadlocks forever with no
+        error; this bridge schedules onto the recorder's loop and enforces a
+        hard timeout so a stuck session surfaces as TimeoutError instead of a
+        hung command.
+        """
+        if self._loop is None or self._page is None:
+            raise DemoRecorderError("live session is not running")
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return future.result(timeout=timeout)
+
     def act(
         self,
         action: str,
@@ -1218,12 +1234,8 @@ class DemoRecorder:
         recorder's own event loop, waits for the step to be recorded, and
         returns ``{stepIndex, action, selector, url, pageTitle, frameBase64}``.
         """
-        if self._loop is None or self._page is None:
-            raise DemoRecorderError("live session is not running")
-        future = asyncio.run_coroutine_threadsafe(
-            self._act_async(action, selector, value, note), self._loop
-        )
-        return future.result(timeout=45.0)
+        return self.run_on_session(
+            self._act_async(action, selector, value, note), timeout=45.0)
 
     async def _act_async(
         self,
