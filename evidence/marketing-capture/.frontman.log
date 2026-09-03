@@ -1,0 +1,17 @@
+INFO:     Started server process [35372]
+INFO:     Waiting for application startup.
+2026-08-30 01:54:43,332 rhobear.sales.api INFO WhatsApp provider mode active: twilio
+2026-08-30 01:54:43,353 rhobear.sales.api INFO sales-chat ready — sales golden:14 kb:26 facts; support golden:7 kb:53 facts; web tenants: jenny
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8095 (Press CTRL+C to quit)
+INFO:     127.0.0.1:62516 - "GET /healthz HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:51899 - "GET / HTTP/1.1" 302 Found
+INFO:     127.0.0.1:51900 - "GET /docs HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:52004 - "POST /internal/capturd/mint HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58912 - "POST /internal/capturd/signal HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55385 - "POST /internal/capturd/signal HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55391 - "POST /internal/capturd/signal HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58605 - "POST /internal/capturd/signal HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58607 - "POST /internal/capturd/signal HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50307 - "POST /internal/capturd/signal HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50311 - "POST /internal/capturd/signal HTTP/1.1" 200 OK

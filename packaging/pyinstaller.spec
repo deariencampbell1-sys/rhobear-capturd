@@ -15,6 +15,7 @@ Prereqs (run once before building):
 import os
 import sys
 import glob
+import json
 from pathlib import Path
 
 import PyInstaller.utils.hooks as hooks
@@ -141,19 +142,44 @@ def _find_playwright_browsers():
     known_rel = (exe_name, f'chrome-win64/{exe_name}', f'chrome-win/{exe_name}',
                  f'chrome-linux/{exe_name}', f'chrome-mac/{exe_name}')
 
+    # Playwright's driver looks up browsers by the revision in browsers.json.
+    # Bundle both Chromium and the headless shell at those exact destinations;
+    # selecting only the newest chromium-* directory silently omitted the shell
+    # and made packaged agent walks fail at launch.
+    revisions = {}
+    try:
+        import playwright
+        browser_manifest = (Path(playwright.__file__).parent / 'driver' / 'package'
+                            / 'browsers.json')
+        manifest = json.loads(browser_manifest.read_text(encoding='utf-8'))
+        revisions = {item['name']: item['revision'] for item in manifest.get('browsers', [])}
+    except Exception:
+        pass
+
+    wanted = (
+        ('chromium', 'chromium', exe_name),
+        ('chromium-headless-shell', 'chromium_headless_shell', 'chrome-headless-shell.exe'),
+    )
     for base in candidates:
-        chromium_matches = sorted(glob.glob(str(base / 'chromium-*')))
-        if chromium_matches:
-            latest = Path(chromium_matches[-1])
-            found = any((latest / rel).is_file() for rel in known_rel)
-            if not found:
-                found = next(latest.glob(f'*/{exe_name}'), None) is not None
-            if found:
-                yield latest  # Return the dir; caller walks it
-                break
+        for manifest_name, directory_prefix, binary_name in wanted:
+            revision = revisions.get(manifest_name)
+            exact = base / f'{directory_prefix}-{revision}' if revision else None
+            matches = [exact] if exact and exact.is_dir() else [
+                Path(p) for p in sorted(glob.glob(str(base / f'{directory_prefix}-*')))
+            ]
+            for browser_dir in reversed(matches):
+                if not browser_dir:
+                    continue
+                found = any((browser_dir / rel).is_file() for rel in known_rel)
+                if not found:
+                    found = next(browser_dir.glob(f'*/{binary_name}'), None) is not None
+                if found:
+                    yield browser_dir
+                    break
 
 for browser_dir in _find_playwright_browsers():
-    dest_prefix = f'playwright_browsers/{browser_dir.name}'
+    # This is the path Playwright computes from its bundled driver package.
+    dest_prefix = f'playwright/driver/package/.local-browsers/{browser_dir.name}'
     for root_dir, _dirs, files in os.walk(str(browser_dir)):
         for fname in files:
             fpath = Path(root_dir) / fname

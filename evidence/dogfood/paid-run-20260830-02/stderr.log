@@ -1,0 +1,31 @@
+Recording (agent mode) session=6bfbd726c52e...
+demo launch attempt failed ({'headless': True, 'args': []}): BrowserType.launch: Executable doesn't exist at C:\Users\slang\AppData\Local\Temp\_MEI356562\playwright\driver\package\.local-browsers\chromium_headless_shell-1223\chrome-headless-shell-win64\chrome-headless-shell.exe
+\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557
+\u2551 Looks like Playwright was just installed or updated.       \u2551
+\u2551 Please run the following command to download new browsers: \u2551
+\u2551                                                            \u2551
+\u2551     playwright install                                     \u2551
+\u2551                                                            \u2551
+\u2551 <3 Playwright Team                                         \u2551
+\u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d
+Traceback (most recent call last):
+  File "cli.py", line 80, in <module>
+  File "cli.py", line 68, in main
+  File "capturd\walk\cli.py", line 82, in main
+  File "capturd\walk\cli.py", line 227, in _cmd_record
+  File "asyncio\runners.py", line 190, in run
+  File "asyncio\runners.py", line 118, in run
+  File "asyncio\base_events.py", line 654, in run_until_complete
+  File "capturd\walk\recorder.py", line 849, in agent_record
+  File "capturd\walk\ai_pipeline.py", line 99, in _build_client
+  File "capturd\walk\ai_pipeline.py", line 74, in _load_key
+capturd.walk.ai_pipeline.DemoAIError: RHOBEAR_GW_API_KEY is not set. Export the RHOBEAR gateway token in your environment (e.g. in a .env file loaded before app startup) and retry. Do NOT hardcode it in source.
+[PYI-1344:ERROR] Failed to execute script 'cli' due to unhandled exception!
+Exception ignored in: <function BaseSubprocessTransport.__del__ at 0x000001F9D688A200>
+Traceback (most recent call last):
+  File "asyncio\base_subprocess.py", line 126, in __del__
+  File "asyncio\base_subprocess.py", line 104, in close
+  File "asyncio\proactor_events.py", line 109, in close
+  File "asyncio\base_events.py", line 762, in call_soon
+  File "asyncio\base_events.py", line 520, in _check_closed
+RuntimeError: Event loop is closed

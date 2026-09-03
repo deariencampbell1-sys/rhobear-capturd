@@ -1,0 +1,21 @@
+session: 59aa48fae66f live (attempt 1)
+signed in + onboarding cleared + click-path verified
+act 0 ok (#url) steps 1->2
+act 1 ok (#brief) steps 2->3
+act 2 ok (button[data-tpl="saas-walkthrough"]) steps 3->4
+act 3 ok (button[data-aspect="16:9"]) steps 4->5
+act 4 ok (.voice[data-voice="polly:Ruth"]) steps 5->6
+act 5 ok (#filmBtn) steps 6->7
+look ok: dict
+demo saved: 59aa48fae66f steps: 7
+branch: {'atStep': 0, 'branchId': 'entry-q', 'choices': ['template', 'voice']}
+step 0: no annotation (narrate missing?)
+voice step 1: 29376B 13w
+voice step 2: 27072B 11w
+voice step 3: 25344B 9w
+voice step 4: 25200B 7w
+voice step 5: 20016B 8w
+voice step 6: 19440B 9w
+viewer -> C:\Users\slang\rhobear-capturd\evidence\marketing-capture\.capture\demos\59aa48fae66f\export.html
+mp4 -> C:\Users\slang\rhobear-capturd\evidence\marketing-capture\.capture\demos\59aa48fae66f\walkthrough.mp4
+DONE 59aa48fae66f

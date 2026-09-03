@@ -1,0 +1,2184 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DemoForge Viewer</title>
+  <style>
+    /* ------------------------------------------------------------------ */
+    /*  Reset + base                                                       */
+    /* ------------------------------------------------------------------ */
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; height: 100%; background: #0a0e13; color: #e8eef2;
+                 font-family: -apple-system, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI",
+                              system-ui, "Helvetica Neue", sans-serif;
+                 overflow: hidden; }
+    button { font: inherit; color: inherit; background: transparent; border: 0;
+             cursor: pointer; padding: 0; }
+    button:focus-visible { outline: 2px solid #f2c230; outline-offset: 2px; border-radius: 4px; }
+
+    /* ------------------------------------------------------------------ */
+    /*  Viewer shell                                                       */
+    /* ------------------------------------------------------------------ */
+    #viewer {
+      position: fixed; inset: 0;
+      display: flex; flex-direction: column;
+      background: #0a0e13;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  Screenshot layer                                                   */
+    /* ------------------------------------------------------------------ */
+    #screenshot-container {
+      position: relative; flex: 1 1 auto;
+      overflow: hidden;
+      background: #0a0e13;
+    }
+    #screenshot {
+      display: block;
+      width: 100%; height: 100%;
+      object-fit: contain;
+      opacity: 0;
+      transition: opacity 300ms ease-in-out;
+      pointer-events: none;
+    }
+    #screenshot.visible { opacity: 1; }
+
+    #hotspot-layer {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+      pointer-events: none;
+      overflow: visible;
+    }
+    #hotspot {
+      pointer-events: auto;
+      cursor: pointer;
+      transform-box: fill-box;
+      transform-origin: center;
+      animation: hotspot-pulse 1.2s ease-in-out infinite;
+    }
+    #hotspot-ring {
+      fill: none;
+      stroke: #f2c230;
+      stroke-width: 2;
+      pointer-events: auto;
+      cursor: pointer;
+      transform-box: fill-box;
+      transform-origin: center;
+      animation: hotspot-ring 1.2s ease-in-out infinite;
+    }
+    @keyframes hotspot-pulse {
+      0%, 100% { transform: scale(1);   opacity: 0.85; }
+      50%      { transform: scale(1.3); opacity: 0.30; }
+    }
+    @keyframes hotspot-ring {
+      0%   { transform: scale(0.6); opacity: 1; }
+      100% { transform: scale(2.4); opacity: 0; }
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  Cursor — lives INSIDE the panzoom layer (content space) so it      */
+    /*  stays glued to the page under any camera zoom/pan.                 */
+    /* ------------------------------------------------------------------ */
+    #cursor {
+      position: absolute;
+      width: 30px; height: 42px;
+      pointer-events: none;
+      transform-origin: 0 0;
+      opacity: 0;
+      transition: opacity 120ms ease-out;
+      filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5));
+      z-index: 6;
+    }
+    #cursor.visible { opacity: 1; }
+    /* Soft hover halo + click ripple, drawn in the SVG hotspot layer. */
+    #hotspot-ring { transition: none; }
+
+    /* Caption pill — rendered during export so the MP4 carries the        */
+    /* step narration as an on-screen callout.                             */
+    #export-caption {
+      position: absolute;
+      left: 50%; bottom: 36px;
+      transform: translateX(-50%);
+      max-width: 72%;
+      padding: 10px 22px;
+      border-radius: 999px;
+      background: rgba(12, 14, 18, 0.82);
+      color: #f2f4f7;
+      font-size: 17px;
+      font-weight: 500;
+      line-height: 1.4;
+      text-align: center;
+      letter-spacing: 0.01em;
+      box-shadow: 0 6px 24px rgba(0,0,0,0.45);
+      backdrop-filter: blur(6px);
+      opacity: 0;
+      pointer-events: none;
+      z-index: 7;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* Export mode: kill every wall-clock animation/transition — the       */
+    /* deterministic renderer owns all motion via seek(tMs).               */
+    body.export-mode #controls { display: none; }
+    body.export-mode *, body.export-mode *::before, body.export-mode *::after {
+      transition: none !important;
+      animation: none !important;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  Panzoom layer — transformed by the panzoom engine                  */
+    /* ------------------------------------------------------------------ */
+    #panzoom-layer {
+      position: absolute;
+      /* dimensions set dynamically from demo spec viewport */
+      transform-origin: 0 0;
+      will-change: transform;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  Spotlight overlay — dims everything except the target              */
+    /* ------------------------------------------------------------------ */
+    #spotlight-overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.7);
+      pointer-events: none;
+      z-index: 4;
+      opacity: 0;
+      transition: opacity 200ms ease;
+      /* clip-path is set dynamically via JS to punch a hole */
+      clip-path: none;
+    }
+    #spotlight-overlay.active {
+      opacity: 1;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  Controls (video-player chrome)                                     */
+    /* ------------------------------------------------------------------ */
+    #controls {
+      flex: 0 0 auto;
+      background: linear-gradient(to top, rgba(8,10,14,0.95), rgba(8,10,14,0.75));
+      padding: 12px 18px 14px;
+      opacity: 1;
+      transition: opacity 280ms ease;
+    }
+    #controls.hidden { opacity: 0; pointer-events: none; }
+
+    #progress-bar {
+      display: flex; gap: 3px;
+      margin-bottom: 14px;
+      cursor: pointer;
+      touch-action: none;
+    }
+    .progress-segment {
+      position: relative;
+      flex: 1 1 0;
+      height: 4px;
+      background: rgba(255,255,255,0.18);
+      border-radius: 2px;
+      border: 0;
+      padding: 0;
+      cursor: pointer;
+      overflow: visible;
+      transition: background 160ms ease, height 160ms ease;
+    }
+    .progress-segment:hover { height: 6px; }
+    .progress-segment.done   { background: rgba(255,255,255,0.55); }
+    .progress-segment.current{ background: #f2c230; height: 6px; }
+    .progress-segment:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+    /* Camera-hold span — a flat gold segment over the portion of the step  */
+    /* where the timeline is holding on the target (capturd HUD spec).     */
+    .progress-segment__hold {
+      position: absolute; top: 0; bottom: 0;
+      background: rgba(242,194,48,0.55);
+      border-radius: 2px;
+      pointer-events: none;
+    }
+    /* Zoom/pan keyframe — a gold diamond marker on the track.              */
+    .progress-segment__marker {
+      position: absolute; top: 50%; width: 6px; height: 6px;
+      background: #f2c230; transform: translate(-50%, -50%) rotate(45deg);
+      border-radius: 1px; pointer-events: none;
+    }
+    /* Voice beat — a tick mark under the track.                            */
+    .progress-segment__beat {
+      position: absolute; top: 100%; margin-top: 3px; width: 1px; height: 4px;
+      background: rgba(151,183,196,0.55); pointer-events: none;
+    }
+
+    #info-row {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 6px;
+      min-height: 22px;
+    }
+    #step-info {
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      color: #cfd3d8;
+      font-variant-numeric: tabular-nums;
+    }
+    #annotation {
+      font-size: 13px;
+      color: #9aa0a6;
+      text-align: right;
+      flex: 1 1 auto;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      opacity: 0;
+      transition: opacity 200ms ease;
+    }
+    #annotation.visible { opacity: 1; }
+
+    #buttons {
+      display: flex; gap: 6px; justify-content: center; align-items: center;
+    }
+    .ctrl-btn {
+      width: 38px; height: 38px;
+      display: inline-flex; align-items: center; justify-content: center;
+      border-radius: 8px;
+      color: #e8eaed;
+      font-size: 16px;
+      transition: background 140ms ease, transform 80ms ease;
+    }
+    .ctrl-btn:hover  { background: rgba(255,255,255,0.10); }
+    .ctrl-btn:active { transform: scale(0.94); }
+    .ctrl-btn:disabled,
+    .ctrl-btn[aria-disabled="true"] {
+      opacity: 0.35; cursor: not-allowed;
+    }
+    .ctrl-btn.primary { background: #f2c230; color: #1a1206; width: 44px; height: 44px; }
+    .ctrl-btn.primary:hover { background: #dfae2c; }
+
+    /* ------------------------------------------------------------------ */
+    /*  Empty / error states                                               */
+    /* ------------------------------------------------------------------ */
+    #empty-state {
+      position: absolute; inset: 0;
+      display: none;
+      align-items: center; justify-content: center;
+      flex-direction: column;
+      gap: 12px;
+      color: #9aa0a6;
+      text-align: center;
+      padding: 24px;
+    }
+    #empty-state.visible { display: flex; }
+    #empty-state h1 { margin: 0; font-size: 18px; color: #e8eaed; font-weight: 600; }
+    #empty-state p  { margin: 0; font-size: 13px; max-width: 480px; line-height: 1.5; }
+    #empty-state code { background: rgba(255,255,255,0.08); padding: 2px 6px; border-radius: 4px; }
+
+    /* Branching V2 — viewer-facing choice points (Phase 5) */
+    #choice-overlay {
+      display: none;
+      position: absolute; inset: 0; z-index: 40;
+      align-items: center; justify-content: center;
+      background: rgba(10, 11, 14, 0.62);
+      backdrop-filter: blur(2px);
+    }
+    #choice-overlay.visible { display: flex; }
+    #choice-panel {
+      display: flex; flex-direction: column; gap: 12px; align-items: stretch;
+      max-width: min(480px, 86vw); padding: 24px;
+      background: rgba(21, 23, 25, 0.92);
+      border: 1px solid rgba(255,255,255,0.12); border-radius: 14px;
+      box-shadow: 0 18px 60px rgba(0,0,0,0.55);
+    }
+    #choice-title { margin: 0 0 4px; font-size: 16px; font-weight: 600; color: #e8eaed; text-align: center; }
+    .choice-btn {
+      appearance: none; border: 1px solid rgba(255,255,255,0.16);
+      background: rgba(255,255,255,0.06); color: #e8eaed;
+      font: inherit; font-size: 14px; font-weight: 500;
+      padding: 12px 18px; border-radius: 10px; cursor: pointer;
+      transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
+      text-align: center;
+    }
+    .choice-btn:hover, .choice-btn:focus-visible {
+      background: rgba(242,194,48,0.16); border-color: #f2c230; outline: none;
+    }
+    .choice-btn:active { transform: scale(0.985); }
+    @media (prefers-reduced-motion: reduce) {
+      .choice-btn { transition: none; }
+      .choice-btn:active { transform: none; }
+    }
+
+    /* Phase 6/7 — end-card CTA (spec.cta) */
+    #cta-card {
+      display: none;
+      position: absolute; left: 50%; bottom: 72px; transform: translateX(-50%);
+      z-index: 35;
+      padding: 14px 18px;
+      background: rgba(21, 23, 25, 0.92);
+      border: 1px solid rgba(242,194,48,0.45); border-radius: 12px;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+      text-align: center; max-width: min(480px, 86vw);
+    }
+    #cta-card.visible { display: block; }
+    #cta-title { margin: 0 0 10px; font-size: 14px; color: #e8eaed; font-weight: 600; }
+    #cta-btn {
+      appearance: none; border: none; border-radius: 10px; cursor: pointer;
+      background: #f2c230; color: #151719;
+      font: inherit; font-size: 14px; font-weight: 700;
+      padding: 10px 22px;
+    }
+    #cta-btn:hover { filter: brightness(1.06); }
+    @media (prefers-reduced-motion: reduce) { #cta-btn { transition: none; } }
+  </style>
+</head>
+<body>
+  <div id="viewer" role="application" aria-label="DemoForge viewer">
+    <div id="screenshot-container" aria-live="polite">
+      <div id="panzoom-layer">
+        <img id="screenshot-prev" alt="" style="position:absolute; inset:0; width:100%; height:100%; opacity:0; pointer-events:none;" />
+        <img id="screenshot" alt="" />
+        <svg id="hotspot-layer" aria-hidden="true">
+          <circle id="hotspot-ring" cx="-9999" cy="-9999" r="14" />
+          <circle id="hotspot"      cx="-9999" cy="-9999" r="14" fill="#f2c230" fill-opacity="0.85" />
+        </svg>
+        <div id="spotlight-overlay" aria-hidden="true"></div>
+        <div id="cursor" aria-hidden="true">
+          <svg width="30" height="42" viewBox="0 0 30 42" xmlns="http://www.w3.org/2000/svg">
+            <path d="M0 0 L0 32 L8.5 24.5 L13.8 37 L18.5 35 L13.2 22.5 L23.5 22 Z"
+                  fill="#ffffff" stroke="#151719" stroke-width="1.8" stroke-linejoin="round" />
+          </svg>
+        </div>
+      </div>
+      <div id="export-caption" aria-hidden="true"></div>
+
+      <div id="empty-state" role="alert">
+        <h1>No demo loaded</h1>
+        <p>Embed a DemoSpec JSON in <code>&lt;script id="demo-data"&gt;</code> or load this page with <code>?demo=demo.json</code>.</p>
+      </div>
+
+      <div id="choice-overlay" role="dialog" aria-modal="true" aria-label="Choose a path">
+        <div id="choice-panel">
+          <h2 id="choice-title"></h2>
+          <div id="choice-buttons"></div>
+        </div>
+      </div>
+
+      <div id="cta-card">
+        <p id="cta-title"></p>
+        <button id="cta-btn" type="button"></button>
+      </div>
+    </div>
+
+    <div id="controls" aria-label="Player controls">
+      <div id="progress-bar" role="tablist" aria-label="Step progress"></div>
+      <div id="info-row">
+        <div id="step-info" aria-live="polite">Step 0 of 0</div>
+        <div id="annotation" aria-live="polite"></div>
+      </div>
+      <div id="buttons">
+        <button id="btn-prev"   class="ctrl-btn"     aria-label="Previous step" title="Previous (←)">&#9664;&#xFE0E;</button>
+        <button id="btn-play"   class="ctrl-btn primary" aria-label="Play"         title="Play / Pause (Space)">&#9654;&#xFE0E;</button>
+        <button id="btn-next"   class="ctrl-btn"     aria-label="Next step"     title="Next (→)">&#9654;&#xFE0E;</button>
+        <button id="btn-mute"   class="ctrl-btn"     aria-label="Mute"          title="Mute (M)">&#128266;&#xFE0E;</button>
+      </div>
+    </div>
+  </div>
+
+  <!--
+    Sample DemoSpec for development / smoke testing. Replace this block (or
+    strip it) when embedding a real recorded demo. In production the Phase 4
+    export tool would inject a recorded spec here and serialise the file
+    as a standalone HTML deliverable.
+  -->
+  <script id="demo-data" type="application/json">
+{
+  "version": 1,
+  "id": "sample-onboarding",
+  "name": "Onboarding sample",
+  "goal": "Show the viewer can step through 8 frames with hotspots + cursor",
+  "createdAt": "2026-07-01T00:00:00Z",
+  "viewport": { "width": 1024, "height": 768 },
+  "startUrl": "https://example.com",
+  "aiAnnotations": null,
+  "steps": [
+    {
+      "index": 0, "timestamp": 0,
+      "pageUrl": "https://example.com/", "pageTitle": "Welcome",
+      "interaction": {
+        "type": "click",
+        "target": { "selector": "#get-started", "tagName": "button", "text": "Get started",
+                    "boundingRect": { "x": 380, "y": 320, "width": 264, "height": 64 } },
+        "hotspot": { "xPct": 50, "yPct": 50 }
+      },
+      "annotation": "Click \u201cGet started\u201d to begin onboarding"
+    },
+    {
+      "index": 1, "timestamp": 1500,
+      "pageUrl": "https://example.com/profile", "pageTitle": "Set up profile",
+      "interaction": {
+        "type": "input",
+        "target": { "selector": "input[name=email]", "tagName": "input", "text": "",
+                    "boundingRect": { "x": 312, "y": 240, "width": 400, "height": 44 } },
+        "hotspot": { "xPct": 35, "yPct": 50 }
+      },
+      "annotation": "Enter your work email"
+    },
+    {
+      "index": 2, "timestamp": 3200,
+      "pageUrl": "https://example.com/profile", "pageTitle": "Set up profile",
+      "interaction": {
+        "type": "click",
+        "target": { "selector": ".team-picker > li:nth-of-type(2)", "tagName": "li", "text": "Marketing",
+                    "boundingRect": { "x": 312, "y": 360, "width": 192, "height": 56 } },
+        "hotspot": { "xPct": 50, "yPct": 50 }
+      },
+      "annotation": "Pick the team you belong to"
+    },
+    {
+      "index": 3, "timestamp": 5100,
+      "pageUrl": "https://example.com/integrations", "pageTitle": "Connect integrations",
+      "interaction": {
+        "type": "click",
+        "target": { "selector": "button.cta-primary", "tagName": "button", "text": "Connect Slack",
+                    "boundingRect": { "x": 540, "y": 480, "width": 220, "height": 52 } },
+        "hotspot": { "xPct": 50, "yPct": 50 }
+      },
+      "annotation": "Connect Slack to see channel activity"
+    },
+    {
+      "index": 4, "timestamp": 7400,
+      "pageUrl": "https://example.com/integrations", "pageTitle": "Authorize Slack",
+      "interaction": {
+        "type": "click",
+        "target": { "selector": "#slack-allow", "tagName": "button", "text": "Allow",
+                    "boundingRect": { "x": 612, "y": 580, "width": 160, "height": 44 } },
+        "hotspot": { "xPct": 50, "yPct": 50 }
+      },
+      "annotation": "Allow the workspace to read channels"
+    },
+    {
+      "index": 5, "timestamp": 9400,
+      "pageUrl": "https://example.com/dashboard", "pageTitle": "Your dashboard",
+      "interaction": {
+        "type": "navigate",
+        "target": { "selector": "body", "tagName": "body",
+                    "boundingRect": { "x": 0, "y": 0, "width": 1024, "height": 768 } },
+        "hotspot": { "xPct": 50, "yPct": 50 }
+      },
+      "annotation": "You\u2019re in \u2014 dashboard loads with your channels"
+    },
+    {
+      "index": 6, "timestamp": 11200,
+      "pageUrl": "https://example.com/dashboard", "pageTitle": "Your dashboard",
+      "interaction": {
+        "type": "click",
+        "target": { "selector": "aside.sidebar nav a:nth-of-type(3)", "tagName": "a", "text": "Reports",
+                    "boundingRect": { "x": 28, "y": 240, "width": 168, "height": 40 } },
+        "hotspot": { "xPct": 80, "yPct": 50 }
+      },
+      "annotation": "Open the Reports section"
+    },
+    {
+      "index": 7, "timestamp": 13200,
+      "pageUrl": "https://example.com/dashboard/reports", "pageTitle": "Reports",
+      "interaction": {
+        "type": "click",
+        "target": { "selector": "#export-pdf", "tagName": "button", "text": "Export PDF",
+                    "boundingRect": { "x": 820, "y": 120, "width": 156, "height": 40 } },
+        "hotspot": { "xPct": 50, "yPct": 50 }
+      },
+      "annotation": "Export a PDF of this week\u2019s activity"
+    }
+  ]
+}
+  </script>
+
+  <!-- panzoom v9.3.1 (MIT, anvaka/panzoom) — vendored for self-contained viewer -->
+  <script>
+(function(f){if(typeof exports==="object"&&typeof module!=="undefined"){module.exports=f()}else if(typeof define==="function"&&define.amd){define([],f)}else{var g;if(typeof window!=="undefined"){g=window}else if(typeof global!=="undefined"){g=global}else if(typeof self!=="undefined"){g=self}else{g=this}g.panzoom=f()}})(function(){var define,module,exports;return function(){function r(e,n,t){function o(i,f){if(!n[i]){if(!e[i]){var c="function"==typeof require&&require;if(!f&&c)return c(i,!0);if(u)return u(i,!0);var a=new Error("Cannot find module '"+i+"'");throw a.code="MODULE_NOT_FOUND",a}var p=n[i]={exports:{}};e[i][0].call(p.exports,function(r){var n=e[i][1][r];return o(n||r)},p,p.exports,r,e,n,t)}return n[i].exports}for(var u="function"==typeof require&&require,i=0;i<t.length;i++)o(t[i]);return o}return r}()({1:[function(require,module,exports){"use strict";var wheel=require("wheel");var animate=require("amator");var eventify=require("ngraph.events");var kinetic=require("./lib/kinetic.js");var createTextSelectionInterceptor=require("./lib/makeTextSelectionInterceptor.js");var domTextSelectionInterceptor=createTextSelectionInterceptor();var fakeTextSelectorInterceptor=createTextSelectionInterceptor(true);var Transform=require("./lib/transform.js");var makeSvgController=require("./lib/makeSvgController.js");var makeDomController=require("./lib/makeDomController.js");var defaultZoomSpeed=1;var defaultDoubleTapZoomSpeed=1.75;var doubleTapSpeedInMS=300;var clickEventTimeInMS=200;module.exports=createPanZoom;function createPanZoom(domElement,options){options=options||{};var panController=options.controller;if(!panController){if(makeSvgController.canAttach(domElement)){panController=makeSvgController(domElement,options)}else if(makeDomController.canAttach(domElement)){panController=makeDomController(domElement,options)}}if(!panController){throw new Error("Cannot create panzoom for the current type of dom element")}var owner=panController.getOwner();var storedCTMResult={x:0,y:0};var isDirty=false;var transform=new Transform;if(panController.initTransform){panController.initTransform(transform)}var filterKey=typeof options.filterKey==="function"?options.filterKey:noop;var pinchSpeed=typeof options.pinchSpeed==="number"?options.pinchSpeed:1;var bounds=options.bounds;var maxZoom=typeof options.maxZoom==="number"?options.maxZoom:Number.POSITIVE_INFINITY;var minZoom=typeof options.minZoom==="number"?options.minZoom:0;var boundsPadding=typeof options.boundsPadding==="number"?options.boundsPadding:.05;var zoomDoubleClickSpeed=typeof options.zoomDoubleClickSpeed==="number"?options.zoomDoubleClickSpeed:defaultDoubleTapZoomSpeed;var beforeWheel=options.beforeWheel||noop;var beforeMouseDown=options.beforeMouseDown||noop;var speed=typeof options.zoomSpeed==="number"?options.zoomSpeed:defaultZoomSpeed;var transformOrigin=parseTransformOrigin(options.transformOrigin);var textSelection=options.enableTextSelection?fakeTextSelectorInterceptor:domTextSelectionInterceptor;validateBounds(bounds);if(options.autocenter){autocenter()}var frameAnimation;var lastTouchEndTime=0;var lastTouchStartTime=0;var pendingClickEventTimeout=0;var lastMouseDownedEvent=null;var lastMouseDownTime=new Date;var lastSingleFingerOffset;var touchInProgress=false;var panstartFired=false;var mouseX;var mouseY;var clickX;var clickY;var pinchZoomLength;var smoothScroll;if("smoothScroll"in options&&!options.smoothScroll){smoothScroll=rigidScroll()}else{smoothScroll=kinetic(getPoint,scroll,options.smoothScroll)}var moveByAnimation;var zoomToAnimation;var multiTouch;var paused=false;listenForEvents();var api={dispose:dispose,moveBy:internalMoveBy,moveTo:moveTo,smoothMoveTo:smoothMoveTo,centerOn:centerOn,zoomTo:publicZoomTo,zoomAbs:zoomAbs,smoothZoom:smoothZoom,smoothZoomAbs:smoothZoomAbs,showRectangle:showRectangle,pause:pause,resume:resume,isPaused:isPaused,getTransform:getTransformModel,getMinZoom:getMinZoom,setMinZoom:setMinZoom,getMaxZoom:getMaxZoom,setMaxZoom:setMaxZoom,getTransformOrigin:getTransformOrigin,setTransformOrigin:setTransformOrigin,getZoomSpeed:getZoomSpeed,setZoomSpeed:setZoomSpeed};eventify(api);var initialX=typeof options.initialX==="number"?options.initialX:transform.x;var initialY=typeof options.initialY==="number"?options.initialY:transform.y;var initialZoom=typeof options.initialZoom==="number"?options.initialZoom:transform.scale;if(initialX!=transform.x||initialY!=transform.y||initialZoom!=transform.scale){zoomAbs(initialX,initialY,initialZoom)}return api;function pause(){releaseEvents();paused=true}function resume(){if(paused){listenForEvents();paused=false}}function isPaused(){return paused}function showRectangle(rect){var clientRect=owner.getBoundingClientRect();var size=transformToScreen(clientRect.width,clientRect.height);var rectWidth=rect.right-rect.left;var rectHeight=rect.bottom-rect.top;if(!Number.isFinite(rectWidth)||!Number.isFinite(rectHeight)){throw new Error("Invalid rectangle")}var dw=size.x/rectWidth;var dh=size.y/rectHeight;var scale=Math.min(dw,dh);transform.x=-(rect.left+rectWidth/2)*scale+size.x/2;transform.y=-(rect.top+rectHeight/2)*scale+size.y/2;transform.scale=scale}function transformToScreen(x,y){if(panController.getScreenCTM){var parentCTM=panController.getScreenCTM();var parentScaleX=parentCTM.a;var parentScaleY=parentCTM.d;var parentOffsetX=parentCTM.e;var parentOffsetY=parentCTM.f;storedCTMResult.x=x*parentScaleX-parentOffsetX;storedCTMResult.y=y*parentScaleY-parentOffsetY}else{storedCTMResult.x=x;storedCTMResult.y=y}return storedCTMResult}function autocenter(){var w;var h;var left=0;var top=0;var sceneBoundingBox=getBoundingBox();if(sceneBoundingBox){left=sceneBoundingBox.left;top=sceneBoundingBox.top;w=sceneBoundingBox.right-sceneBoundingBox.left;h=sceneBoundingBox.bottom-sceneBoundingBox.top}else{var ownerRect=owner.getBoundingClientRect();w=ownerRect.width;h=ownerRect.height}var bbox=panController.getBBox();if(bbox.width===0||bbox.height===0){return}var dh=h/bbox.height;var dw=w/bbox.width;var scale=Math.min(dw,dh);transform.x=-(bbox.left+bbox.width/2)*scale+w/2+left;transform.y=-(bbox.top+bbox.height/2)*scale+h/2+top;transform.scale=scale}function getTransformModel(){return transform}function getMinZoom(){return minZoom}function setMinZoom(newMinZoom){minZoom=newMinZoom}function getMaxZoom(){return maxZoom}function setMaxZoom(newMaxZoom){maxZoom=newMaxZoom}function getTransformOrigin(){return transformOrigin}function setTransformOrigin(newTransformOrigin){transformOrigin=parseTransformOrigin(newTransformOrigin)}function getZoomSpeed(){return speed}function setZoomSpeed(newSpeed){if(!Number.isFinite(newSpeed)){throw new Error("Zoom speed should be a number")}speed=newSpeed}function getPoint(){return{x:transform.x,y:transform.y}}function moveTo(x,y){transform.x=x;transform.y=y;keepTransformInsideBounds();triggerEvent("pan");makeDirty()}function moveBy(dx,dy){moveTo(transform.x+dx,transform.y+dy)}function keepTransformInsideBounds(){var boundingBox=getBoundingBox();if(!boundingBox)return;var adjusted=false;var clientRect=getClientRect();var diff=boundingBox.left-clientRect.right;if(diff>0){transform.x+=diff;adjusted=true}diff=boundingBox.right-clientRect.left;if(diff<0){transform.x+=diff;adjusted=true}diff=boundingBox.top-clientRect.bottom;if(diff>0){transform.y+=diff;adjusted=true}diff=boundingBox.bottom-clientRect.top;if(diff<0){transform.y+=diff;adjusted=true}return adjusted}function getBoundingBox(){if(!bounds)return;if(typeof bounds==="boolean"){var ownerRect=owner.getBoundingClientRect();var sceneWidth=ownerRect.width;var sceneHeight=ownerRect.height;return{left:sceneWidth*boundsPadding,top:sceneHeight*boundsPadding,right:sceneWidth*(1-boundsPadding),bottom:sceneHeight*(1-boundsPadding)}}return bounds}function getClientRect(){var bbox=panController.getBBox();var leftTop=client(bbox.left,bbox.top);return{left:leftTop.x,top:leftTop.y,right:bbox.width*transform.scale+leftTop.x,bottom:bbox.height*transform.scale+leftTop.y}}function client(x,y){return{x:x*transform.scale+transform.x,y:y*transform.scale+transform.y}}function makeDirty(){isDirty=true;frameAnimation=window.requestAnimationFrame(frame)}function zoomByRatio(clientX,clientY,ratio){if(isNaN(clientX)||isNaN(clientY)||isNaN(ratio)){throw new Error("zoom requires valid numbers")}var newScale=transform.scale*ratio;if(newScale<minZoom){if(transform.scale===minZoom)return;ratio=minZoom/transform.scale}if(newScale>maxZoom){if(transform.scale===maxZoom)return;ratio=maxZoom/transform.scale}var size=transformToScreen(clientX,clientY);transform.x=size.x-ratio*(size.x-transform.x);transform.y=size.y-ratio*(size.y-transform.y);if(bounds&&boundsPadding===1&&minZoom===1){transform.scale*=ratio;keepTransformInsideBounds()}else{var transformAdjusted=keepTransformInsideBounds();if(!transformAdjusted)transform.scale*=ratio}triggerEvent("zoom");makeDirty()}function zoomAbs(clientX,clientY,zoomLevel){var ratio=zoomLevel/transform.scale;zoomByRatio(clientX,clientY,ratio)}function centerOn(ui){var parent=ui.ownerSVGElement;if(!parent)throw new Error("ui element is required to be within the scene");var clientRect=ui.getBoundingClientRect();var cx=clientRect.left+clientRect.width/2;var cy=clientRect.top+clientRect.height/2;var container=parent.getBoundingClientRect();var dx=container.width/2-cx;var dy=container.height/2-cy;internalMoveBy(dx,dy,true)}function smoothMoveTo(x,y){internalMoveBy(x-transform.x,y-transform.y,true)}function internalMoveBy(dx,dy,smooth){if(!smooth){return moveBy(dx,dy)}if(moveByAnimation)moveByAnimation.cancel();var from={x:0,y:0};var to={x:dx,y:dy};var lastX=0;var lastY=0;moveByAnimation=animate(from,to,{step:function(v){moveBy(v.x-lastX,v.y-lastY);lastX=v.x;lastY=v.y}})}function scroll(x,y){cancelZoomAnimation();moveTo(x,y)}function dispose(){releaseEvents()}function listenForEvents(){owner.addEventListener("mousedown",onMouseDown,{passive:false});owner.addEventListener("dblclick",onDoubleClick,{passive:false});owner.addEventListener("touchstart",onTouch,{passive:false});owner.addEventListener("keydown",onKeyDown,{passive:false});wheel.addWheelListener(owner,onMouseWheel,{passive:false});makeDirty()}function releaseEvents(){wheel.removeWheelListener(owner,onMouseWheel);owner.removeEventListener("mousedown",onMouseDown);owner.removeEventListener("keydown",onKeyDown);owner.removeEventListener("dblclick",onDoubleClick);owner.removeEventListener("touchstart",onTouch);if(frameAnimation){window.cancelAnimationFrame(frameAnimation);frameAnimation=0}smoothScroll.cancel();releaseDocumentMouse();releaseTouches();textSelection.release();triggerPanEnd()}function frame(){if(isDirty)applyTransform()}function applyTransform(){isDirty=false;panController.applyTransform(transform);triggerEvent("transform");frameAnimation=0}function onKeyDown(e){var x=0,y=0,z=0;if(e.keyCode===38){y=1}else if(e.keyCode===40){y=-1}else if(e.keyCode===37){x=1}else if(e.keyCode===39){x=-1}else if(e.keyCode===189||e.keyCode===109){z=1}else if(e.keyCode===187||e.keyCode===107){z=-1}if(filterKey(e,x,y,z)){return}if(x||y){e.preventDefault();e.stopPropagation();var clientRect=owner.getBoundingClientRect();var offset=Math.min(clientRect.width,clientRect.height);var moveSpeedRatio=.05;var dx=offset*moveSpeedRatio*x;var dy=offset*moveSpeedRatio*y;internalMoveBy(dx,dy)}if(z){var scaleMultiplier=getScaleMultiplier(z*100);var offset=transformOrigin?getTransformOriginOffset():midPoint();publicZoomTo(offset.x,offset.y,scaleMultiplier)}}function midPoint(){var ownerRect=owner.getBoundingClientRect();return{x:ownerRect.width/2,y:ownerRect.height/2}}function onTouch(e){beforeTouch(e);clearPendingClickEventTimeout();if(e.touches.length===1){return handleSingleFingerTouch(e,e.touches[0])}else if(e.touches.length===2){pinchZoomLength=getPinchZoomLength(e.touches[0],e.touches[1]);multiTouch=true;startTouchListenerIfNeeded()}}function beforeTouch(e){if(options.onTouch&&!options.onTouch(e)){return}e.stopPropagation();e.preventDefault()}function beforeDoubleClick(e){clearPendingClickEventTimeout();if(options.onDoubleClick&&!options.onDoubleClick(e)){return}e.preventDefault();e.stopPropagation()}function handleSingleFingerTouch(e){lastTouchStartTime=new Date;var touch=e.touches[0];var offset=getOffsetXY(touch);lastSingleFingerOffset=offset;var point=transformToScreen(offset.x,offset.y);mouseX=point.x;mouseY=point.y;clickX=mouseX;clickY=mouseY;smoothScroll.cancel();startTouchListenerIfNeeded()}function startTouchListenerIfNeeded(){if(touchInProgress){return}touchInProgress=true;document.addEventListener("touchmove",handleTouchMove);document.addEventListener("touchend",handleTouchEnd);document.addEventListener("touchcancel",handleTouchEnd)}function handleTouchMove(e){if(e.touches.length===1){e.stopPropagation();var touch=e.touches[0];var offset=getOffsetXY(touch);var point=transformToScreen(offset.x,offset.y);var dx=point.x-mouseX;var dy=point.y-mouseY;if(dx!==0&&dy!==0){triggerPanStart()}mouseX=point.x;mouseY=point.y;internalMoveBy(dx,dy)}else if(e.touches.length===2){multiTouch=true;var t1=e.touches[0];var t2=e.touches[1];var currentPinchLength=getPinchZoomLength(t1,t2);var scaleMultiplier=1+(currentPinchLength/pinchZoomLength-1)*pinchSpeed;var firstTouchPoint=getOffsetXY(t1);var secondTouchPoint=getOffsetXY(t2);mouseX=(firstTouchPoint.x+secondTouchPoint.x)/2;mouseY=(firstTouchPoint.y+secondTouchPoint.y)/2;if(transformOrigin){var offset=getTransformOriginOffset();mouseX=offset.x;mouseY=offset.y}publicZoomTo(mouseX,mouseY,scaleMultiplier);pinchZoomLength=currentPinchLength;e.stopPropagation();e.preventDefault()}}function clearPendingClickEventTimeout(){if(pendingClickEventTimeout){clearTimeout(pendingClickEventTimeout);pendingClickEventTimeout=0}}function handlePotentialClickEvent(e){if(!options.onClick)return;clearPendingClickEventTimeout();var dx=mouseX-clickX;var dy=mouseY-clickY;var l=Math.sqrt(dx*dx+dy*dy);if(l>5)return;pendingClickEventTimeout=setTimeout(function(){pendingClickEventTimeout=0;options.onClick(e)},doubleTapSpeedInMS)}function handleTouchEnd(e){clearPendingClickEventTimeout();if(e.touches.length>0){var offset=getOffsetXY(e.touches[0]);var point=transformToScreen(offset.x,offset.y);mouseX=point.x;mouseY=point.y}else{var now=new Date;if(now-lastTouchEndTime<doubleTapSpeedInMS){if(transformOrigin){var offset=getTransformOriginOffset();smoothZoom(offset.x,offset.y,zoomDoubleClickSpeed)}else{smoothZoom(lastSingleFingerOffset.x,lastSingleFingerOffset.y,zoomDoubleClickSpeed)}}else if(now-lastTouchStartTime<clickEventTimeInMS){handlePotentialClickEvent(e)}lastTouchEndTime=now;triggerPanEnd();releaseTouches()}}function getPinchZoomLength(finger1,finger2){var dx=finger1.clientX-finger2.clientX;var dy=finger1.clientY-finger2.clientY;return Math.sqrt(dx*dx+dy*dy)}function onDoubleClick(e){beforeDoubleClick(e);var offset=getOffsetXY(e);if(transformOrigin){offset=getTransformOriginOffset()}smoothZoom(offset.x,offset.y,zoomDoubleClickSpeed)}function onMouseDown(e){clearPendingClickEventTimeout();if(beforeMouseDown(e))return;lastMouseDownedEvent=e;lastMouseDownTime=new Date;if(touchInProgress){e.stopPropagation();return false}var isLeftButton=e.button===1&&window.event!==null||e.button===0;if(!isLeftButton)return;smoothScroll.cancel();var offset=getOffsetXY(e);var point=transformToScreen(offset.x,offset.y);clickX=mouseX=point.x;clickY=mouseY=point.y;document.addEventListener("mousemove",onMouseMove);document.addEventListener("mouseup",onMouseUp);textSelection.capture(e.target||e.srcElement);return false}function onMouseMove(e){if(touchInProgress)return;triggerPanStart();var offset=getOffsetXY(e);var point=transformToScreen(offset.x,offset.y);var dx=point.x-mouseX;var dy=point.y-mouseY;mouseX=point.x;mouseY=point.y;internalMoveBy(dx,dy)}function onMouseUp(){var now=new Date;if(now-lastMouseDownTime<clickEventTimeInMS)handlePotentialClickEvent(lastMouseDownedEvent);textSelection.release();triggerPanEnd();releaseDocumentMouse()}function releaseDocumentMouse(){document.removeEventListener("mousemove",onMouseMove);document.removeEventListener("mouseup",onMouseUp);panstartFired=false}function releaseTouches(){document.removeEventListener("touchmove",handleTouchMove);document.removeEventListener("touchend",handleTouchEnd);document.removeEventListener("touchcancel",handleTouchEnd);panstartFired=false;multiTouch=false;touchInProgress=false}function onMouseWheel(e){if(beforeWheel(e))return;smoothScroll.cancel();var delta=e.deltaY;if(e.deltaMode>0)delta*=100;var scaleMultiplier=getScaleMultiplier(delta);if(scaleMultiplier!==1){var offset=transformOrigin?getTransformOriginOffset():getOffsetXY(e);publicZoomTo(offset.x,offset.y,scaleMultiplier);e.preventDefault()}}function getOffsetXY(e){var offsetX,offsetY;var ownerRect=owner.getBoundingClientRect();offsetX=e.clientX-ownerRect.left;offsetY=e.clientY-ownerRect.top;return{x:offsetX,y:offsetY}}function smoothZoom(clientX,clientY,scaleMultiplier){var fromValue=transform.scale;var from={scale:fromValue};var to={scale:scaleMultiplier*fromValue};smoothScroll.cancel();cancelZoomAnimation();zoomToAnimation=animate(from,to,{step:function(v){zoomAbs(clientX,clientY,v.scale)},done:triggerZoomEnd})}function smoothZoomAbs(clientX,clientY,toScaleValue){var fromValue=transform.scale;var from={scale:fromValue};var to={scale:toScaleValue};smoothScroll.cancel();cancelZoomAnimation();zoomToAnimation=animate(from,to,{step:function(v){zoomAbs(clientX,clientY,v.scale)},done:triggerZoomEnd})}function getTransformOriginOffset(){var ownerRect=owner.getBoundingClientRect();return{x:ownerRect.width*transformOrigin.x,y:ownerRect.height*transformOrigin.y}}function publicZoomTo(clientX,clientY,scaleMultiplier){smoothScroll.cancel();cancelZoomAnimation();return zoomByRatio(clientX,clientY,scaleMultiplier)}function cancelZoomAnimation(){if(zoomToAnimation){zoomToAnimation.cancel();zoomToAnimation=null}}function getScaleMultiplier(delta){var sign=Math.sign(delta);var deltaAdjustedSpeed=Math.min(.25,Math.abs(speed*delta/128));return 1-sign*deltaAdjustedSpeed}function triggerPanStart(){if(!panstartFired){triggerEvent("panstart");panstartFired=true;smoothScroll.start()}}function triggerPanEnd(){if(panstartFired){if(!multiTouch)smoothScroll.stop();triggerEvent("panend")}}function triggerZoomEnd(){triggerEvent("zoomend")}function triggerEvent(name){api.fire(name,api)}}function parseTransformOrigin(options){if(!options)return;if(typeof options==="object"){if(!isNumber(options.x)||!isNumber(options.y))failTransformOrigin(options);return options}failTransformOrigin()}function failTransformOrigin(options){console.error(options);throw new Error(["Cannot parse transform origin.","Some good examples:",'  "center center" can be achieved with {x: 0.5, y: 0.5}','  "top center" can be achieved with {x: 0.5, y: 0}','  "bottom right" can be achieved with {x: 1, y: 1}'].join("\n"))}function noop(){}function validateBounds(bounds){var boundsType=typeof bounds;if(boundsType==="undefined"||boundsType==="boolean")return;var validBounds=isNumber(bounds.left)&&isNumber(bounds.top)&&isNumber(bounds.bottom)&&isNumber(bounds.right);if(!validBounds)throw new Error("Bounds object is not valid. It can be: "+"undefined, boolean (true|false) or an object {left, top, right, bottom}")}function isNumber(x){return Number.isFinite(x)}function isNaN(value){if(Number.isNaN){return Number.isNaN(value)}return value!==value}function rigidScroll(){return{start:noop,stop:noop,cancel:noop}}function autoRun(){if(typeof document==="undefined")return;var scripts=document.getElementsByTagName("script");if(!scripts)return;var panzoomScript;for(var i=0;i<scripts.length;++i){var x=scripts[i];if(x.src&&x.src.match(/\bpanzoom(\.min)?\.js/)){panzoomScript=x;break}}if(!panzoomScript)return;var query=panzoomScript.getAttribute("query");if(!query)return;var globalName=panzoomScript.getAttribute("name")||"pz";var started=Date.now();tryAttach();function tryAttach(){var el=document.querySelector(query);if(!el){var now=Date.now();var elapsed=now-started;if(elapsed<2e3){setTimeout(tryAttach,100);return}console.error("Cannot find the panzoom element",globalName);return}var options=collectOptions(panzoomScript);console.log(options);window[globalName]=createPanZoom(el,options)}function collectOptions(script){var attrs=script.attributes;var options={};for(var j=0;j<attrs.length;++j){var attr=attrs[j];var nameValue=getPanzoomAttributeNameValue(attr);if(nameValue){options[nameValue.name]=nameValue.value}}return options}function getPanzoomAttributeNameValue(attr){if(!attr.name)return;var isPanZoomAttribute=attr.name[0]==="p"&&attr.name[1]==="z"&&attr.name[2]==="-";if(!isPanZoomAttribute)return;var name=attr.name.substr(3);var value=JSON.parse(attr.value);return{name:name,value:value}}}autoRun()},{"./lib/kinetic.js":2,"./lib/makeDomController.js":3,"./lib/makeSvgController.js":4,"./lib/makeTextSelectionInterceptor.js":5,"./lib/transform.js":6,amator:7,"ngraph.events":9,wheel:10}],2:[function(require,module,exports){module.exports=kinetic;function kinetic(getPoint,scroll,settings){if(typeof settings!=="object"){settings={}}var minVelocity=typeof settings.minVelocity==="number"?settings.minVelocity:5;var amplitude=typeof settings.amplitude==="number"?settings.amplitude:.25;var cancelAnimationFrame=typeof settings.cancelAnimationFrame==="function"?settings.cancelAnimationFrame:getCancelAnimationFrame();var requestAnimationFrame=typeof settings.requestAnimationFrame==="function"?settings.requestAnimationFrame:getRequestAnimationFrame();var lastPoint;var timestamp;var timeConstant=342;var ticker;var vx,targetX,ax;var vy,targetY,ay;var raf;return{start:start,stop:stop,cancel:dispose};function dispose(){cancelAnimationFrame(ticker);cancelAnimationFrame(raf)}function start(){lastPoint=getPoint();ax=ay=vx=vy=0;timestamp=new Date;cancelAnimationFrame(ticker);cancelAnimationFrame(raf);ticker=requestAnimationFrame(track)}function track(){var now=Date.now();var elapsed=now-timestamp;timestamp=now;var currentPoint=getPoint();var dx=currentPoint.x-lastPoint.x;var dy=currentPoint.y-lastPoint.y;lastPoint=currentPoint;var dt=1e3/(1+elapsed);vx=.8*dx*dt+.2*vx;vy=.8*dy*dt+.2*vy;ticker=requestAnimationFrame(track)}function stop(){cancelAnimationFrame(ticker);cancelAnimationFrame(raf);var currentPoint=getPoint();targetX=currentPoint.x;targetY=currentPoint.y;timestamp=Date.now();if(vx<-minVelocity||vx>minVelocity){ax=amplitude*vx;targetX+=ax}if(vy<-minVelocity||vy>minVelocity){ay=amplitude*vy;targetY+=ay}raf=requestAnimationFrame(autoScroll)}function autoScroll(){var elapsed=Date.now()-timestamp;var moving=false;var dx=0;var dy=0;if(ax){dx=-ax*Math.exp(-elapsed/timeConstant);if(dx>.5||dx<-.5)moving=true;else dx=ax=0}if(ay){dy=-ay*Math.exp(-elapsed/timeConstant);if(dy>.5||dy<-.5)moving=true;else dy=ay=0}if(moving){scroll(targetX+dx,targetY+dy);raf=requestAnimationFrame(autoScroll)}}}function getCancelAnimationFrame(){if(typeof cancelAnimationFrame==="function")return cancelAnimationFrame;return clearTimeout}function getRequestAnimationFrame(){if(typeof requestAnimationFrame==="function")return requestAnimationFrame;return function(handler){return setTimeout(handler,16)}}},{}],3:[function(require,module,exports){module.exports=makeDomController;module.exports.canAttach=isDomElement;function makeDomController(domElement,options){var elementValid=isDomElement(domElement);if(!elementValid){throw new Error("panzoom requires DOM element to be attached to the DOM tree")}var owner=domElement.parentElement;domElement.scrollTop=0;if(!options.disableKeyboardInteraction){owner.setAttribute("tabindex",0)}var api={getBBox:getBBox,getOwner:getOwner,applyTransform:applyTransform};return api;function getOwner(){return owner}function getBBox(){return{left:0,top:0,width:domElement.clientWidth,height:domElement.clientHeight}}function applyTransform(transform){domElement.style.transformOrigin="0 0 0";domElement.style.transform="matrix("+transform.scale+", 0, 0, "+transform.scale+", "+transform.x+", "+transform.y+")"}}function isDomElement(element){return element&&element.parentElement&&element.style}},{}],4:[function(require,module,exports){module.exports=makeSvgController;module.exports.canAttach=isSVGElement;function makeSvgController(svgElement,options){if(!isSVGElement(svgElement)){throw new Error("svg element is required for svg.panzoom to work")}var owner=svgElement.ownerSVGElement;if(!owner){throw new Error("Do not apply panzoom to the root <svg> element. "+"Use its child instead (e.g. <g></g>). "+"As of March 2016 only FireFox supported transform on the root element")}if(!options.disableKeyboardInteraction){owner.setAttribute("tabindex",0)}var api={getBBox:getBBox,getScreenCTM:getScreenCTM,getOwner:getOwner,applyTransform:applyTransform,initTransform:initTransform};return api;function getOwner(){return owner}function getBBox(){var boundingBox=svgElement.getBBox();return{left:boundingBox.x,top:boundingBox.y,width:boundingBox.width,height:boundingBox.height}}function getScreenCTM(){var ctm=owner.getCTM();if(!ctm){return owner.getScreenCTM()}return ctm}function initTransform(transform){var screenCTM=svgElement.getCTM();if(screenCTM===null){screenCTM=document.createElementNS("http://www.w3.org/2000/svg","svg").createSVGMatrix()}transform.x=screenCTM.e;transform.y=screenCTM.f;transform.scale=screenCTM.a;owner.removeAttributeNS(null,"viewBox")}function applyTransform(transform){svgElement.setAttribute("transform","matrix("+transform.scale+" 0 0 "+transform.scale+" "+transform.x+" "+transform.y+")")}}function isSVGElement(element){return element&&element.ownerSVGElement&&element.getCTM}},{}],5:[function(require,module,exports){module.exports=makeTextSelectionInterceptor;function makeTextSelectionInterceptor(useFake){if(useFake){return{capture:noop,release:noop}}var dragObject;var prevSelectStart;var prevDragStart;var wasCaptured=false;return{capture:capture,release:release};function capture(domObject){wasCaptured=true;prevSelectStart=window.document.onselectstart;prevDragStart=window.document.ondragstart;window.document.onselectstart=disabled;dragObject=domObject;dragObject.ondragstart=disabled}function release(){if(!wasCaptured)return;wasCaptured=false;window.document.onselectstart=prevSelectStart;if(dragObject)dragObject.ondragstart=prevDragStart}}function disabled(e){e.stopPropagation();return false}function noop(){}},{}],6:[function(require,module,exports){module.exports=Transform;function Transform(){this.x=0;this.y=0;this.scale=1}},{}],7:[function(require,module,exports){var BezierEasing=require("bezier-easing");var animations={ease:BezierEasing(.25,.1,.25,1),easeIn:BezierEasing(.42,0,1,1),easeOut:BezierEasing(0,0,.58,1),easeInOut:BezierEasing(.42,0,.58,1),linear:BezierEasing(0,0,1,1)};module.exports=animate;module.exports.makeAggregateRaf=makeAggregateRaf;module.exports.sharedScheduler=makeAggregateRaf();function animate(source,target,options){var start=Object.create(null);var diff=Object.create(null);options=options||{};var easing=typeof options.easing==="function"?options.easing:animations[options.easing];if(!easing){if(options.easing){console.warn("Unknown easing function in amator: "+options.easing)}easing=animations.ease}var step=typeof options.step==="function"?options.step:noop;var done=typeof options.done==="function"?options.done:noop;var scheduler=getScheduler(options.scheduler);var keys=Object.keys(target);keys.forEach(function(key){start[key]=source[key];diff[key]=target[key]-source[key]});var durationInMs=typeof options.duration==="number"?options.duration:400;var durationInFrames=Math.max(1,durationInMs*.06);var previousAnimationId;var frame=0;previousAnimationId=scheduler.next(loop);return{cancel:cancel};function cancel(){scheduler.cancel(previousAnimationId);previousAnimationId=0}function loop(){var t=easing(frame/durationInFrames);frame+=1;setValues(t);if(frame<=durationInFrames){previousAnimationId=scheduler.next(loop);step(source)}else{previousAnimationId=0;setTimeout(function(){done(source)},0)}}function setValues(t){keys.forEach(function(key){source[key]=diff[key]*t+start[key]})}}function noop(){}function getScheduler(scheduler){if(!scheduler){var canRaf=typeof window!=="undefined"&&window.requestAnimationFrame;return canRaf?rafScheduler():timeoutScheduler()}if(typeof scheduler.next!=="function")throw new Error("Scheduler is supposed to have next(cb) function");if(typeof scheduler.cancel!=="function")throw new Error("Scheduler is supposed to have cancel(handle) function");return scheduler}function rafScheduler(){return{next:window.requestAnimationFrame.bind(window),cancel:window.cancelAnimationFrame.bind(window)}}function timeoutScheduler(){return{next:function(cb){return setTimeout(cb,1e3/60)},cancel:function(id){return clearTimeout(id)}}}function makeAggregateRaf(){var frontBuffer=new Set;var backBuffer=new Set;var frameToken=0;return{next:next,cancel:next,clearAll:clearAll};function clearAll(){frontBuffer.clear();backBuffer.clear();cancelAnimationFrame(frameToken);frameToken=0}function next(callback){backBuffer.add(callback);renderNextFrame()}function renderNextFrame(){if(!frameToken)frameToken=requestAnimationFrame(renderFrame)}function renderFrame(){frameToken=0;var t=backBuffer;backBuffer=frontBuffer;frontBuffer=t;frontBuffer.forEach(function(callback){callback()});frontBuffer.clear()}function cancel(callback){backBuffer.delete(callback)}}},{"bezier-easing":8}],8:[function(require,module,exports){var NEWTON_ITERATIONS=4;var NEWTON_MIN_SLOPE=.001;var SUBDIVISION_PRECISION=1e-7;var SUBDIVISION_MAX_ITERATIONS=10;var kSplineTableSize=11;var kSampleStepSize=1/(kSplineTableSize-1);var float32ArraySupported=typeof Float32Array==="function";function A(aA1,aA2){return 1-3*aA2+3*aA1}function B(aA1,aA2){return 3*aA2-6*aA1}function C(aA1){return 3*aA1}function calcBezier(aT,aA1,aA2){return((A(aA1,aA2)*aT+B(aA1,aA2))*aT+C(aA1))*aT}function getSlope(aT,aA1,aA2){return 3*A(aA1,aA2)*aT*aT+2*B(aA1,aA2)*aT+C(aA1)}function binarySubdivide(aX,aA,aB,mX1,mX2){var currentX,currentT,i=0;do{currentT=aA+(aB-aA)/2;currentX=calcBezier(currentT,mX1,mX2)-aX;if(currentX>0){aB=currentT}else{aA=currentT}}while(Math.abs(currentX)>SUBDIVISION_PRECISION&&++i<SUBDIVISION_MAX_ITERATIONS);return currentT}function newtonRaphsonIterate(aX,aGuessT,mX1,mX2){for(var i=0;i<NEWTON_ITERATIONS;++i){var currentSlope=getSlope(aGuessT,mX1,mX2);if(currentSlope===0){return aGuessT}var currentX=calcBezier(aGuessT,mX1,mX2)-aX;aGuessT-=currentX/currentSlope}return aGuessT}function LinearEasing(x){return x}module.exports=function bezier(mX1,mY1,mX2,mY2){if(!(0<=mX1&&mX1<=1&&0<=mX2&&mX2<=1)){throw new Error("bezier x values must be in [0, 1] range")}if(mX1===mY1&&mX2===mY2){return LinearEasing}var sampleValues=float32ArraySupported?new Float32Array(kSplineTableSize):new Array(kSplineTableSize);for(var i=0;i<kSplineTableSize;++i){sampleValues[i]=calcBezier(i*kSampleStepSize,mX1,mX2)}function getTForX(aX){var intervalStart=0;var currentSample=1;var lastSample=kSplineTableSize-1;for(;currentSample!==lastSample&&sampleValues[currentSample]<=aX;++currentSample){intervalStart+=kSampleStepSize}--currentSample;var dist=(aX-sampleValues[currentSample])/(sampleValues[currentSample+1]-sampleValues[currentSample]);var guessForT=intervalStart+dist*kSampleStepSize;var initialSlope=getSlope(guessForT,mX1,mX2);if(initialSlope>=NEWTON_MIN_SLOPE){return newtonRaphsonIterate(aX,guessForT,mX1,mX2)}else if(initialSlope===0){return guessForT}else{return binarySubdivide(aX,intervalStart,intervalStart+kSampleStepSize,mX1,mX2)}}return function BezierEasing(x){if(x===0){return 0}if(x===1){return 1}return calcBezier(getTForX(x),mY1,mY2)}}},{}],9:[function(require,module,exports){module.exports=function eventify(subject){validateSubject(subject);var eventsStorage=createEventsStorage(subject);subject.on=eventsStorage.on;subject.off=eventsStorage.off;subject.fire=eventsStorage.fire;return subject};function createEventsStorage(subject){var registeredEvents=Object.create(null);return{on:function(eventName,callback,ctx){if(typeof callback!=="function"){throw new Error("callback is expected to be a function")}var handlers=registeredEvents[eventName];if(!handlers){handlers=registeredEvents[eventName]=[]}handlers.push({callback:callback,ctx:ctx});return subject},off:function(eventName,callback){var wantToRemoveAll=typeof eventName==="undefined";if(wantToRemoveAll){registeredEvents=Object.create(null);return subject}if(registeredEvents[eventName]){var deleteAllCallbacksForEvent=typeof callback!=="function";if(deleteAllCallbacksForEvent){delete registeredEvents[eventName]}else{var callbacks=registeredEvents[eventName];for(var i=0;i<callbacks.length;++i){if(callbacks[i].callback===callback){callbacks.splice(i,1)}}}}return subject},fire:function(eventName){var callbacks=registeredEvents[eventName];if(!callbacks){return subject}var fireArguments;if(arguments.length>1){fireArguments=Array.prototype.splice.call(arguments,1)}for(var i=0;i<callbacks.length;++i){var callbackInfo=callbacks[i];callbackInfo.callback.apply(callbackInfo.ctx,fireArguments)}return subject}}}function validateSubject(subject){if(!subject){throw new Error("Eventify cannot use falsy object as events subject")}var reservedWords=["on","fire","off"];for(var i=0;i<reservedWords.length;++i){if(subject.hasOwnProperty(reservedWords[i])){throw new Error("Subject cannot be eventified, since it already has property '"+reservedWords[i]+"'")}}}},{}],10:[function(require,module,exports){module.exports=addWheelListener;module.exports.addWheelListener=addWheelListener;module.exports.removeWheelListener=removeWheelListener;function addWheelListener(element,listener,useCapture){element.addEventListener("wheel",listener,useCapture)}function removeWheelListener(element,listener,useCapture){element.removeEventListener("wheel",listener,useCapture)}},{}]},{},[1])(1)});
+
+  </script>
+
+  <script>
+  (() => {
+    'use strict';
+
+    // ----------------------------------------------------------------
+    //  State
+    // ----------------------------------------------------------------
+    const STATE = {
+      spec: null,
+      index: 0,             // 0-based current step
+      direction: 1,         // 1 = forward, -1 = backward — controls cursor start
+      phase: 'idle',        // 'idle' | 'transitioning' | 'active'
+      isPlaying: false,
+      isMuted: false,
+      autoHideTimer: null,
+      cursorStart: null,    // { x, y } — last cursor position for arc start
+      audio: null,          // HTMLAudioElement if voiceover is loaded
+      autoPlayTimeout: null,
+      panzoom: null,        // panzoom API instance
+      fit: null,            // {cw, ch, scale, x, y} — camera home transform
+      _cameraRaf: null,     // in-flight camera animation frame handle
+      exportMode: false,    // deterministic export renderer owns the DOM
+      _sequenceTimer: null, // current timeline sequence timeout
+      _sequenceCancelled: false, // user-interrupt flag
+      vars: {},             // Branching V2 / Phase 9: chosen variable assignments
+    };
+
+    // Phase 9 — client-side personalization. Text-only substitution; every
+    // consumer below renders via textContent, never innerHTML, so no variable
+    // can inject markup. Precedence: branch choices > embed/window config.
+    const VAR_RE = /\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\|\s*default:\s*"([^"]*)")?\s*\}\}/g;
+    function personalize(str) {
+      if (typeof str !== 'string' || str.indexOf('{{') === -1) return str;
+      const vars = Object.assign({}, (window.CAPTURD_VARS || {}), STATE.vars || {});
+      return str.replace(VAR_RE, function (m, name, def) {
+        if (Object.prototype.hasOwnProperty.call(vars, name)) return String(vars[name]);
+        return def != null ? def : '';
+      });
+    }
+
+    // ----------------------------------------------------------------
+    //  Viewer event contract — `capturd:event`
+    //
+    //  Core emits normalized LOCAL events. It never opens a socket, never
+    //  fetches, never beacons — with nobody listening this is a no-op and
+    //  the self-contained viewer stays fully functional offline. A host
+    //  (embed wrapper, hosted service) listens on `window` for the
+    //  `capturd:event` CustomEvent and does its own batching/consumption.
+    //
+    //  window.__capturdEvents is a bounded ring buffer for console
+    //  inspection and test assertions.
+    // ----------------------------------------------------------------
+    const EVENT_VOCABULARY = [
+      'demo_open', 'demo_start',
+      'step_view', 'step_complete', 'step_replay',
+      'branch_view', 'branch_select',
+      'cta_view', 'cta_click',
+      'demo_complete', 'demo_exit',
+      'viewer_pause', 'viewer_resume',
+    ];
+
+    const TELEMETRY = {
+      sessionId: null,
+      t0: 0,
+      started: false,        // demo_start fired (first play)
+      opened: false,         // demo_open fired
+      completedFired: false, // demo_complete fired once per session
+      enteredSteps: {},      // stepIndex -> true (entered at least once)
+    };
+
+    function _deviceClass() {
+      try {
+        const coarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+        const w = window.innerWidth || 0;
+        return (coarse || w < 500) ? 'mobile' : 'desktop';
+      } catch (_) { return 'desktop'; }
+    }
+
+    function emitEvent(name, extra) {
+      if (EVENT_VOCABULARY.indexOf(name) === -1) return null;  // vocabulary guard
+      if (STATE.exportMode) return null;  // deterministic export renderer owns the DOM
+      if (!TELEMETRY.sessionId) {
+        TELEMETRY.sessionId = (window.crypto && window.crypto.randomUUID)
+          ? window.crypto.randomUUID()
+          : 's-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+        TELEMETRY.t0 = Date.now();
+      }
+      const spec = STATE.spec || {};
+      const payload = {
+        event: name,
+        demoId: spec.id || null,
+        versionId: spec.version != null ? spec.version : 1,
+        sessionId: TELEMETRY.sessionId,
+        stepId: (extra && extra.stepIndex != null) ? ('step-' + extra.stepIndex) : null,
+        branchId: (extra && extra.branchId) || null,
+        elapsedMs: Date.now() - TELEMETRY.t0,
+        timestamp: new Date().toISOString(),
+        device: {
+          deviceClass: _deviceClass(),
+          viewportW: window.innerWidth || null,
+          viewportH: window.innerHeight || null,
+          reducedMotion: !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches),
+        },
+      };
+      if (extra) {
+        ['choiceId', 'ctaId', 'url'].forEach(function (k) {
+          if (extra[k] != null) payload[k] = extra[k];
+        });
+      }
+      if (!Array.isArray(window.__capturdEvents)) window.__capturdEvents = [];
+      if (window.__capturdEvents.length >= 500) window.__capturdEvents.shift();
+      window.__capturdEvents.push(payload);
+      try { window.dispatchEvent(new CustomEvent('capturd:event', { detail: payload })); } catch (_) {}
+      return payload;
+    }
+
+    function _markStepEntered(i) {
+      const wasEntered = !!TELEMETRY.enteredSteps[i];
+      TELEMETRY.enteredSteps[i] = true;
+      return wasEntered;
+    }
+
+    function _stepDeparted(i) {
+      if (TELEMETRY.enteredSteps[i]) emitEvent('step_complete', { stepIndex: i });
+    }
+
+    // Exit signal — local event only; the host decides about sendBeacon.
+    window.addEventListener('pagehide', function () { emitEvent('demo_exit'); });
+
+    const TRANSITION_MS = 300;   // matches the CSS opacity transition
+    const CURSOR_MS     = 400;   // cubic-bezier travel duration
+    const AUTOPLAY_MS   = 3000;  // delay between auto-advance ticks
+    const AUTOHIDE_MS   = 2000;  // controls fade delay
+    const CAMERA_ACTIONS = { ZOOM_TO: 'zoomTo', PAN_TO: 'panTo', HOLD: 'hold',
+                             SPOTLIGHT_ON: 'spotlightOn', SPOTLIGHT_OFF: 'spotlightOff',
+                             RESET: 'reset', ZOOM_TO_FIT: 'zoomToFit' };
+    const INTERRUPT_KEYFRAME_THRESHOLD = 50; // px drag threshold to interrupt
+
+    // ----------------------------------------------------------------
+    //  DOM
+    // ----------------------------------------------------------------
+    const $viewer         = document.getElementById('viewer');
+    const $screenshot     = document.getElementById('screenshot');
+    const $hotspot        = document.getElementById('hotspot');
+    const $hotspotRing    = document.getElementById('hotspot-ring');
+    const $hotspotLayer   = document.getElementById('hotspot-layer');
+    const $cursor         = document.getElementById('cursor');
+    const $progress       = document.getElementById('progress-bar');
+    const $stepInfo       = document.getElementById('step-info');
+    const $annotation     = document.getElementById('annotation');
+    const $controls       = document.getElementById('controls');
+    const $btnPrev        = document.getElementById('btn-prev');
+    const $btnNext        = document.getElementById('btn-next');
+    const $btnPlay        = document.getElementById('btn-play');
+    const $btnMute        = document.getElementById('btn-mute');
+    const $empty          = document.getElementById('empty-state');
+    const $panzoomLayer   = document.getElementById('panzoom-layer');
+    const $spotlight      = document.getElementById('spotlight-overlay');
+
+    // ----------------------------------------------------------------
+    //  Loading the DemoSpec
+    // ----------------------------------------------------------------
+    async function loadDemoSpec() {
+      const embedded = document.getElementById('demo-data');
+      if (embedded && embedded.textContent && embedded.textContent.trim()) {
+        try {
+          return JSON.parse(embedded.textContent);
+        } catch (err) {
+          throw new Error('Failed to parse embedded #demo-data: ' + err.message);
+        }
+      }
+      const params = new URLSearchParams(location.search);
+      const url = params.get('demo');
+      if (url) {
+        // Only allow relative paths — never absolute URLs (prevents SSRF).
+        if (/^(https?:|\/\/)/i.test(url)) {
+          throw new Error('?demo= only accepts relative paths, not absolute URLs.');
+        }
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`Fetch ${url} → HTTP ${resp.status}`);
+        return await resp.json();
+      }
+      throw new Error('No demo data found. Add ?demo=path/to/demo.json or embed in #demo-data.');
+    }
+
+    // ----------------------------------------------------------------
+    //  Screenshot resolution
+    // ----------------------------------------------------------------
+    function resolveScreenshot(step) {
+      if (!step) return null;
+      if (step.screenshotBase64) {
+        return 'data:image/png;base64,' + step.screenshotBase64;
+      }
+      if (step.screenshotPath) {
+        // When opened via file://, only allow same-directory paths to
+        // prevent local file traversal (e.g. ../../private/file.png).
+        if (document.baseURI.startsWith('file://')) {
+          const name = step.screenshotPath.replace(/^.*[\\\/]/, '');
+          if (name !== step.screenshotPath) {
+            // Path contains directory traversal — reject and fall back.
+            return placeholderImage(step);
+          }
+        }
+        try {
+          return new URL(step.screenshotPath, document.baseURI).toString();
+        } catch (_) {
+          return step.screenshotPath;
+        }
+      }
+      return placeholderImage(step);
+    }
+
+    function placeholderImage(step) {
+      const w = (step.viewport && step.viewport.width)  || 1024;
+      const h = (step.viewport && step.viewport.height) || 768;
+      const idx = step.index != null ? step.index : '?';
+      const sel = step.interaction && step.interaction.target && step.interaction.target.selector
+                    ? step.interaction.target.selector : '';
+      const label = sel ? sel.replace(/[<>&"']/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c])) : '';
+      // Pure ASCII only — btoa() rejects code points > 255, and some image
+      // decoders refuse to load data: URLs that contain UTF-8 bytes.
+      const svg =
+        `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}">` +
+          `<defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">` +
+            `<stop offset="0" stop-color="#1f2937"/>` +
+            `<stop offset="1" stop-color="#111827"/>` +
+          `</linearGradient></defs>` +
+          `<rect width="100%" height="100%" fill="url(#g)"/>` +
+          `<g font-family="-apple-system, system-ui, sans-serif" fill="#9ca3af">` +
+            `<text x="50%" y="46%" text-anchor="middle" font-size="56" font-weight="700" fill="#e8eaed">Step ${idx}</text>` +
+            (label ? `<text x="50%" y="58%" text-anchor="middle" font-size="28">${label}</text>` : '') +
+            `<text x="50%" y="94%" text-anchor="middle" font-size="16" opacity="0.5">placeholder screenshot  ${w}x${h}</text>` +
+          `</g>` +
+        `</svg>`;
+      // btoa throws on code points > 255; encode safely via TextEncoder first.
+      const bytes = new TextEncoder().encode(svg);
+      let bin = '';
+      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      return 'data:image/svg+xml;base64,' + btoa(bin);
+    }
+
+    // ----------------------------------------------------------------
+    //  Hotspot positioning
+    // ----------------------------------------------------------------
+    function positionHotspot(step) {
+      const t = (step && step.interaction && step.interaction.target) || {};
+      const r = t.boundingRect || null;
+      const xPct = (step && step.interaction && step.interaction.hotspot && step.interaction.hotspot.xPct) || 0;
+      const yPct = (step && step.interaction && step.interaction.hotspot && step.interaction.hotspot.yPct) || 0;
+
+      let cx, cy;
+      if (r && Number.isFinite(r.width) && Number.isFinite(r.height)) {
+        cx = r.x + (r.width  * xPct / 100);
+        cy = r.y + (r.height * yPct / 100);
+      } else {
+        // Missing boundingRect → fall back to viewport centre.
+        const vw = (step && step.viewport && step.viewport.width)  || 1024;
+        const vh = (step && step.viewport && step.viewport.height) || 768;
+        cx = vw / 2; cy = vh / 2;
+      }
+      // Set ring first so its centre is used as the transform origin.
+      $hotspot.setAttribute('cx', cx);
+      $hotspot.setAttribute('cy', cy);
+      $hotspotRing.setAttribute('cx', cx);
+      $hotspotRing.setAttribute('cy', cy);
+      return { x: cx, y: cy };
+    }
+
+    // ----------------------------------------------------------------
+    //  Cursor animation — proper cubic bezier with two control points
+    //  so the arc actually curves instead of following the brief's
+    //  degenerate P1==P2 quadratic in cubic notation.
+    // ----------------------------------------------------------------
+    function animateCursor(fromX, fromY, toX, toY, duration = CURSOR_MS) {
+      const start = performance.now();
+      // Two distinct control points — both offset perpendicular to the
+      // start→end line by the same magnitude, giving a smooth arc.
+      const dx = toX - fromX, dy = toY - fromY;
+      const len = Math.max(1, Math.hypot(dx, dy));
+      const off = Math.min(80, len * 0.35);
+      // Perpendicular vector (rotate 90° CCW): (-dy, dx) / len
+      const px = -dy / len, py = dx / len;
+      const cp1x = fromX + dx * 0.25 + px * off;
+      const cp1y = fromY + dy * 0.25 + py * off;
+      const cp2x = fromX + dx * 0.75 + px * off;
+      const cp2y = fromY + dy * 0.75 + py * off;
+
+      $cursor.classList.add('visible');
+
+      function tick(now) {
+        const t = Math.min((now - start) / duration, 1);
+        // Ease-in-out cubic.
+        const e = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+        const u = 1 - e;
+        const x = u * u * u * fromX + 3 * u * u * e * cp1x + 3 * u * e * e * cp2x + e * e * e * toX;
+        const y = u * u * u * fromY + 3 * u * u * e * cp1y + 3 * u * e * e * cp2y + e * e * e * toY;
+        $cursor.style.left = x + 'px';
+        $cursor.style.top  = y + 'px';
+        if (t < 1) {
+          requestAnimationFrame(tick);
+        } else {
+          STATE.cursorStart = { x: toX, y: toY };
+        }
+      }
+      requestAnimationFrame(tick);
+    }
+
+    function hideCursor() {
+      $cursor.classList.remove('visible');
+    }
+
+    // ----------------------------------------------------------------
+    //  Voiceover
+    // ----------------------------------------------------------------
+    function playVoiceover(step) {
+      stopVoiceover();
+      const audio = step && step.voiceoverBase64;
+      if (!audio || STATE.isMuted) return;
+      try {
+        const el = new Audio('data:audio/mpeg;base64,' + audio);
+        el.volume = 1.0;
+        STATE.audio = el;
+        el.play().catch(() => { /* autoplay policy — ignore */ });
+      } catch (_) {
+        // No audio support — silent.
+      }
+    }
+
+    function stopVoiceover() {
+      if (STATE.audio) {
+        try { STATE.audio.pause(); STATE.audio.currentTime = 0; } catch (_) {}
+        STATE.audio = null;
+      }
+    }
+
+    // ----------------------------------------------------------------
+    //  Target-rect helper (viewport coordinates from step data)
+    // ----------------------------------------------------------------
+    function getTargetRect(step) {
+      const t = (step && step.interaction && step.interaction.target) || {};
+      const r = t.boundingRect;
+      const vp = (STATE.spec && STATE.spec.viewport) || { width: 1440, height: 900 };
+      if (r && Number.isFinite(r.width) && Number.isFinite(r.height)) {
+        return { x: r.x, y: r.y, width: r.width, height: r.height };
+      }
+      // Fallback: centre of viewport
+      return { x: vp.width / 2 - 50, y: vp.height / 2 - 30, width: 100, height: 60 };
+    }
+
+    function getTargetCenter(step) {
+      const t = (step && step.interaction && step.interaction.target) || {};
+      const r = t.boundingRect;
+      const h = (step && step.interaction && step.interaction.hotspot) || {};
+      const xPct = Number.isFinite(h.xPct) ? h.xPct : 50;
+      const yPct = Number.isFinite(h.yPct) ? h.yPct : 50;
+      if (r && Number.isFinite(r.width) && Number.isFinite(r.height)) {
+        return { cx: r.x + r.width * xPct / 100, cy: r.y + r.height * yPct / 100 };
+      }
+      const vp = (STATE.spec && STATE.spec.viewport) || { width: 1440, height: 900 };
+      return { cx: vp.width / 2, cy: vp.height / 2 };
+    }
+
+    // ----------------------------------------------------------------
+    //  Panzoom engine
+    // ----------------------------------------------------------------
+    function initPanzoom(spec) {
+      if (!spec || !spec.viewport) return;
+      const vw = spec.viewport.width || 1440;
+      const vh = spec.viewport.height || 900;
+
+      // Size the panzoom layer to match the recorded viewport
+      $panzoomLayer.style.width = vw + 'px';
+      $panzoomLayer.style.height = vh + 'px';
+      $screenshot.style.position = 'absolute';
+      $screenshot.style.inset = '0';
+
+      // Initialize panzoom (panzoom is available globally from the vendored script)
+      if (typeof window.panzoom === 'function') {
+        STATE.panzoom = window.panzoom($panzoomLayer, {
+          // Camera moves are driven programmatically — bounds clamping
+          // fights the animated transform, so it stays off.
+          bounds: false,
+          maxZoom: 6.0,
+          minZoom: 0.1,
+          zoomSpeed: 0.065,
+          smoothScroll: true,
+          // Disable double-click zoom on the viewer (it fights with step nav)
+          onDoubleClick: function() { return true; },
+        });
+        // Fit to container on init
+        fitViewport(vw, vh);
+      }
+    }
+
+    // Fit state — the camera's "home" transform. zoomLevel semantics are
+    // RELATIVE to this fit (1.0 = whole page visible, 2.0 = 2x closer),
+    // so demos look identical in any container size.
+    function computeFit() {
+      const vp = (STATE.spec && STATE.spec.viewport) || { width: 1440, height: 900 };
+      const container = document.getElementById('screenshot-container');
+      const cw = container.clientWidth  || vp.width;
+      const ch = container.clientHeight || vp.height;
+      const scale = Math.min(cw / vp.width, ch / vp.height);
+      return {
+        cw, ch,
+        scale,
+        x: (cw - vp.width  * scale) / 2,
+        y: (ch - vp.height * scale) / 2,
+      };
+    }
+
+    function fitViewport(vw, vh) {
+      if (!STATE.panzoom) return;
+      const fit = computeFit();
+      STATE.fit = fit;
+      setCameraTransform(fit.scale, fit.x, fit.y);
+    }
+
+    // Set the panzoom transform exactly (scale + translation), keeping
+    // panzoom's internal model in sync so user wheel/drag still works.
+    function setCameraTransform(scale, x, y) {
+      if (!STATE.panzoom) return;
+      // zoomAbs anchored at screen (0,0) sets the scale (translation gets
+      // multiplied by the ratio); moveTo then pins the exact translation.
+      STATE.panzoom.zoomAbs(0, 0, scale);
+      STATE.panzoom.moveTo(x, y);
+    }
+
+    // Easing library for camera moves. CSS strings map onto the closest
+    // cubic; unknown strings fall back to ease-in-out.
+    const EASINGS = {
+      'linear':      function(t) { return t; },
+      'ease-in':     function(t) { return t * t * t; },
+      'ease-out':    function(t) { return 1 - Math.pow(1 - t, 3); },
+      'ease-in-out': function(t) { return t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3) / 2; },
+    };
+    function easingFn(name) {
+      if (name && EASINGS[name]) return EASINGS[name];
+      if (name && name.indexOf('ease-out') === 0) return EASINGS['ease-out'];
+      return EASINGS['ease-in-out'];
+    }
+
+    // Camera target for "center content point (cx, cy) at zoom `level`".
+    // level is relative to the fit scale.
+    function cameraTargetFor(cx, cy, level) {
+      const fit = STATE.fit || computeFit();
+      const scale = fit.scale * Math.max(1.0, Math.min(3.0, level || 1.0));
+      return {
+        scale,
+        x: fit.cw / 2 - cx * scale,
+        y: fit.ch / 2 - cy * scale,
+      };
+    }
+
+    // Animate the camera from its current transform to (scale, x, y).
+    function animateCameraTo(target, duration, easing) {
+      if (!STATE.panzoom) return;
+      if (STATE._cameraRaf) { cancelAnimationFrame(STATE._cameraRaf); STATE._cameraRaf = null; }
+      const from = STATE.panzoom.getTransform();
+      const f = { scale: from.scale, x: from.x, y: from.y };
+      const ease = easingFn(easing);
+      const dur = Math.max(1, duration || 500);
+      const start = performance.now();
+      function tick(now) {
+        const t = Math.min((now - start) / dur, 1);
+        const e = ease(t);
+        setCameraTransform(
+          f.scale + (target.scale - f.scale) * e,
+          f.x + (target.x - f.x) * e,
+          f.y + (target.y - f.y) * e
+        );
+        if (t < 1) {
+          STATE._cameraRaf = requestAnimationFrame(tick);
+        } else {
+          STATE._cameraRaf = null;
+        }
+      }
+      STATE._cameraRaf = requestAnimationFrame(tick);
+    }
+
+    // ----------------------------------------------------------------
+    //  Animation Timeline Player
+    // ----------------------------------------------------------------
+    function cancelSequence() {
+      STATE._sequenceCancelled = true;
+      if (STATE._sequenceTimer) {
+        clearTimeout(STATE._sequenceTimer);
+        STATE._sequenceTimer = null;
+      }
+      // Hide spotlight
+      $spotlight.classList.remove('active');
+      $spotlight.style.clipPath = 'none';
+    }
+
+    function getTimeline() {
+      const ann = STATE.spec && STATE.spec.aiAnnotations;
+      return (ann && ann.animationTimeline) || [];
+    }
+
+    // Zoom is intrinsic to the product — when a step has no authored camera
+    // keyframes (AI timeline missing or failed), synthesize the default
+    // spotlight → zoom → hold → release sequence from the recorded click
+    // target. Smaller targets get closer zoom.
+    function defaultZoomLevel(step) {
+      const vp = (STATE.spec && STATE.spec.viewport) || { width: 1440, height: 900 };
+      const r = _exp_targetRect(step);
+      const rel = (r.width * r.height) / Math.max(1, vp.width * vp.height);
+      // Punch in HARD on little chips/icons so they read; ease off for big
+      // elements that already fill the frame.
+      if (rel < 0.006) return 2.6;   // tiny icon / chip
+      if (rel < 0.02)  return 2.3;
+      if (rel < 0.06)  return 2.0;
+      if (rel < 0.15)  return 1.7;
+      if (rel < 0.35)  return 1.4;
+      return 1.2;
+    }
+
+    function defaultStepKeyframes(stepIndex) {
+      const step = STATE.spec.steps[stepIndex];
+      if (!step) return [];
+      const t = (step.interaction && step.interaction.target) || {};
+      const h = (step.interaction && step.interaction.hotspot) || {};
+      const sel = t.selector || 'body';
+      // Snappy by default: quick zoom in, a short beat to read it, quick out.
+      return [
+        { stepIndex: stepIndex, action: 'spotlightOn', target: sel,
+          duration: 160, intensity: 0.6 },
+        { stepIndex: stepIndex, action: 'zoomTo', target: sel,
+          offset: { x: Number.isFinite(h.xPct) ? h.xPct : 50,
+                    y: Number.isFinite(h.yPct) ? h.yPct : 50 },
+          zoomLevel: defaultZoomLevel(step), duration: 460, easing: 'ease-out' },
+        { stepIndex: stepIndex, action: 'hold', duration: 1300 },
+        { stepIndex: stepIndex, action: 'spotlightOff', duration: 160 },
+      ];
+    }
+
+    // Authored keyframes win; otherwise every step gets the default camera.
+    function effectiveKeyframes(stepIndex) {
+      const kfs = getTimeline().filter(function(kf) { return kf.stepIndex === stepIndex; });
+      return kfs.length ? kfs : defaultStepKeyframes(stepIndex);
+    }
+
+    function playTimeline(stepIndex) {
+      if (STATE.exportMode) return; // __demoExport owns all motion
+      cancelSequence();
+      STATE._sequenceCancelled = false;
+
+      const kfs = effectiveKeyframes(stepIndex);
+      if (kfs.length === 0) return;
+
+      let cursor = 0;
+
+      function next() {
+        if (STATE._sequenceCancelled || cursor >= kfs.length) {
+          return;
+        }
+        const kf = kfs[cursor++];
+        const audioEl = STATE.audio;
+
+        // Voice-sync: if kf has tStartMs and audio is playing, delay
+        if (kf.tStartMs != null && audioEl && !audioEl.paused) {
+          const nowMs = audioEl.currentTime * 1000;
+          const delay = Math.max(0, kf.tStartMs - nowMs);
+          if (delay > 0) {
+            STATE._sequenceTimer = setTimeout(function() {
+              executeKeyframe(kf, next);
+            }, delay);
+            return;
+          }
+        }
+        executeKeyframe(kf, next);
+      }
+
+      next();
+    }
+
+    function executeKeyframe(kf, onDone) {
+      if (STATE._sequenceCancelled) return;
+
+      const action = kf.action;
+      const duration = kf.duration || 500;
+      const target = kf.target;
+      const easing = kf.easing || 'ease-in-out';
+      const zoomLevel = kf.zoomLevel;
+      const intensity = kf.intensity;
+      const offset = kf.offset;
+
+      switch (action) {
+        case CAMERA_ACTIONS.SPOTLIGHT_ON: {
+          spotlightOn(target, intensity, duration);
+          break;
+        }
+        case CAMERA_ACTIONS.SPOTLIGHT_OFF: {
+          spotlightOff(duration);
+          break;
+        }
+        case CAMERA_ACTIONS.ZOOM_TO: {
+          zoomToAction(target, offset, zoomLevel, easing, duration);
+          break;
+        }
+        case CAMERA_ACTIONS.PAN_TO: {
+          panToAction(target, offset, easing, duration);
+          break;
+        }
+        case CAMERA_ACTIONS.RESET:
+        case CAMERA_ACTIONS.ZOOM_TO_FIT: {
+          resetAction(easing, duration);
+          break;
+        }
+        case CAMERA_ACTIONS.HOLD:
+        default: {
+          // HOLD is just a delay — no camera change
+          break;
+        }
+      }
+
+      if (duration > 0) {
+        STATE._sequenceTimer = setTimeout(onDone, duration);
+      } else {
+        onDone();
+      }
+    }
+
+    // ----------------------------------------------------------------
+    //  Spotlight operations
+    // ----------------------------------------------------------------
+    function spotlightOn(targetSel, intensity, duration) {
+      const step = STATE.spec.steps[STATE.index];
+      if (!step) return;
+
+      // Use specified target or fall back to current step target
+      const sel = targetSel || (step.interaction && step.interaction.target && step.interaction.target.selector);
+      const rect = getTargetRect(step);
+
+      // Even if we can't querySelector (it's a screenshot, not live DOM),
+      // we still know the boundingRect from the recording
+      const vp = STATE.spec.viewport || { width: 1440, height: 900 };
+      const pad = 12;
+      const x = Math.max(0, rect.x - pad);
+      const y = Math.max(0, rect.y - pad);
+      const w = rect.width + 2 * pad;
+      const h = rect.height + 2 * pad;
+
+      // CSS path() with evenodd fill rule: outer rect minus inner hole
+      var clipValue = 'path(evenodd, ' +
+        "'M0,0 L" + vp.width + ",0 L" + vp.width + "," + vp.height + " L0," + vp.height + " Z " +
+        "M" + x + "," + y + " L" + (x + w) + "," + y + " L" + (x + w) + "," + (y + h) + " L" + x + "," + (y + h) + " Z')";
+
+      var alpha = intensity != null ? intensity : 0.7;
+      $spotlight.style.background = 'rgba(0, 0, 0, ' + alpha + ')';
+      $spotlight.style.clipPath = clipValue;
+      $spotlight.style.transition = 'opacity ' + (duration || 200) + 'ms ease';
+      $spotlight.classList.add('active');
+    }
+
+    function spotlightOff(duration) {
+      $spotlight.style.transition = 'opacity ' + (duration || 200) + 'ms ease';
+      $spotlight.classList.remove('active');
+      // Clear clip-path after transition
+      clearTimeout(STATE._spotlightClearTimer);
+      STATE._spotlightClearTimer = setTimeout(function() {
+        $spotlight.style.clipPath = 'none';
+      }, duration || 200);
+    }
+
+    // ----------------------------------------------------------------
+    //  Camera actions via panzoom
+    // ----------------------------------------------------------------
+    // Resolve the content point a keyframe wants centred: the step's
+    // recorded target rect + the keyframe's hotspot offset (percentages).
+    function keyframeFocus(offset) {
+      const step = STATE.spec.steps[STATE.index];
+      const center = getTargetCenter(step);
+      var cx = center.cx, cy = center.cy;
+      if (offset && Number.isFinite(offset.x) && Number.isFinite(offset.y)) {
+        const rect = getTargetRect(step);
+        cx = rect.x + rect.width * (offset.x / 100);
+        cy = rect.y + rect.height * (offset.y / 100);
+      }
+      return { cx: cx, cy: cy };
+    }
+
+    function zoomToAction(targetSel, offset, zoomLevel, easing, duration) {
+      if (!STATE.panzoom || !STATE.spec.steps[STATE.index]) return;
+      const focus = keyframeFocus(offset);
+      animateCameraTo(
+        cameraTargetFor(focus.cx, focus.cy, zoomLevel || 1.5),
+        duration || 500,
+        easing
+      );
+    }
+
+    function panToAction(targetSel, offset, easing, duration) {
+      if (!STATE.panzoom || !STATE.spec.steps[STATE.index]) return;
+      const focus = keyframeFocus(offset);
+      // Keep the current zoom level; only move the centre.
+      const fit = STATE.fit || computeFit();
+      const level = STATE.panzoom.getTransform().scale / fit.scale;
+      animateCameraTo(
+        cameraTargetFor(focus.cx, focus.cy, level),
+        duration || 500,
+        easing
+      );
+    }
+
+    function resetAction(easing, duration) {
+      if (!STATE.panzoom || !STATE.spec) return;
+      const fit = STATE.fit || computeFit();
+      animateCameraTo({ scale: fit.scale, x: fit.x, y: fit.y }, duration || 500, easing);
+    }
+
+    // ----------------------------------------------------------------
+    //  Interrupt handling — user scroll/click cancels sequence
+    // ----------------------------------------------------------------
+    function setupInterruptHandlers() {
+      var container = document.getElementById('screenshot-container');
+      if (!container) return;
+
+      // Wheel event on container → interrupt timeline (user wants to pan/zoom manually)
+      container.addEventListener('wheel', function() {
+        if (STATE._sequenceTimer) {
+          cancelSequence();
+        }
+      }, { passive: true });
+
+      // Click on screenshot area → interrupt timeline
+      container.addEventListener('click', function(ev) {
+        // Don't interrupt when clicking on hotspot (that's intentional navigation)
+        if (ev.target === $hotspot || ev.target === $hotspotRing) return;
+        if (STATE._sequenceTimer) {
+          cancelSequence();
+        }
+      });
+    }
+
+    // ----------------------------------------------------------------
+    //  Step state machine
+    // ----------------------------------------------------------------
+    // ----------------------------------------------------------------
+    //  Branching V2 — viewer-facing choice points
+    // ----------------------------------------------------------------
+    const $choiceOverlay = document.getElementById('choice-overlay');
+    const $choiceTitle   = document.getElementById('choice-title');
+    const $choiceButtons = document.getElementById('choice-buttons');
+
+    function hideChoices() {
+      $choiceOverlay.classList.remove('visible');
+      $choiceButtons.innerHTML = '';
+    }
+
+    function showChoices(step) {
+      const choices = Array.isArray(step.choices) ? step.choices : [];
+      if (!choices.length) { hideChoices(); return; }
+      $choiceTitle.textContent = personalize(step.annotation || 'Choose a path');
+      $choiceButtons.innerHTML = '';
+      choices.forEach((ch) => {
+        const b = document.createElement('button');
+        b.className = 'choice-btn';
+        b.type = 'button';
+        b.textContent = personalize(ch.label || ch.id);
+        b.setAttribute('aria-label', ch.label || ch.id);
+        b.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          // Event contract: the viewer picked a path.
+          emitEvent('branch_select', {
+            stepIndex: STATE.index,
+            branchId: step.branchId || null,
+            choiceId: ch.analyticsName || ch.id,
+          });
+          if (ch.variable && typeof ch.variable === 'object') {
+            Object.assign(STATE.vars, ch.variable);
+          }
+          hideChoices();
+          goToStep(ch.destination, 1, true);
+        });
+        $choiceButtons.appendChild(b);
+      });
+      $choiceOverlay.classList.add('visible');
+      const first = $choiceButtons.querySelector('button');
+      if (first) { try { first.focus({ preventScroll: true }); } catch (_) {} }
+    }
+
+    // ----------------------------------------------------------------
+    //  Phase 6 — end-card CTA (spec.cta): cta_view / cta_click contract
+    // ----------------------------------------------------------------
+    const $ctaCard = document.getElementById('cta-card');
+    const $ctaTitle = document.getElementById('cta-title');
+    const $ctaBtn = document.getElementById('cta-btn');
+    let _ctaViewFired = false;
+
+    function hideCTA() {
+      $ctaCard.classList.remove('visible');
+    }
+
+    function showCTA(cta) {
+      if (!cta || !cta.label) { hideCTA(); return; }
+      $ctaTitle.textContent = personalize(
+        cta.title || 'Ready to see this in your own product?');
+      $ctaBtn.textContent = personalize(cta.label);
+      $ctaBtn.onclick = (ev) => {
+        ev.stopPropagation();
+        emitEvent('cta_click', {
+          stepIndex: STATE.index,
+          ctaId: cta.analyticsName || cta.id || null,
+          url: typeof cta.url === 'string' ? cta.url.slice(0, 512) : null,
+        });
+        if (typeof cta.url === 'string' && /^https?:\/\//.test(cta.url)) {
+          window.open(cta.url, '_blank', 'noopener');
+        }
+      };
+      $ctaCard.classList.add('visible');
+      if (!_ctaViewFired) {
+        _ctaViewFired = true;
+        emitEvent('cta_view', {
+          stepIndex: STATE.index,
+          ctaId: cta.analyticsName || cta.id || null,
+        });
+      }
+    }
+
+    function clampIndex(i) {
+      const n = STATE.spec.steps.length;
+      if (n === 0) return 0;
+      if (i < 0) return 0;
+      if (i >= n) return n - 1;
+      return i;
+    }
+
+    // How long a step should stay on screen during auto-play: the longest
+    // of its camera timeline, its voiceover, and a floor — never a fixed
+    // constant that truncates the animation mid-flight.
+    function stepDwellMs(stepIndex) {
+      let timelineMs = 0;
+      effectiveKeyframes(stepIndex).forEach(function(kf) {
+        timelineMs += (kf.duration || 500);
+      });
+      let voiceMs = 0;
+      const step = STATE.spec.steps[stepIndex];
+      const words = step && step.voiceoverWords;
+      if (words && words.length) {
+        const lastWord = words[words.length - 1];
+        voiceMs = (lastWord.tEndMs || 0) + 500;
+      } else if (step && step.voiceoverBase64) {
+        voiceMs = 3000; // audio present but no word timings — estimate
+      }
+      // Snappy floor when silent (catch the stream); narration, when present,
+      // sets its own longer floor so we never cut a caption off.
+      return Math.max(1900, timelineMs + 300, voiceMs + 350);
+    }
+
+    function goToStep(targetIndex, direction = 1, force = false) {
+      if (STATE.phase === 'transitioning') return;
+      const n = STATE.spec.steps.length;
+      if (n === 0) return;
+      const next = clampIndex(targetIndex);
+      if (!force && next === STATE.index && STATE.phase !== 'idle') return;
+
+      STATE.phase = 'transitioning';
+      STATE.direction = direction;
+
+      // Event contract: actually leaving a previously-entered step = complete.
+      if (next !== STATE.index) _stepDeparted(STATE.index);
+
+      const prevStep = STATE.spec.steps[STATE.index] || null;
+      const newStep  = STATE.spec.steps[next] || null;
+      if (!newStep) { STATE.phase = 'active'; return; }
+
+      // Resolve the FROM and TO pixel positions in viewport coordinates.
+      const fromXY = STATE.cursorStart || positionHotspot(prevStep) || { x: 0, y: 0 };
+      const toXY   = positionHotspot(newStep);
+
+      // Ease the camera home while the screenshot crossfades — the step's
+      // own timeline then zooms back in on the new target.
+      cancelSequence();
+      resetAction('ease-in-out', TRANSITION_MS + 200);
+
+      // Crossfade screenshots.
+      $screenshot.classList.remove('visible');
+      setTimeout(() => {
+        $screenshot.src = resolveScreenshot(newStep);
+        // Wait for the image to decode so the fade-in looks smooth.
+        const onLoad = () => {
+          $screenshot.removeEventListener('load', onLoad);
+          $screenshot.classList.add('visible');
+        };
+        if ($screenshot.complete && $screenshot.naturalWidth) {
+          onLoad();
+        } else {
+          $screenshot.addEventListener('load', onLoad);
+          // Fallback: still fade after a max delay.
+          setTimeout(onLoad, 600);
+        }
+
+        // Cursor flies to the new hotspot.
+        animateCursor(fromXY.x, fromXY.y, toXY.x, toXY.y, CURSOR_MS);
+        stopVoiceover();
+        playVoiceover(newStep);
+
+        setTimeout(() => {
+          STATE.index = next;
+          updateInfo(newStep);
+          STATE.phase = 'active';
+          // Event contract: entering an already-entered step is a replay.
+          const replayed = _markStepEntered(next);
+          emitEvent(replayed ? 'step_replay' : 'step_view', { stepIndex: next });
+          if (newStep && Array.isArray(newStep.choices) && newStep.choices.length) {
+            emitEvent('branch_view', { stepIndex: next, branchId: newStep.branchId || null });
+          }
+          // Fire the animation timeline for this step
+          playTimeline(next);
+          // Branching V2: a choice step waits for the viewer — no auto-advance.
+          if (newStep && Array.isArray(newStep.choices) && newStep.choices.length) {
+            hideCTA();
+            showChoices(newStep);
+          } else {
+            hideChoices();
+            // Phase 6: end-card CTA on the final step (spec.cta).
+            if (next === n - 1 && STATE.spec && STATE.spec.cta) {
+              showCTA(STATE.spec.cta);
+            } else {
+              hideCTA();
+            }
+            // Single auto-advance scheduler: paced by the step's real length.
+            if (STATE.isPlaying) scheduleAutoAdvance(stepDwellMs(next));
+          }
+        }, TRANSITION_MS);
+      }, TRANSITION_MS);
+    }
+
+    function next() { goToStep(STATE.index + 1,  1); }
+    function prev() { goToStep(STATE.index - 1, -1); }
+
+    // ----------------------------------------------------------------
+    //  Auto-play
+    // ----------------------------------------------------------------
+    function scheduleAutoAdvance(delay = AUTOPLAY_MS) {
+      clearTimeout(STATE.autoPlayTimeout);
+      STATE.autoPlayTimeout = setTimeout(() => {
+        if (!STATE.isPlaying) return;
+        const last = STATE.spec.steps.length - 1;
+        if (STATE.index >= last) {
+          // Event contract: natural playback end = demo_complete (once).
+          if (!TELEMETRY.completedFired) {
+            TELEMETRY.completedFired = true;
+            emitEvent('demo_complete', { stepIndex: last });
+          }
+          pause();
+          return;
+        }
+        next();
+      }, delay);
+    }
+
+    function play() {
+      if (!STATE.spec || STATE.spec.steps.length === 0) return;
+      const wasPlaying = STATE.isPlaying;
+      const last = STATE.spec.steps.length - 1;
+      STATE.isPlaying = true;
+      // Event contract: first play starts the demo; later plays resume it.
+      if (!TELEMETRY.started) { TELEMETRY.started = true; emitEvent('demo_start'); }
+      else if (!wasPlaying) emitEvent('viewer_resume');
+      $btnPlay.innerHTML = '&#10074;&#10074;&#xFE0E;';  // pause icon
+      $btnPlay.setAttribute('aria-label', 'Pause');
+      // Re-enter the current step (or restart from 0 at the end) so voiceover,
+      // timeline, and the auto-advance scheduler all start from one code path.
+      const startAt = STATE.index >= last ? 0 : STATE.index;
+      goToStep(startAt, 1, true);
+    }
+
+    function pause() {
+      // Event contract: pausing an actually-playing demo.
+      if (STATE.isPlaying) emitEvent('viewer_pause');
+      STATE.isPlaying = false;
+      clearTimeout(STATE.autoPlayTimeout);
+      stopVoiceover();
+      $btnPlay.innerHTML = '&#9654;&#xFE0E;';  // play icon
+      $btnPlay.setAttribute('aria-label', 'Play');
+    }
+
+    function togglePlay() { STATE.isPlaying ? pause() : play(); }
+
+    // ----------------------------------------------------------------
+    //  Mute
+    // ----------------------------------------------------------------
+    function toggleMute() {
+      STATE.isMuted = !STATE.isMuted;
+      $btnMute.innerHTML = STATE.isMuted ? '&#128263;&#xFE0E;' : '&#128266;&#xFE0E;';
+      $btnMute.setAttribute('aria-label', STATE.isMuted ? 'Unmute' : 'Mute');
+      $btnMute.setAttribute('title',      STATE.isMuted ? 'Unmute (M)' : 'Mute (M)');
+      if (STATE.isMuted) stopVoiceover();
+    }
+
+    // ----------------------------------------------------------------
+    //  UI updates
+    // ----------------------------------------------------------------
+    function updateInfo(step) {
+      const total = STATE.spec.steps.length;
+      $stepInfo.textContent = `Step ${STATE.index + 1} of ${total}`;
+
+      if (step && step.annotation) {
+        const pAnn = personalize(step.annotation);
+        $annotation.textContent = pAnn;
+        $annotation.classList.add('visible');
+        $annotation.title = pAnn;
+      } else {
+        $annotation.textContent = '';
+        $annotation.classList.remove('visible');
+        $annotation.title = '';
+      }
+
+      // Prev disabled at start, Next disabled at end (unless we're looping — keep simple).
+      const atStart = STATE.index <= 0;
+      const atEnd   = STATE.index >= total - 1;
+      $btnPrev.toggleAttribute('disabled', atStart);
+      $btnNext.toggleAttribute('disabled', atEnd);
+
+      // Refresh progress segments.
+      const segs = $progress.querySelectorAll('.progress-segment');
+      segs.forEach((seg, i) => {
+        seg.classList.toggle('done',    i <  STATE.index);
+        seg.classList.toggle('current', i === STATE.index);
+        seg.setAttribute('aria-selected', i === STATE.index ? 'true' : 'false');
+      });
+    }
+
+    // Real camera-timeline data (authored or synthesized default) projected
+    // onto a step's segment: hold spans (flat gold) + zoom/pan keyframes
+    // (gold diamond), positioned by their real cumulative offset within the
+    // step's total keyframe duration. No fabricated data — same timeline
+    // playTimeline() actually executes.
+    function stepTimelineMarkers(stepIndex) {
+      const kfs = effectiveKeyframes(stepIndex);
+      let total = 0;
+      kfs.forEach((kf) => { total += (kf.duration || 500); });
+      const holds = [], marks = [];
+      if (total <= 0) return { holds, marks };
+      let t = 0;
+      kfs.forEach((kf) => {
+        const dur = kf.duration || 500;
+        const leftPct = (t / total) * 100;
+        const widthPct = (dur / total) * 100;
+        if (kf.action === CAMERA_ACTIONS.HOLD) {
+          holds.push({ leftPct, widthPct });
+        } else if (kf.action === CAMERA_ACTIONS.ZOOM_TO || kf.action === CAMERA_ACTIONS.PAN_TO) {
+          marks.push({ leftPct: leftPct + widthPct / 2 });
+        }
+        t += dur;
+      });
+      return { holds, marks };
+    }
+
+    // Voice beats — real word timestamps when the pipeline produced them;
+    // otherwise a single centred beat when the step carries a spoken
+    // userDirection (live-drive), never a fabricated cadence.
+    function stepVoiceBeats(stepIndex) {
+      const step = STATE.spec.steps[stepIndex];
+      const words = step && step.voiceoverWords;
+      const beats = [];
+      if (words && words.length) {
+        const span = Math.max(1, words[words.length - 1].tEndMs || 0);
+        words.forEach((w) => {
+          if (Number.isFinite(w.tStartMs)) {
+            beats.push({ leftPct: Math.max(0, Math.min(100, (w.tStartMs / span) * 100)) });
+          }
+        });
+      } else if (step && step.userDirection) {
+        beats.push({ leftPct: 50 });
+      }
+      return beats;
+    }
+
+    function buildProgressBar() {
+      $progress.innerHTML = '';
+      STATE.spec.steps.forEach((_, i) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'progress-segment';
+        b.setAttribute('role', 'tab');
+        b.setAttribute('aria-label', `Jump to step ${i + 1}`);
+        b.dataset.index = String(i);
+        b.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          const dir = i > STATE.index ? 1 : -1;
+          goToStep(i, dir);
+          showControls();
+        });
+
+        const { holds, marks } = stepTimelineMarkers(i);
+        holds.forEach((h) => {
+          const el = document.createElement('span');
+          el.className = 'progress-segment__hold';
+          el.style.left = h.leftPct + '%';
+          el.style.width = h.widthPct + '%';
+          b.appendChild(el);
+        });
+        marks.forEach((m) => {
+          const el = document.createElement('span');
+          el.className = 'progress-segment__marker';
+          el.style.left = m.leftPct + '%';
+          b.appendChild(el);
+        });
+        stepVoiceBeats(i).forEach((v) => {
+          const el = document.createElement('span');
+          el.className = 'progress-segment__beat';
+          el.style.left = v.leftPct + '%';
+          b.appendChild(el);
+        });
+
+        $progress.appendChild(b);
+      });
+      setupScrubDrag();
+    }
+
+    // Direct-manipulation scrubbing — drag anywhere across the track, not
+    // just click-per-step (per capturd design: "never a play-only preview").
+    let _scrubDragWired = false;
+    function setupScrubDrag() {
+      if (_scrubDragWired) return;
+      _scrubDragWired = true;
+      let scrubbing = false;
+
+      function segmentAt(clientX, clientY) {
+        const el = document.elementFromPoint(clientX, clientY);
+        return el && el.closest ? el.closest('.progress-segment') : null;
+      }
+      function jumpTo(seg) {
+        if (!seg) return;
+        const idx = Number(seg.dataset.index);
+        if (Number.isNaN(idx) || idx === STATE.index) return;
+        goToStep(idx, idx > STATE.index ? 1 : -1);
+      }
+
+      $progress.addEventListener('pointerdown', (ev) => {
+        scrubbing = true;
+        try { $progress.setPointerCapture(ev.pointerId); } catch (_) {}
+        jumpTo(segmentAt(ev.clientX, ev.clientY));
+        showControls();
+      });
+      $progress.addEventListener('pointermove', (ev) => {
+        if (!scrubbing) return;
+        jumpTo(segmentAt(ev.clientX, ev.clientY));
+        showControls();
+      });
+      function endScrub(ev) {
+        if (!scrubbing) return;
+        scrubbing = false;
+        try { $progress.releasePointerCapture(ev.pointerId); } catch (_) {}
+      }
+      $progress.addEventListener('pointerup', endScrub);
+      $progress.addEventListener('pointercancel', endScrub);
+    }
+
+    // ----------------------------------------------------------------
+    //  Auto-hide controls
+    // ----------------------------------------------------------------
+    function showControls() {
+      $controls.classList.remove('hidden');
+      clearTimeout(STATE.autoHideTimer);
+      STATE.autoHideTimer = setTimeout(hideControls, AUTOHIDE_MS);
+    }
+    function hideControls() {
+      $controls.classList.add('hidden');
+    }
+
+    // ----------------------------------------------------------------
+    //  Deterministic export renderer (__demoExport)
+    //
+    //  The video exporter drives this instead of the live player: every
+    //  visual property (camera, cursor, crossfade, spotlight, hotspot
+    //  pulse, caption) is a pure function of t. seek(tMs) renders the
+    //  exact frame for time t — no timers, no wall clock, no jitter.
+    // ----------------------------------------------------------------
+    const EXPORT = {
+      compiled: null,
+    };
+
+    function _exp_hotspotPoint(step) {
+      const t = (step && step.interaction && step.interaction.target) || {};
+      const r = t.boundingRect;
+      const h = (step && step.interaction && step.interaction.hotspot) || {};
+      const xPct = Number.isFinite(h.xPct) ? h.xPct : 50;
+      const yPct = Number.isFinite(h.yPct) ? h.yPct : 50;
+      if (r && Number.isFinite(r.width) && Number.isFinite(r.height)) {
+        return { x: r.x + r.width * xPct / 100, y: r.y + r.height * yPct / 100 };
+      }
+      const vp = STATE.spec.viewport || { width: 1440, height: 900 };
+      return { x: vp.width / 2, y: vp.height / 2 };
+    }
+
+    function _exp_targetRect(step) {
+      const t = (step && step.interaction && step.interaction.target) || {};
+      const r = t.boundingRect;
+      if (r && Number.isFinite(r.width) && Number.isFinite(r.height)) return r;
+      const vp = STATE.spec.viewport || { width: 1440, height: 900 };
+      return { x: vp.width / 2 - 60, y: vp.height / 2 - 40, width: 120, height: 80 };
+    }
+
+    function _exp_camFor(step, offset, level, fit) {
+      const rect = _exp_targetRect(step);
+      const hp = _exp_hotspotPoint(step);
+      let cx = hp.x, cy = hp.y;
+      if (offset && Number.isFinite(offset.x) && Number.isFinite(offset.y)) {
+        cx = rect.x + rect.width * (offset.x / 100);
+        cy = rect.y + rect.height * (offset.y / 100);
+      }
+      const scale = fit.scale * Math.max(1.0, Math.min(3.0, level || 1.5));
+      return {
+        scale,
+        x: fit.cw / 2 - cx * scale,
+        y: fit.ch / 2 - cy * scale,
+      };
+    }
+
+    function _exp_bezier(from, to, e) {
+      const dx = to.x - from.x, dy = to.y - from.y;
+      const len = Math.max(1, Math.hypot(dx, dy));
+      const off = Math.min(80, len * 0.35);
+      const px = -dy / len, py = dx / len;
+      const cp1x = from.x + dx * 0.25 + px * off;
+      const cp1y = from.y + dy * 0.25 + py * off;
+      const cp2x = from.x + dx * 0.75 + px * off;
+      const cp2y = from.y + dy * 0.75 + py * off;
+      const u = 1 - e;
+      return {
+        x: u*u*u*from.x + 3*u*u*e*cp1x + 3*u*e*e*cp2x + e*e*e*to.x,
+        y: u*u*u*from.y + 3*u*u*e*cp1y + 3*u*e*e*cp2y + e*e*e*to.y,
+      };
+    }
+
+    const _exp_ease = EASINGS['ease-in-out'];
+
+    function compileExport() {
+      const spec = STATE.spec;
+      const steps = spec.steps;
+      const timeline = getTimeline();
+      const fit = computeFit();
+
+      const TRANS = 260;       // screenshot crossfade — quick
+      const FLY = 430;         // cursor flight duration — snappy
+      const TAIL = 950;        // outro: zoom back out, settle
+
+      // ---- step windows --------------------------------------------
+      let t = 0;
+      const wins = steps.map((s, i) => {
+        const dwell = stepDwellMs(i) + 300;
+        const w = { index: i, tStart: t, tEnd: t + dwell };
+        t += dwell;
+        return w;
+      });
+      const totalMs = t + TAIL;
+
+      // ---- camera waypoints ----------------------------------------
+      const FITCAM = { scale: fit.scale, x: fit.x, y: fit.y };
+      const camWps = [{ t: 0, cam: FITCAM }];
+      let camPrev = FITCAM;
+      wins.forEach(w => {
+        const kfs = effectiveKeyframes(w.index);
+        const zoomKf = kfs.find(k => k.action === 'zoomTo');
+        if (!zoomKf) {
+          // Explicit timeline with no zoom for this step — drift home.
+          w.camArrive = Math.min(w.tStart + 700, w.tEnd - 100);
+          camWps.push({ t: w.tStart, cam: camPrev });
+          camWps.push({ t: w.camArrive, cam: FITCAM });
+          camPrev = FITCAM;
+          return;
+        }
+        const cam = _exp_camFor(steps[w.index], zoomKf.offset, zoomKf.zoomLevel, fit);
+        const zoomDur = Math.max(320, Math.min(800, zoomKf.duration || 480));
+        // Voice-sync: land the camera when the narrator hits the key word.
+        let arrive;
+        if (Number.isFinite(zoomKf.tStartMs) && zoomKf.tStartMs > 0) {
+          arrive = w.tStart + TRANS + zoomKf.tStartMs;
+        } else {
+          arrive = w.tStart + Math.max(TRANS, FLY - 100) + zoomDur;
+        }
+        arrive = Math.max(w.tStart + 380, Math.min(arrive, w.tEnd - 650));
+        const depart = Math.max(w.tStart, arrive - zoomDur);
+        w.camArrive = arrive;
+        camWps.push({ t: depart, cam: camPrev });
+        camWps.push({ t: arrive, cam });
+        camPrev = cam;
+      });
+      camWps.push({ t: totalMs - TAIL + 100, cam: camPrev });
+      camWps.push({ t: totalMs - 300, cam: FITCAM });
+
+      // ---- cursor flights + click/page-transition beats ------------
+      // The stagecraft: camera lands on the target, the cursor arrives,
+      // the click pulses, and only THEN does the page change (each step's
+      // pre-click stage is the previous step's screenshot).
+      const flights = [];
+      let prevPt = _exp_hotspotPoint(steps[0]);
+      wins.forEach(w => {
+        const pt = _exp_hotspotPoint(steps[w.index]);
+        const arrive = w.camArrive || (w.tStart + 900);
+        const clickAt = Math.min(arrive + 120, w.tEnd - 700);
+        w.clickAt = clickAt;
+        w.fadeStart = Math.min(clickAt + 250, w.tEnd - 400);
+        if (w.index === 0) {
+          flights.push({ t0: 0, t1: 1, from: pt, to: pt, click: clickAt });
+        } else {
+          const t1 = Math.max(w.tStart + 300, arrive - 120);
+          const t0 = Math.max(w.tStart + 100, t1 - FLY);
+          flights.push({ t0, t1, from: prevPt, to: pt, click: clickAt });
+        }
+        prevPt = pt;
+      });
+
+      // ---- spotlight windows ---------------------------------------
+      const spots = [];
+      wins.forEach(w => {
+        const kfs = effectiveKeyframes(w.index);
+        const on = kfs.find(k => k.action === 'spotlightOn');
+        if (!on) return;
+        const rect = _exp_targetRect(steps[w.index]);
+        const pad = 12;
+        spots.push({
+          t0: w.tStart + TRANS + 200,
+          // Release the spotlight when the page transitions — its hole
+          // rect belongs to the pre-click stage, not the result page.
+          t1: Math.min(w.tEnd - 250, (w.fadeStart != null ? w.fadeStart : w.tEnd)),
+          fade: 250,
+          alpha: (on.intensity != null ? on.intensity : 0.7),
+          rect: {
+            x: Math.max(0, rect.x - pad),
+            y: Math.max(0, rect.y - pad),
+            w: rect.width + 2 * pad,
+            h: rect.height + 2 * pad,
+          },
+        });
+      });
+
+      // ---- audio placement (consumed by the Python exporter) -------
+      const audioPlan = [];
+      wins.forEach(w => {
+        const s = steps[w.index];
+        if (s && s.voiceoverBase64) {
+          audioPlan.push({ stepIndex: w.index, atMs: Math.round(w.tStart + TRANS) });
+        }
+      });
+
+      EXPORT.compiled = {
+        fit, wins, camWps, flights, spots, totalMs,
+        TRANS, FLY, TAIL, audioPlan,
+      };
+      return EXPORT.compiled;
+    }
+
+    function _exp_evalCam(tMs) {
+      const wps = EXPORT.compiled.camWps;
+      if (tMs <= wps[0].t) return wps[0].cam;
+      for (let k = 0; k < wps.length - 1; k++) {
+        const a = wps[k], b = wps[k + 1];
+        if (tMs >= b.t) continue;
+        if (b.t <= a.t) return b.cam;
+        const e = _exp_ease((tMs - a.t) / (b.t - a.t));
+        return {
+          scale: a.cam.scale + (b.cam.scale - a.cam.scale) * e,
+          x: a.cam.x + (b.cam.x - a.cam.x) * e,
+          y: a.cam.y + (b.cam.y - a.cam.y) * e,
+        };
+      }
+      return wps[wps.length - 1].cam;
+    }
+
+    function _exp_evalCursor(tMs) {
+      const flights = EXPORT.compiled.flights;
+      let cur = flights[0] ? flights[0].from : { x: 0, y: 0 };
+      let clickAt = null;
+      for (const f of flights) {
+        if (tMs < f.t0) break;
+        if (tMs <= f.t1) {
+          const e = _exp_ease((tMs - f.t0) / Math.max(1, f.t1 - f.t0));
+          cur = _exp_bezier(f.from, f.to, e);
+        } else {
+          cur = f.to;
+        }
+        if (tMs >= f.click) clickAt = f.click;
+      }
+      return { pos: cur, lastClick: clickAt };
+    }
+
+    async function exportPrepare() {
+      if (!STATE.spec) throw new Error('no spec loaded');
+      STATE.exportMode = true;
+      document.body.classList.add('export-mode');
+      // Silence the live player completely.
+      cancelSequence();
+      clearTimeout(STATE.autoPlayTimeout);
+      STATE.isPlaying = false;
+      stopVoiceover();
+      if (STATE._cameraRaf) { cancelAnimationFrame(STATE._cameraRaf); STATE._cameraRaf = null; }
+      if (STATE.panzoom) STATE.panzoom.pause();
+
+      // Pre-decode every screenshot so seek() never catches a half-loaded img.
+      const srcs = STATE.spec.steps.map(s => resolveScreenshot(s));
+      await Promise.all(srcs.map(src => new Promise(res => {
+        const im = new Image();
+        im.onload = () => res(); im.onerror = () => res();
+        im.src = src;
+      })));
+
+      const plan = compileExport();
+      EXPORT.srcs = srcs;
+      $screenshot.style.transition = 'none';
+      $screenshot.classList.add('visible');
+      const $prev = document.getElementById('screenshot-prev');
+      $prev.style.zIndex = '2';
+      return {
+        totalMs: plan.totalMs,
+        audioPlan: plan.audioPlan,
+        stepWindows: plan.wins,
+      };
+    }
+
+    function exportSeek(tMs) {
+      const c = EXPORT.compiled;
+      if (!c) throw new Error('call prepare() first');
+      const steps = STATE.spec.steps;
+      const $prev = document.getElementById('screenshot-prev');
+      const $caption = document.getElementById('export-caption');
+
+      // ---- active step: stage (pre-click) → result crossfade --------
+      // Step i plays out on the PREVIOUS step's screenshot (its pre-click
+      // state); its own screenshot — the click result — fades in only
+      // after the click pulse.
+      let win = c.wins[0];
+      for (const w of c.wins) { if (tMs >= w.tStart) win = w; else break; }
+      const i = win.index;
+      const stageIdx = Math.max(0, i - 1);
+      if (EXPORT._shownIndex !== i) {
+        $screenshot.src = EXPORT.srcs[i];
+        EXPORT._shownIndex = i;
+      }
+      $screenshot.style.opacity = '1';
+      const fadeStart = win.fadeStart != null ? win.fadeStart : win.tStart;
+      const fadeP = (tMs - fadeStart) / c.TRANS;
+      if (stageIdx !== i && fadeP < 1) {
+        if (EXPORT._prevIndex !== stageIdx) {
+          $prev.src = EXPORT.srcs[stageIdx];
+          EXPORT._prevIndex = stageIdx;
+        }
+        $prev.style.opacity = String(Math.min(1, Math.max(0, 1 - fadeP)));
+      } else {
+        $prev.style.opacity = '0';
+      }
+
+      // ---- camera ---------------------------------------------------
+      const cam = _exp_evalCam(tMs);
+      $panzoomLayer.style.transformOrigin = '0 0';
+      $panzoomLayer.style.transform =
+        'matrix(' + cam.scale + ', 0, 0, ' + cam.scale + ', ' + cam.x + ', ' + cam.y + ')';
+
+      // ---- cursor + hotspot ------------------------------------------
+      const cur = _exp_evalCursor(tMs);
+      $cursor.style.left = cur.pos.x + 'px';
+      $cursor.style.top  = cur.pos.y + 'px';
+      $cursor.classList.add('visible');
+      $cursor.style.opacity = '1';
+      // Hold a bold, roughly-constant ON-SCREEN cursor size no matter how far
+      // the camera is zoomed in (Supademo-style), with a quick press-dip at
+      // the click for tactile feel.
+      const cScale = Math.max(0.7, Math.min(3.0, 1.2 / cam.scale));
+      let press = 1;
+      const clickAt = win.clickAt != null ? win.clickAt : (win.tStart + 900);
+      if (Math.abs(tMs - clickAt) < 110) press = 0.85;
+      $cursor.style.transform = 'scale(' + (cScale * press) + ')';
+
+      const hp = _exp_hotspotPoint(steps[i]);
+      $hotspot.setAttribute('cx', hp.x);
+      $hotspot.setAttribute('cy', hp.y);
+      $hotspotRing.setAttribute('cx', hp.x);
+      $hotspotRing.setAttribute('cy', hp.y);
+      const preClick = tMs < fadeStart + c.TRANS; // target valid on pre-click stage
+      // Subtle target dot before the click; gone once the result fades in.
+      $hotspot.style.transform = 'scale(0.75)';
+      $hotspot.style.opacity = preClick && tMs < clickAt + 120 ? '0.5' : '0';
+      // Hover halo just before the click, then a bright expanding ripple on it.
+      if (preClick && tMs > clickAt - 340 && tMs < clickAt) {
+        const hb = 1 + 0.12 * Math.sin(2 * Math.PI * ((tMs % 900) / 900));
+        $hotspotRing.style.stroke = '#f2c230';
+        $hotspotRing.style.transform = 'scale(' + (1.05 * hb) + ')';
+        $hotspotRing.style.opacity = '0.45';
+      } else if (tMs >= clickAt && tMs - clickAt < 520) {
+        const rp = (tMs - clickAt) / 520;
+        $hotspotRing.style.stroke = '#f2c230';
+        $hotspotRing.style.transform = 'scale(' + (0.5 + rp * 2.1) + ')';
+        $hotspotRing.style.opacity = String(Math.max(0, 0.95 * (1 - rp)));
+      } else {
+        $hotspotRing.style.opacity = '0';
+      }
+
+      // ---- spotlight --------------------------------------------------
+      let spotAlpha = 0, spotRect = null;
+      for (const s of c.spots) {
+        if (tMs < s.t0 || tMs > s.t1 + s.fade) continue;
+        let ramp = 1;
+        if (tMs < s.t0 + s.fade) ramp = (tMs - s.t0) / s.fade;
+        else if (tMs > s.t1) ramp = 1 - (tMs - s.t1) / s.fade;
+        spotAlpha = s.alpha * Math.max(0, Math.min(1, ramp));
+        spotRect = s.rect;
+        break;
+      }
+      if (spotRect && spotAlpha > 0.01) {
+        const vp = STATE.spec.viewport || { width: 1440, height: 900 };
+        const r = spotRect;
+        $spotlight.style.background = 'rgba(0, 0, 0, ' + spotAlpha.toFixed(3) + ')';
+        $spotlight.style.clipPath = 'path(evenodd, ' +
+          "'M0,0 L" + vp.width + ",0 L" + vp.width + "," + vp.height + " L0," + vp.height + " Z " +
+          "M" + r.x + "," + r.y + " L" + (r.x + r.w) + "," + r.y + " L" + (r.x + r.w) + "," + (r.y + r.h) +
+          " L" + r.x + "," + (r.y + r.h) + " Z')";
+        $spotlight.style.opacity = '1';
+        $spotlight.classList.add('active');
+      } else {
+        $spotlight.style.opacity = '0';
+        $spotlight.classList.remove('active');
+      }
+
+      // ---- caption ----------------------------------------------------
+      const ann = steps[i] && steps[i].annotation;
+      if (ann) {
+        const a0 = win.tStart + c.TRANS, a1 = win.tEnd - 200, af = 250;
+        let cAlpha = 0;
+        if (tMs >= a0 && tMs <= a1) {
+          cAlpha = Math.min(1, (tMs - a0) / af, Math.max(0, (a1 - tMs) / af));
+        }
+        $caption.textContent = ann;
+        $caption.style.opacity = String(Math.max(0, Math.min(1, cAlpha)));
+      } else {
+        $caption.style.opacity = '0';
+      }
+      return true;
+    }
+
+    window.__demoExport = {
+      prepare: exportPrepare,
+      seek: exportSeek,
+      plan: function() { return EXPORT.compiled; },
+    };
+
+    // ----------------------------------------------------------------
+    //  Wiring
+    // ----------------------------------------------------------------
+    function attachListeners() {
+      $btnPrev.addEventListener('click', () => { prev(); showControls(); });
+      $btnNext.addEventListener('click', () => { next(); showControls(); });
+      $btnPlay.addEventListener('click', () => { togglePlay(); showControls(); });
+      $btnMute.addEventListener('click', () => { toggleMute(); showControls(); });
+
+      // Click hotspot → advance.
+      $hotspot.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        if (STATE.index >= STATE.spec.steps.length - 1) {
+          if (STATE.isPlaying) pause();
+          return;
+        }
+        next();
+        showControls();
+      });
+      // NOTE: $hotspotRing click listener intentionally removed — it overlaps
+      // $hotspot and would fire a duplicate next() on the same click.
+
+      // Keyboard nav.
+      document.addEventListener('keydown', (ev) => {
+        // Don't hijack typing in form fields (none in viewer but be safe).
+        const t = ev.target;
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+
+        showControls();
+        switch (ev.key) {
+          case 'ArrowLeft':  prev();      ev.preventDefault(); break;
+          case 'ArrowRight': next();      ev.preventDefault(); break;
+          case ' ':          togglePlay();ev.preventDefault(); break;
+          case 'm': case 'M': toggleMute();                break;
+          case 'p': case 'P': togglePlay();                break;
+          case 'Home':       goToStep(0, -1); ev.preventDefault(); break;
+          case 'End':        goToStep(STATE.spec.steps.length - 1, 1); ev.preventDefault(); break;
+        }
+      });
+
+      // Auto-hide on inactivity.
+      $viewer.addEventListener('mousemove', showControls);
+      $viewer.addEventListener('mouseleave', () => {
+        clearTimeout(STATE.autoHideTimer);
+        STATE.autoHideTimer = setTimeout(hideControls, 400);
+      });
+
+      // Resize keeps things responsive — SVG hotspot layer is %-sized so
+      // cx/cy (recorded in viewport pixels) stay aligned with the screenshot.
+      window.addEventListener('resize', () => {
+        if (STATE.spec) {
+          positionHotspot(STATE.spec.steps[STATE.index]);
+          if (STATE.spec.viewport) {
+            fitViewport(STATE.spec.viewport.width || 1440, STATE.spec.viewport.height || 900);
+          }
+        }
+      });
+
+      // Pause auto-play while the tab is hidden.
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden && STATE.isPlaying) pause();
+      });
+    }
+
+    // ----------------------------------------------------------------
+    //  Boot
+    // ----------------------------------------------------------------
+    async function boot() {
+      try {
+        const spec = await loadDemoSpec();
+        if (!spec || !Array.isArray(spec.steps)) {
+          throw new Error('DemoSpec is missing a `steps` array.');
+        }
+        STATE.spec = spec;
+
+        if (spec.steps.length === 0) {
+          $empty.classList.add('visible');
+          $empty.querySelector('h1').textContent = 'Empty demo';
+          $empty.querySelector('p').textContent  = 'This DemoSpec has zero steps. Record at least one click first.';
+          $btnPrev.setAttribute('aria-disabled', 'true');
+          $btnNext.setAttribute('aria-disabled', 'true');
+          $btnPlay.setAttribute('aria-disabled', 'true');
+          return;
+        }
+
+        buildProgressBar();
+        attachListeners();
+
+        // Initialize panzoom + set up interrupt handlers
+        initPanzoom(spec);
+        setupInterruptHandlers();
+
+        // Initial render.
+        const first = spec.steps[0];
+        const xy = positionHotspot(first);
+        STATE.cursorStart = xy;
+        // Cursor rests on the first hotspot from the start.
+        $cursor.style.left = xy.x + 'px';
+        $cursor.style.top  = xy.y + 'px';
+        $cursor.classList.add('visible');
+        $screenshot.addEventListener('load', () => $screenshot.classList.add('visible'), { once: true });
+        $screenshot.src = resolveScreenshot(first);
+        // Reveal even if cached.
+        setTimeout(() => $screenshot.classList.add('visible'), 60);
+        updateInfo(first);
+
+        // The initial step is fully rendered — mark it active so play()
+        // and manual navigation work from a fresh load.
+        STATE.phase = 'active';
+
+        // Event contract: the demo opened; its first step is visible.
+        if (!TELEMETRY.opened) { TELEMETRY.opened = true; emitEvent('demo_open'); }
+        _markStepEntered(0);
+        emitEvent('step_view', { stepIndex: 0 });
+
+        // Play timeline for step 0 on initial load
+        playTimeline(0);
+
+        // Hide controls after AUTOHIDE_MS on first paint.
+        showControls();
+
+        // Expose for browser console / e2e tests.
+        window.__demoViewer = { STATE, next, prev, play, pause, togglePlay, toggleMute,
+                                 goToStep, playTimeline, cancelSequence, initPanzoom,
+                                 spotlightOn, spotlightOff, emitEvent };
+      } catch (err) {
+        console.error('[demo-viewer]', err);
+        $empty.classList.add('visible');
+        $empty.querySelector('h1').textContent = 'Could not load demo';
+        $empty.querySelector('p').innerHTML    = `<code>${(err && err.message || String(err)).replace(/[<>&"']/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]))}</code>`;
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', boot);
+    } else {
+      boot();
+    }
+  })();
+  </script>
+</body>
+</html>

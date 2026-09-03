@@ -1,0 +1,3 @@
+Recording (agent mode) session=acb51973a105...
+agent step 0: LLM call failed: 'str' object has no attribute 'choices'
+Done. 0 steps recorded \u2192 demos/acb51973a105/demo.json

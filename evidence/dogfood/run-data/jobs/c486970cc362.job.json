@@ -1,0 +1,30 @@
+{
+ "name": "saas-walkthrough demo",
+ "start_url": "https://example.com",
+ "prewait": 16,
+ "style": "snappy",
+ "steps": [
+  {
+   "action": "scroll",
+   "value": "down",
+   "note": "Show the clean landing page and the primary call to action.",
+   "wait": 2
+  },
+  {
+   "action": "scroll",
+   "value": "down",
+   "note": "",
+   "wait": 2
+  },
+  {
+   "action": "scroll",
+   "value": "top",
+   "note": "Back to the top",
+   "wait": 2
+  }
+ ],
+ "export": [
+  "mp4"
+ ],
+ "out": "C:\\Users\\slang\\rhobear-capturd\\evidence\\dogfood\\run-data\\jobs\\c486970cc362"
+}

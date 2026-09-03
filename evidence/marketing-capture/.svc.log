@@ -1,0 +1,78 @@
+INFO:     Started server process [41456]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8099 (Press CTRL+C to quit)
+INFO:     127.0.0.1:62517 - "GET /healthz HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51954 - "POST /api/demos/59aa48fae66f/publish HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:52001 - "POST /api/demos HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52002 - "POST /api/demos/dm_D8QMHunfBkQzSKbwHBT3Aw/publish HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52003 - "POST /api/demos/dm_D8QMHunfBkQzSKbwHBT3Aw/share HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65222 - "GET /pub/d/dm_D8QMHunfBkQzSKbwHBT3Aw?fm=5YsdAwbBxoemcBQz9jiFzw HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65222 - "GET /pub/d/59aa48fae66f/step_000.png HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:65222 - "GET /pub/d/59aa48fae66f/step_000.png HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:65222 - "POST /api/pub/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55384 - "GET /pub/d/dm_D8QMHunfBkQzSKbwHBT3Aw?fm=5YsdAwbBxoemcBQz9jiFzw HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55384 - "GET /pub/d/59aa48fae66f/step_000.png HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:55384 - "GET /pub/d/59aa48fae66f/step_000.png HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:55384 - "POST /api/pub/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55384 - "GET /pub/d/59aa48fae66f/step_001.png HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:55384 - "POST /api/pub/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55384 - "GET /pub/d/59aa48fae66f/step_002.png HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:55384 - "POST /api/pub/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55384 - "GET /pub/d/59aa48fae66f/step_003.png HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:55384 - "POST /api/pub/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55384 - "GET /pub/d/59aa48fae66f/step_004.png HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:55384 - "POST /api/pub/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58604 - "GET /pub/d/dm_D8QMHunfBkQzSKbwHBT3Aw?fm=5YsdAwbBxoemcBQz9jiFzw HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58604 - "GET /pub/d/59aa48fae66f/step_000.png HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:58604 - "POST /api/pub/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58604 - "GET /pub/d/59aa48fae66f/step_000.png HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:58604 - "POST /api/pub/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58604 - "GET /pub/d/59aa48fae66f/step_002.png HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:58604 - "POST /api/pub/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58604 - "GET /pub/d/59aa48fae66f/step_003.png HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:58604 - "POST /api/pub/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58604 - "GET /pub/d/59aa48fae66f/step_004.png HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:58604 - "POST /api/pub/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58604 - "GET /pub/d/59aa48fae66f/step_005.png HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:58604 - "POST /api/pub/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58604 - "GET /pub/d/59aa48fae66f/step_006.png HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:58604 - "POST /api/pub/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58604 - "POST /api/pub/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58604 - "POST /api/pub/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58891 - "POST /api/pub/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50456 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50457 - "GET /m HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50458 - "GET /api/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50459 - "GET /docs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49672 - "GET /?surface=desktop HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49672 - "GET /assets/capturd-bear.png HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49672 - "GET /assets/companion-embed.js?v=26 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49672 - "GET /api/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49672 - "GET /sw.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49672 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50616 - "GET /m HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50262 - "GET /manifest.webmanifest HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50616 - "GET /assets/icons/icon-192.png HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49672 - "GET /assets/icons/icon-512.png HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50834 - "GET /?surface=desktop HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50834 - "GET /assets/capturd-bear.png HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50834 - "GET /assets/companion-embed.js?v=26 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50834 - "GET /api/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50834 - "GET /sw.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50834 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64378 - "GET /m HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53838 - "GET /manifest.webmanifest HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50834 - "GET /assets/icons/icon-192.png HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64378 - "GET /assets/icons/icon-512.png HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61747 - "GET /?surface=desktop HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61747 - "GET /assets/capturd-bear.png HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61747 - "GET /assets/companion-embed.js?v=26 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49911 - "GET /api/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49911 - "GET /sw.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49911 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62035 - "GET /m HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60952 - "GET /manifest.webmanifest HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49911 - "GET /assets/icons/icon-192.png HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62035 - "GET /assets/icons/icon-512.png HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60187 - "GET /api/me HTTP/1.1" 200 OK

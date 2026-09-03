@@ -1,0 +1,49 @@
+{
+  "captured_at": "2026-08-30T21:25:17+00:00",
+  "discovery": {
+    "mode": "manual",
+    "page_count": 1
+  },
+  "job_id": "1fcedbe5e7fb",
+  "results": [
+    {
+      "attempts": 1,
+      "bytes": 12764,
+      "elapsed_ms": 1355,
+      "file": "001-example-com-desktop-light.png",
+      "height": 1000,
+      "scheme": "light",
+      "state_id": "desktop-light",
+      "states": [],
+      "status": "ok",
+      "url": "https://example.com/",
+      "viewport": "desktop",
+      "width": 1440
+    }
+  ],
+  "settings": {
+    "capture_count": 1,
+    "concurrency": 3,
+    "cookies": [],
+    "crawl": false,
+    "discovery": {
+      "mode": "manual",
+      "page_count": 1
+    },
+    "format": "png",
+    "full_page": true,
+    "jpeg_quality": 88,
+    "local": false,
+    "page_count": 1,
+    "retries": 1,
+    "retry_timeout_ms": 60000,
+    "state_wait_ms": 900,
+    "states": false,
+    "states_limit": 20,
+    "timeout_ms": 30000,
+    "wait_ms": 600
+  },
+  "urls": [
+    "https://example.com/"
+  ]
+}

@@ -1,0 +1,12 @@
+{
+ "name": "Test Prospect",
+ "opens": 3,
+ "taps": 4,
+ "actions": [
+  "demo-branch",
+  "demo-cta",
+  "demo-complete"
+ ],
+ "score": 29.9995573899555,
+ "last_seen": "2026-08-30T09:01:36.704275+00:00"
+}
