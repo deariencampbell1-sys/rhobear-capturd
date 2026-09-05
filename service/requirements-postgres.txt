@@ -1,0 +1,7 @@
+# Optional Postgres target for the sqlite->Postgres migrator (ADR-0001 Stage 5).
+#
+# The service base (requirements.txt) deliberately omits psycopg: the app stays
+# on sqlite until CAPTURD_DATABASE_URL is set. Only install this on a box that
+# actually runs `python service/scripts/migrate_sqlite_to_postgres.py`.
+#   pip install -r requirements-postgres.txt
+psycopg[binary]>=3.1.0

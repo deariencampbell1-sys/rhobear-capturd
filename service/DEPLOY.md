@@ -44,3 +44,50 @@ docker run -d --env-file .env -p 8099:8099 -v capturd-data:/data capturd-service
 Open the domain → sign in → film a demo → watch it render → confirm the video plays → hit the
 free cap → click Upgrade → confirm it lands on the real checkout → pay (test mode) → confirm
 auto-upgrade to Pro. Only call it shipped when you've watched that happen.
+
+## Data / vault paths (portable, ADR-0001 Stage 5)
+`service/app/config.py` resolves `CAPTURD_DATA_DIR`, `CAPTURD_JOBS_DIR`, and `CAPTURD_VAULT_DIR`
+with platform-appropriate defaults so a Windows path (`D:\capturd-service\data`) never sneaks
+onto Linux as a relative-directory landmine:
+
+| Var | Windows default | Linux default |
+|---|---|---|
+| `CAPTURD_DATA_DIR` (→ `DATA_DIR`, `DB_PATH`) | `D:\capturd-service\data` | `/var/lib/capturd` |
+| `CAPTURD_JOBS_DIR` | `...\data\jobs` | `/var/lib/capturd/jobs` |
+| `CAPTURD_VAULT_DIR` (agent vault held values) | `D:\rhobear-agent-vault` | `/var/lib/capturd-agent-vault` |
+
+- `CAPTURD_JOBS_DIR` defaults to `CAPTURD_DATA_DIR/jobs`, so DB and job artifacts always
+  share one data root even when `CAPTURD_DATA_DIR` is overridden. Set it explicitly to split them.
+- Env vars always win. The systemd unit sets `CAPTURD_DATA_DIR=/var/lib/capturd`.
+- **Linux ownership:** `/var/lib/capturd` (+ its `jobs/`) must be owned/writable by the
+  service user. The systemd unit handles this. Run the service outside the unit (dev
+  container, manual run, user namespace) and an unprivileged user gets an automatic
+  fallback to `~/.local/share/capturd` (diagnostic printed on stderr) — set
+  `CAPTURD_DATA_DIR`/`CAPTURD_JOBS_DIR` to silence it.
+
+## SQLite → Postgres migration (ADR-0001 Stage 5)
+The service stays on sqlite until `CAPTURD_DATABASE_URL` is set. To backfill
+users/mcp_tokens/sessions/jobs/usage into Postgres idempotently (`ON CONFLICT DO NOTHING`,
+re-runnable until complete):
+
+```bash
+# psycopg is optional at runtime — only the migrating box needs it:
+pip install -r requirements-postgres.txt
+
+# preview counts against an empty destination (writes nothing, no schema, no PG needed)
+python service/scripts/migrate_sqlite_to_postgres.py --dry-run
+
+# real run (requires CAPTURD_DATABASE_URL; the migrator drops nothing, it only creates its own 5 tables)
+CAPTURD_DATABASE_URL=postgresql://user:pass@host:5432/capturd \
+  python service/scripts/migrate_sqlite_to_postgres.py
+```
+
+Notes: re-runs are safe (conflicting rows are skipped and reported as `duplicates`); the
+`--dry-run` preview assumes an empty destination; exit code `2` means a config/source error
+(missing `CAPTURD_DATABASE_URL` or sqlite file), `1` a runtime migration failure.
+
+The Postgres integration test is opt-in so normal CI stays dependency-free. Enforce it in CI
+against a disposable Postgres service by setting `CAPTURD_TEST_POSTGRES_URL` (point it at an
+ephemeral/test-only host+db — the test only ever touches the five tables the tool owns and
+refuses to run against a non-localhost/non-test host).
+

@@ -1,28 +1,35 @@
 """Captur'd sqlite->Postgres migrator tests.
 
-Covers two layers the reviewer asked for:
+Covers the layers the reviewer asked for, with no Postgres server in CI:
 
-  * Direct unit tests for the real ``PostgresSink`` write path — the SQL
-    generation (``sql_for``) and param mapping (``params_for``) — that run with
-    NO Postgres server. These are what make CI prove the generated statements
-    are correct instead of trusting an unexercised code path.
-  * A real-Postgres integration test (auto-skipped when
-    ``CAPTURD_TEST_POSTGRES_URL`` is unset or psycopg isn't installed) that
-    migrates actual rows and proves counts + idempotency against a live driver.
+  * Direct unit tests for the real ``PostgresSink`` write path — ``sql_for`` and
+    ``params_for`` (pure), plus a *fake-psycopg-driver* test that drives the real
+    ``PostgresSink`` class (``init_schema``/``upsert``/``count``) and asserts the
+    exact SQL + params it sends. This is what makes CI prove the production write
+    path is correct instead of trusting an unexercised code path.
+  * A real-Postgres integration test (auto-skipped when ``CAPTURD_TEST_POSTGRES_URL``
+    is unset or psycopg isn't installed) that migrates actual rows and proves
+    counts + idempotency against a live driver, with a non-destructive host guard.
+  * Config path-default/env-override tests, incl. both nt and posix default
+    branches and the unprivileged ``ensure_dirs`` fallback.
+  * ``main()`` guard tests (missing CAPTURD_DATABASE_URL / missing sqlite source).
 """
 
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 
 SERVICE = Path(__file__).resolve().parent.parent / "service"
 sys.path.insert(0, str(SERVICE))
 
+from app import config as app_config  # noqa: E402
 from app import store  # noqa: E402
 from scripts.migrate_sqlite_to_postgres import (  # noqa: E402
     MemorySink,
@@ -67,29 +74,34 @@ def _make_sqlite(path: Path) -> sqlite3.Connection:
 
 
 def test_sql_for_all_tables():
+    # Bare ON CONFLICT DO NOTHING (no target column): a row that collides on ANY
+    # unique constraint — PK or a non-PK unique like users.email — is skipped,
+    # never raised. This is what makes an idempotent re-run safe.
     assert sql_for("users") == (
         "INSERT INTO users (id, email, plan, created_at) VALUES (%s, %s, %s, %s) "
-        "ON CONFLICT (id) DO NOTHING")
+        "ON CONFLICT DO NOTHING")
     assert sql_for("mcp_tokens") == (
         "INSERT INTO mcp_tokens (token, user_id, created_at) VALUES (%s, %s, %s) "
-        "ON CONFLICT (token) DO NOTHING")
+        "ON CONFLICT DO NOTHING")
     assert sql_for("sessions") == (
         "INSERT INTO sessions (token, user_id, created_at) VALUES (%s, %s, %s) "
-        "ON CONFLICT (token) DO NOTHING")
+        "ON CONFLICT DO NOTHING")
     assert sql_for("jobs") == (
         "INSERT INTO jobs (id, user_id, kind, status, output, detail, created_at) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING")
+        "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING")
     assert sql_for("usage") == (
         "INSERT INTO usage (_key, user_id, kind, n, at) VALUES (%s, %s, %s, %s, %s) "
-        "ON CONFLICT (_key) DO NOTHING")
+        "ON CONFLICT DO NOTHING")
 
 
-def test_sql_for_users_conflicts_on_pk_not_email():
-    """A rerun after a user's email changed must NOT hard-fail on a duplicate
-    PK. Conflict on the PK (id), never on the mutable email column."""
+def test_sql_for_users_uses_no_conflict_target():
+    """The users upsert must NOT target a mutable column (email), or a re-run
+    after an email change could hard-fail. Bare ``ON CONFLICT DO NOTHING`` — no
+    ``ON CONFLICT (email)``, no ``ON CONFLICT (id)`` — skips either cleanly."""
     s = sql_for("users")
+    assert "ON CONFLICT" in s
     assert "ON CONFLICT (email)" not in s
-    assert "ON CONFLICT (id)" in s
+    assert "ON CONFLICT (id)" not in s
 
 
 def test_params_for_matches_sql_placeholders():
@@ -121,9 +133,136 @@ def test_usage_key_includes_rowid_so_distinct_events_survive():
     assert _usage_key(a) == _usage_key(dict(a))
 
 
+def test_usage_key_stable_across_processes():
+    """Uses SHA-256 (not seeded ``hash()``), so keys are identical regardless of
+    PYTHONHASHSEED — otherwise a rerun in a fresh process could drop/duplicate usage."""
+    code = (
+        "from scripts.migrate_sqlite_to_postgres import _usage_key; "
+        "print(_usage_key({'_rowid': 7, 'user_id': 'u1', 'kind': 'generation', 'n': 1, 'at': 400}))"
+    )
+    keys = set()
+    for seed in ("0", "12345", "99999"):
+        p = subprocess.run(
+            [sys.executable, "-c", code],
+            env={**os.environ, "PYTHONHASHSEED": seed},
+            capture_output=True, text=True, cwd=str(SERVICE),
+        )
+        assert p.returncode == 0, p.stderr
+        keys.add(p.stdout.strip())
+    assert len(keys) == 1, keys
+
+
+class _FakeCursor:
+    def __init__(self, conn, table_counts):
+        self._conn = conn
+        self._counts = table_counts
+        self._row = None
+
+    def execute(self, sql, params=None):
+        sql_norm = " ".join(sql.strip().split())
+        self._conn.executes.append((sql_norm, params))
+        if sql_norm.upper().startswith("SELECT COUNT"):
+            m = re.search(r"\bfrom\s+(\w+)", sql_norm, re.I)
+            table = m.group(1) if m else None
+            self._row = (self._counts.get(table, 0),)
+        else:
+            self._row = None
+
+    def fetchone(self):
+        return self._row
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _FakeConnection:
+    def __init__(self):
+        self.executes = []
+        self.counts = {}
+
+    def cursor(self):
+        return _FakeCursor(self, self.counts)
+
+    def commit(self):
+        return None
+
+    def rollback(self):
+        return None
+
+    def close(self):
+        return None
+
+
+class _FakePsycopg:
+    def __init__(self, conn):
+        self._conn = conn
+        self._connect_args = None
+
+    def connect(self, url):
+        self._connect_args = url
+        return self._conn
+
+
+def test_postgres_sink_write_path_with_fake_driver(monkeypatch):
+    """Exercise the REAL PostgresSink class (the production write path) against a
+    fake psycopg driver so the generated SQL, params, and schema DDL are proven
+    in default CI — not just the pure helper functions."""
+    fake_conn = _FakeConnection()
+    fake = _FakePsycopg(fake_conn)
+    monkeypatch.setitem(sys.modules, "psycopg", fake)
+
+    sink = PostgresSink("postgresql://u:p@localhost:5432/capturd")
+    assert fake._connect_args == "postgresql://u:p@localhost:5432/capturd"
+
+    sink.init_schema()
+    assert any("CREATE TABLE IF NOT EXISTS users" in sql for sql, _ in fake_conn.executes)
+    assert any("CREATE TABLE IF NOT EXISTS usage" in sql for sql, _ in fake_conn.executes)
+
+    sink.upsert("users", {"id": "u1", "email": "a@b.co", "plan": "free", "created_at": 100})
+    assert any(
+        sql == sql_for("users") and params == ("u1", "a@b.co", "free", 100)
+        for sql, params in fake_conn.executes
+    )
+
+    sink.upsert("usage", {"_key": "k", "user_id": "u1", "kind": "generation", "n": 1, "at": 400})
+    assert any(
+        sql == sql_for("usage") and params == ("k", "u1", "generation", 1, 400)
+        for sql, params in fake_conn.executes
+    )
+
+    # count() runs a real SELECT count(*) and returns an int from the driver.
+    assert sink.count("users") == 0
+    fake_conn.counts["users"] = 5
+    assert sink.count("users") == 5
+    assert any(sql == "SELECT count(*) FROM users" for sql, _ in fake_conn.executes)
+
+
 # ---------------------------------------------------------------------------
 # Memory-sink migrate semantics
 # ---------------------------------------------------------------------------
+
+
+def test_memory_sink_first_write_wins_no_overwrite():
+    """MemorySink must never overwrite an existing key — matching the destination's
+    ON CONFLICT DO NOTHING so dry-run counts don't diverge from the real sink."""
+    sink = MemorySink()
+    sink.upsert("users", {"id": "u1", "email": "a@b.co", "plan": "free", "created_at": 100})
+    sink.upsert("users", {"id": "u1", "email": "CHANGED", "plan": "pro", "created_at": 999})
+    assert sink.count("users") == 1
+    assert sink.rows["users"]["u1"]["email"] == "a@b.co"  # first write won
+
+
+def test_sink_protocol_surface():
+    """Both sinks expose the full Sink protocol the migrator relies on."""
+    memory = MemorySink()
+    pg = PostgresSink.__new__(PostgresSink)
+    for sink in (memory, pg):
+        for meth in ("upsert", "count", "commit", "init_schema", "close"):
+            assert callable(getattr(sink, meth, None)), f"{type(sink).__name__} missing {meth}"
+    assert callable(PostgresSink.rollback)
 
 
 def test_migrate_counts_and_is_idempotent(tmp_path: Path):
@@ -193,6 +332,15 @@ def test_config_platform_defaults():
     assert Path(cfg["jobs"]) == Path(cfg["data"]) / "jobs"
 
 
+def test_platform_default_selection_both_branches():
+    """Both the nt and posix default branches are asserted literally — a Windows
+    default can't regress silently on a Linux CI surface."""
+    assert app_config._default_data_dir("nt") == Path(r"D:\capturd-service\data")
+    assert app_config._default_vault_dir("nt") == Path(r"D:\rhobear-agent-vault")
+    assert app_config._default_data_dir("posix") == Path("/var/lib/capturd")
+    assert app_config._default_vault_dir("posix") == Path("/var/lib/capturd-agent-vault")
+
+
 def test_config_joins_override_tracks_data_dir():
     """CAPTURD_DATA_DIR override must move JOBS_DIR under it (CodeAnt finding) —
     DB and job artifacts share one data root instead of splitting across two."""
@@ -213,9 +361,95 @@ def test_config_vault_dir_override_wins():
     assert _norm(cfg["vault"]) == "/tmp/vault-test"
 
 
+def test_ensure_dirs_falls_back_on_permission_error(monkeypatch):
+    """Unprivileged runs (no systemd, /var/lib not writable) must fall back to a
+    user-writable location instead of crashing at startup."""
+    orig = (app_config.DATA_DIR, app_config.JOBS_DIR, app_config.DB_PATH)
+    real_mkdir = Path.mkdir
+
+    def _raising_mkdir(self, *a, **k):
+        if str(self) == str(orig[0]):
+            raise PermissionError("read-only filesystem")
+        return real_mkdir(self, *a, **k)
+
+    monkeypatch.setattr(Path, "mkdir", _raising_mkdir)
+    app_config.ensure_dirs()
+    try:
+        fallback = app_config._FALLBACK_DATA_DIR
+        assert app_config.DATA_DIR == fallback
+        assert app_config.JOBS_DIR == fallback / "jobs"
+        assert app_config.DB_PATH == fallback / "capturd.sqlite3"
+    finally:
+        app_config.DATA_DIR, app_config.JOBS_DIR, app_config.DB_PATH = orig
+
+
+# ---------------------------------------------------------------------------
+# main() guard tests (subprocess — the script prints + returns non-zero)
+# ---------------------------------------------------------------------------
+
+
+def _run_migrator(*args, **env_extra):
+    env = {**os.environ}
+    env.pop("CAPTURD_DATABASE_URL", None)
+    for k, v in env_extra.items():
+        if v is None:
+            env.pop(k, None)
+        else:
+            env[k] = str(v)
+    return subprocess.run(
+        [sys.executable, str(SERVICE / "scripts" / "migrate_sqlite_to_postgres.py"), *args],
+        env=env, capture_output=True, text=True, cwd=str(SERVICE),
+    )
+
+
+def test_main_returns_2_when_database_url_missing(tmp_path: Path):
+    db_path = tmp_path / "capturd.sqlite3"
+    _make_sqlite(db_path).close()
+    p = _run_migrator("--sqlite", str(db_path))
+    assert p.returncode == 2
+    assert "CAPTURD_DATABASE_URL" in p.stderr
+
+
+def test_main_returns_2_when_sqlite_source_missing(tmp_path: Path):
+    p = _run_migrator("--sqlite", str(tmp_path / "nope.sqlite3"), "--dry-run")
+    assert p.returncode == 2
+    assert "not found" in p.stderr
+
+
+def test_main_returns_1_on_migration_failure(tmp_path: Path):
+    """A real run that can't reach Postgres (or has no psycopg) must fail cleanly:
+    exit code 1 and a single readable ERROR line, not an uncaught traceback."""
+    db_path = tmp_path / "capturd.sqlite3"
+    _make_sqlite(db_path).close()
+    p = _run_migrator(
+        "--sqlite", str(db_path), CAPTURD_DATABASE_URL="postgresql://u:p@no-such-host.invalid:5432/db"
+    )
+    assert p.returncode == 1
+    assert "ERROR" in p.stderr
+
+
 # ---------------------------------------------------------------------------
 # Real Postgres integration test (auto-skipped without a PG URL)
 # ---------------------------------------------------------------------------
+
+
+def _pg_url_is_test_safe(url: str) -> bool:
+    """Refuse to run the destructive integration test against anything that looks
+    like a real/lasting database. Only localhost, loopback, or an explicit 'test'
+    host/db-name."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    db = (parsed.path or "").strip("/").lower()
+    return host in ("localhost", "127.0.0.1", "::1") or "test" in host or "test" in db
+
+
+def test_pg_url_is_test_safe():
+    assert _pg_url_is_test_safe("postgresql://u:p@localhost:5432/capturd")
+    assert _pg_url_is_test_safe("postgresql://u:p@127.0.0.1/capturd")
+    assert _pg_url_is_test_safe("postgresql://u:p@db.test.internal/capturd")
+    assert _pg_url_is_test_safe("postgresql://u:p@localhost/capturd_test")
+    assert not _pg_url_is_test_safe("postgresql://u:p@prod-db.example.com/capturd")
+
 
 _PG_TEST_URL = os.environ.get("CAPTURD_TEST_POSTGRES_URL", "").strip()
 
@@ -224,6 +458,11 @@ def test_postgres_sink_migrates_real_rows_and_is_idempotent(tmp_path: Path):
     if not _PG_TEST_URL:
         pytest.skip("set CAPTURD_TEST_POSTGRES_URL to run the Postgres integration test")
     pytest.importorskip("psycopg")
+    if not _pg_url_is_test_safe(_PG_TEST_URL):
+        pytest.skip(
+            "refusing to run destructive integration test against a non-test "
+            "Postgres host/db (CAPTURD_TEST_POSTGRES_URL)"
+        )
 
     db_path = tmp_path / "capturd.sqlite3"
     _make_sqlite(db_path).close()
@@ -248,7 +487,8 @@ def test_postgres_sink_migrates_real_rows_and_is_idempotent(tmp_path: Path):
         assert r["resulting"] == first[table]["resulting"], table
 
     # The reviewer's users-conflict bug: a rerun after a user's email changed
-    # must be a no-op (conflict on PK id), NOT a duplicate-key hard-fail.
+    # must be a no-op (bare ON CONFLICT DO NOTHING covers both PK and email-unique),
+    # NOT a duplicate-key hard-fail.
     conn = sqlite3.connect(db_path)
     conn.execute("UPDATE users SET email='a@changed.co' WHERE id='u1'")
     conn.commit()
@@ -256,3 +496,5 @@ def test_postgres_sink_migrates_real_rows_and_is_idempotent(tmp_path: Path):
     third = migrate(db_path, sink)
     assert third["users"]["imported"] == 0
     assert sink.count("users") == 2
+
+    sink.close()

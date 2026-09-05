@@ -15,18 +15,33 @@ from __future__ import annotations
 
 import os
 import secrets
+import sys
 from pathlib import Path
 
 # Platform-appropriate defaults. The Windows defaults keep the owner's box
 # behavior bit-for-bit; on Linux (the VPS deploy) a Windows path would silently
 # become a relative directory named ``D:\...`` — the old landmine. Env vars
 # always win (the systemd unit sets CAPTURD_DATA_DIR=/var/lib/capturd).
-if os.name == "nt":
-    _DEFAULT_DATA_DIR = Path(r"D:\capturd-service\data")
-    _DEFAULT_VAULT = Path(r"D:\rhobear-agent-vault")
-else:
-    _DEFAULT_DATA_DIR = Path("/var/lib/capturd")
-    _DEFAULT_VAULT = Path("/var/lib/capturd-agent-vault")
+#
+# Kept as tiny pure functions (taking os.name) so both the nt and posix branches
+# are directly unit-testable on any host — the reviewer's Windows-default branch
+# can be asserted without a Windows CI lane.
+def _default_data_dir(os_name: str) -> Path:
+    if os_name == "nt":
+        return Path(r"D:\capturd-service\data")
+    return Path("/var/lib/capturd")
+
+
+def _default_vault_dir(os_name: str) -> Path:
+    if os_name == "nt":
+        return Path(r"D:\rhobear-agent-vault")
+    return Path("/var/lib/capturd-agent-vault")
+
+
+_DEFAULT_DATA_DIR = _default_data_dir(os.name)
+_DEFAULT_VAULT = _default_vault_dir(os.name)
+# User-writable fallback for unprivileged/non-systemd Linux runs (see ensure_dirs).
+_FALLBACK_DATA_DIR = Path.home() / ".local" / "share" / "capturd"
 
 def _vault_dir() -> Path:
     v = os.environ.get("CAPTURD_VAULT_DIR", "").strip()
@@ -111,5 +126,40 @@ def status() -> dict:
 
 
 def ensure_dirs() -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    """Create the data/job dirs, falling back to a user-writable location.
+
+    The Linux default (``/var/lib/capturd``) is root/systemd-oriented. When the
+    service is run outside the unit (dev container, manual run, user namespace)
+    that path is not writable and would raise ``PermissionError`` at startup;
+    instead fall back to ``~/.local/share/capturd`` (and rebuild the dependent
+    ``JOBS_DIR``/``DB_PATH``) so an unprivileged run still comes up. The systemd
+    unit always sets ``CAPTURD_DATA_DIR`` so production never hits this path.
+    """
+    global DATA_DIR, JOBS_DIR, DB_PATH
+
+    def _mkdir_ok(base: Path) -> bool:
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            (base / "jobs").mkdir(parents=True, exist_ok=True)
+            return True
+        except PermissionError:
+            return False
+
+    if _mkdir_ok(DATA_DIR):
+        return
+
+    fallback = _FALLBACK_DATA_DIR
+    if not _mkdir_ok(fallback):
+        raise PermissionError(
+            f"cannot create data dir {DATA_DIR} and cannot fall back to {fallback} "
+            "(run under systemd, or set CAPTURD_DATA_DIR / CAPTURD_JOBS_DIR to a "
+            "writable path)"
+        )
+    print(
+        f"[capturd] data dir not writable ({DATA_DIR}); using {fallback} "
+        "(set CAPTURD_DATA_DIR to silence)",
+        file=sys.stderr,
+    )
+    DATA_DIR = fallback
+    JOBS_DIR = fallback / "jobs"
+    DB_PATH = DATA_DIR / "capturd.sqlite3"
