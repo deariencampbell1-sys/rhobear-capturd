@@ -17,7 +17,20 @@ import os
 import secrets
 from pathlib import Path
 
-VAULT = Path(r"D:\rhobear-agent-vault")
+# Platform-appropriate defaults. The Windows defaults keep the owner's box
+# behavior bit-for-bit; on Linux (the VPS deploy) a Windows path would silently
+# become a relative directory named ``D:\...`` — the old landmine. Env vars
+# always win (the systemd unit sets CAPTURD_DATA_DIR=/var/lib/capturd).
+if os.name == "nt":
+    _DEFAULT_DATA_DIR = Path(r"D:\capturd-service\data")
+    _DEFAULT_VAULT = Path(r"D:\rhobear-agent-vault")
+else:
+    _DEFAULT_DATA_DIR = Path("/var/lib/capturd")
+    _DEFAULT_VAULT = Path("/var/lib/capturd-agent-vault")
+
+def _vault_dir() -> Path:
+    v = os.environ.get("CAPTURD_VAULT_DIR", "").strip()
+    return Path(v) if v else _DEFAULT_VAULT
 
 
 def _env(name: str, default: str = "") -> str:
@@ -25,7 +38,7 @@ def _env(name: str, default: str = "") -> str:
     if v:
         return v
     # optional vault fallback: a file named after the var (lowercased) holds the value
-    f = VAULT / f"{name.lower()}.txt"
+    f = _vault_dir() / f"{name.lower()}.txt"
     if f.is_file():
         for line in f.read_text(encoding="utf-8").splitlines():
             line = line.strip()
@@ -34,10 +47,13 @@ def _env(name: str, default: str = "") -> str:
     return default
 
 
+VAULT = _vault_dir()
+
+
 # ---- service basics ----------------------------------------------------------
 BASE_URL = _env("CAPTURD_BASE_URL", "http://127.0.0.1:8099")
-DATA_DIR = Path(_env("CAPTURD_DATA_DIR", r"D:\capturd-service\data"))
-JOBS_DIR = Path(_env("CAPTURD_JOBS_DIR", r"D:\capturd-service\data\jobs"))
+DATA_DIR = Path(_env("CAPTURD_DATA_DIR", str(_DEFAULT_DATA_DIR)))
+JOBS_DIR = Path(_env("CAPTURD_JOBS_DIR", str(_DEFAULT_DATA_DIR / "jobs")))
 DB_PATH = DATA_DIR / "capturd.sqlite3"
 SESSION_SECRET = _env("CAPTURD_SESSION_SECRET") or secrets.token_hex(32)
 
