@@ -9,3 +9,9 @@ httpx>=0.27
 #   playwright install chromium
 #   ffmpeg on PATH (or bundled at packaging/ffmpeg/)
 # See DEPLOY.md.
+#
+# psycopg is NOT in this base file on purpose: it is the Postgres *target* of
+# the sqlite->Postgres migrator (ADR-0001 Stage 5) and is optional at runtime —
+# the service keeps using sqlite until CAPTURD_DATABASE_URL is set. Only the
+# box that actually runs `migrate_sqlite_to_postgres.py` needs it; install via
+#   pip install -r requirements-postgres.txt
