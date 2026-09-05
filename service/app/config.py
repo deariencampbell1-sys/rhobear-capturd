@@ -53,7 +53,10 @@ VAULT = _vault_dir()
 # ---- service basics ----------------------------------------------------------
 BASE_URL = _env("CAPTURD_BASE_URL", "http://127.0.0.1:8099")
 DATA_DIR = Path(_env("CAPTURD_DATA_DIR", str(_DEFAULT_DATA_DIR)))
-JOBS_DIR = Path(_env("CAPTURD_JOBS_DIR", str(_DEFAULT_DATA_DIR / "jobs")))
+# Jobs live under the DATA_DIR root, so an overridden CAPTURD_DATA_DIR keeps DB
+# and job artifacts in one tree rather than silently splitting them across two
+# roots. CAPTURD_JOBS_DIR still wins when set explicitly.
+JOBS_DIR = Path(_env("CAPTURD_JOBS_DIR", str(DATA_DIR / "jobs")))
 DB_PATH = DATA_DIR / "capturd.sqlite3"
 SESSION_SECRET = _env("CAPTURD_SESSION_SECRET") or secrets.token_hex(32)
 
