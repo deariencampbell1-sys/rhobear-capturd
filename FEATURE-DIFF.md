@@ -22,7 +22,7 @@ Wiring (`service/app/*.py`, render_worker, mcp_service) is the partner's lane (P
 | Your demos gallery | `#galgrid #galempty` ← `/api/jobs` | mxo8fj (desktop rows) / ln4kbp (mobile cards) |
 | Plan meter + Upgrade to Pro | `#usageLabel #usageBar #billingNote #mcpNote #upgrade` → `/billing/checkout` | — (kept in-likeness) |
 | First-run onboarding overlay (4 beats) | `#ctOnb .ctob-* [data-next] #ctobDone #ctobSkip` | 77f8v1 (mobile 4-step) informs it |
-| Rho companion embed | `window.RHOBEAR_COMPANION` + companion-embed.js → `#rho-launch` | teal orb bottom-right in every mock |
+| Rho companion embed | `window.RHOBEAR_COMPANION` + canonical `builds.rhobear.ai/companion-embed-orb4.js` → `#rho-launch` | teal orb bottom-right in every mock |
 
 ## NO-MOCK SURVIVORS — KEEP, build in the system's likeness
 - **Plan meter + Upgrade to Pro** — no picture, but it's the Stripe Pro wall. Kept, restyled to pack glass.
