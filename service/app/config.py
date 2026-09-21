@@ -150,13 +150,38 @@ def ensure_dirs() -> None:
     """
     global DATA_DIR, JOBS_DIR, DB_PATH
 
+    def _probe_writable(directory: Path) -> bool:
+        """Can we actually create a file *inside* ``directory``?
+
+        ``mkdir(parents=True, exist_ok=True)`` succeeds on a directory that
+        already exists even when it is not writable, so the mkdirs alone cannot
+        answer this: a data dir left at mode 0500 by a root/systemd run passes
+        the check and only fails later as ``sqlite3.OperationalError: unable to
+        open database file``. The probe file is removed on every path, so a
+        failed check leaves nothing behind.
+        """
+        probe = directory / ".capturd-write-probe"
+        try:
+            probe.write_text("", encoding="utf-8")
+        except OSError:  # PermissionError, read-only fs, ENOTDIR, …
+            return False
+        finally:
+            try:
+                probe.unlink()
+            except OSError:  # best-effort cleanup; nothing to remove on failure
+                pass
+        return True
+
     def _mkdir_ok(base: Path) -> bool:
         try:
             base.mkdir(parents=True, exist_ok=True)
-            _jobs_for(base).mkdir(parents=True, exist_ok=True)
-            return True
-        except PermissionError:
+            jobs = _jobs_for(base)
+            jobs.mkdir(parents=True, exist_ok=True)
+        except OSError:  # PermissionError is an OSError; also EROFS/ENOTDIR/ENOSPC
             return False
+        # Both roots must be *writable*, not merely present: the DB file is
+        # created in the data dir and job artifacts in the jobs dir.
+        return _probe_writable(base) and _probe_writable(jobs)
 
     if _mkdir_ok(DATA_DIR):
         return
@@ -164,7 +189,7 @@ def ensure_dirs() -> None:
     fallback = _FALLBACK_DATA_DIR
     if not _mkdir_ok(fallback):
         raise PermissionError(
-            f"cannot create data dir {DATA_DIR} and cannot fall back to {fallback} "
+            f"cannot create or write data dir {DATA_DIR} and cannot fall back to {fallback} "
             "(run under systemd, or set CAPTURD_DATA_DIR / CAPTURD_JOBS_DIR to a "
             "writable path)"
         )

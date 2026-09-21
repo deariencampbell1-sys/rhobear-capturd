@@ -97,7 +97,9 @@ def _migrate_usage_pk(c: sqlite3.Connection) -> None:
     identity the migrator already keyed it on. One transaction; a no-op on an
     already-migrated (or brand-new) store.
     """
-    cols = {r["name"] for r in c.execute("PRAGMA table_info(usage)")}
+    # position, not r["name"]: PRAGMA rows must not depend on this connection
+    # having a sqlite3.Row factory (the migrator reads the same pragma as r[1]).
+    cols = {r[1] for r in c.execute("PRAGMA table_info(usage)")}
     if not cols or "id" in cols:
         return  # brand-new (created from _SCHEMA) or already migrated
     c.execute(_USAGE_WITH_PK)

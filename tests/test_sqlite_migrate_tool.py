@@ -39,6 +39,8 @@ from app import store  # noqa: E402
 from scripts.migrate_sqlite_to_postgres import (  # noqa: E402
     MemorySink,
     PostgresSink,
+    _default_source_id,
+    _open_source,
     _usage_key,
     migrate,
     params_for,
@@ -160,9 +162,9 @@ def test_usage_key_includes_row_identity_so_distinct_events_survive():
     a = {"_rowid": 1, "user_id": "u1", "kind": "generation", "n": 1, "at": 400}
     b = {"_rowid": 2, "user_id": "u1", "kind": "generation", "n": 1, "at": 400}
     assert a["_rowid"] != b["_rowid"]
-    assert _usage_key(a) != _usage_key(b)
+    assert _usage_key(a, "src") != _usage_key(b, "src")
     # ...but the same row (same id) maps to the same key, so reruns stay idempotent.
-    assert _usage_key(a) == _usage_key(dict(a))
+    assert _usage_key(a, "src") == _usage_key(dict(a), "src")
 
 
 def test_usage_key_stable_across_processes():
@@ -170,7 +172,8 @@ def test_usage_key_stable_across_processes():
     PYTHONHASHSEED — otherwise a rerun in a fresh process could drop/duplicate usage."""
     code = (
         "from scripts.migrate_sqlite_to_postgres import _usage_key; "
-        "print(_usage_key({'_rowid': 7, 'user_id': 'u1', 'kind': 'generation', 'n': 1, 'at': 400}))"
+        "print(_usage_key({'_rowid': 7, 'user_id': 'u1', 'kind': 'generation', "
+        "'n': 1, 'at': 400}, 'src'))"
     )
     keys = set()
     for seed in ("0", "12345", "99999"):
@@ -182,6 +185,77 @@ def test_usage_key_stable_across_processes():
         assert p.returncode == 0, p.stderr
         keys.add(p.stdout.strip())
     assert len(keys) == 1, keys
+
+
+def test_two_sources_with_identical_usage_rows_both_land(tmp_path: Path, monkeypatch):
+    """Two source files holding the same usage payloads (same ids — ids restart
+    at 1 per file) must BOTH migrate into the one Postgres.
+
+    Keying on the row id alone made the second file's rows hash to keys the first
+    file already used, so ``ON CONFLICT DO NOTHING`` skipped them, exit code 0,
+    visible only as a ``duplicates`` count — silent usage/billing undercount.
+    """
+    src_a = tmp_path / "container-a" / "capturd.sqlite3"
+    src_b = tmp_path / "container-b" / "capturd.sqlite3"
+    for src in (src_a, src_b):
+        src.parent.mkdir()
+        _make_sqlite(src).close()
+
+    id_a, id_b = _default_source_id(src_a), _default_source_id(src_b)
+    assert id_a != id_b                           # distinct per source file
+    monkeypatch.chdir(tmp_path)                   # …and stable for one file,
+    assert _default_source_id(Path("container-a/capturd.sqlite3")) == id_a
+    assert len(id_a) == 8
+
+    row = {"_rowid": 1, "user_id": "u1", "kind": "generation", "n": 1, "at": 400}
+    assert _usage_key(row, id_a) != _usage_key(row, id_b)
+
+    sink = MemorySink()
+    first = migrate(src_a, sink)
+    assert first["usage"]["imported"] == 2
+    assert first["usage"]["duplicates"] == 0
+
+    second = migrate(src_b, sink)                  # real run, shared destination
+    assert second["usage"]["imported"] == 2        # both containers' rows land
+    assert second["usage"]["duplicates"] == 0      # nothing silently skipped
+    assert sink.count("usage") == 4
+
+    # …and each file is still idempotent on its own re-run.
+    assert migrate(src_a, sink)["usage"]["imported"] == 0
+    assert sink.count("usage") == 4
+
+
+def test_real_run_warns_on_skipped_usage_duplicates(tmp_path: Path, capsys):
+    """A skipped usage row is silent undercounting, so a real run says so out
+    loud (one stderr line) instead of leaving it in the report dict only."""
+    db = tmp_path / "capturd.sqlite3"
+    _make_sqlite(db).close()
+
+    sink = MemorySink()
+    report = migrate(db, sink)                     # first run: nothing skipped
+    assert report["usage"]["duplicates"] == 0
+    assert capsys.readouterr().err == ""
+
+    report = migrate(db, sink)                     # rerun: every usage row is a duplicate
+    assert report["usage"]["duplicates"] == 2
+    err = capsys.readouterr().err.strip().splitlines()
+    assert len(err) == 1, err
+    assert "duplicate usage row(s)" in err[0]
+    assert "--source-id" in err[0]
+
+    # A dry run has no destination to collide with: no warning.
+    migrate(db, MemorySink(), dry_run=True)
+    assert capsys.readouterr().err == ""
+
+
+def test_main_accepts_explicit_source_id(tmp_path: Path):
+    """``--source-id`` is the operator override, so the flag must exist and a
+    run using it must still work (dry-run: no Postgres needed)."""
+    db_path = tmp_path / "capturd.sqlite3"
+    _make_sqlite(db_path).close()
+    p = _run_migrator("--sqlite", str(db_path), "--dry-run", "--source-id", "deadbeef")
+    assert p.returncode == 0, p.stderr
+    assert json.loads(p.stdout)["usage"]["imported"] == 2
 
 
 class _FakeCursor:
@@ -317,6 +391,24 @@ def test_migrate_counts_and_is_idempotent(tmp_path: Path):
         assert r["resulting"] == first[table]["resulting"], table
 
 
+def test_migrate_source_handle_is_read_only(tmp_path: Path):
+    """The source is often the live service database: the migrator opens it
+    ``mode=ro``, so a write attempt is refused rather than applied to production
+    (and a normal file still migrates green through the same handle)."""
+    db = tmp_path / "capturd.sqlite3"
+    _make_sqlite(db).close()
+
+    assert migrate(db, MemorySink())["usage"]["imported"] == 2   # still runs green
+
+    conn = _open_source(db)
+    try:
+        assert conn.in_transaction                 # one deferred read snapshot
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute("INSERT INTO usage(user_id,kind,n,at) VALUES('u1','shot',1,1)")
+    finally:
+        conn.close()
+
+
 def test_dry_run_writes_nothing(tmp_path: Path):
     db_path = tmp_path / "capturd.sqlite3"
     _make_sqlite(db_path).close()
@@ -411,8 +503,13 @@ def test_usage_ids_survive_vacuum_so_migration_reruns_stay_idempotent(tmp_path: 
     def _keys() -> set[str]:
         conn = sqlite3.connect(db)
         conn.row_factory = sqlite3.Row
+        source_id = _default_source_id(db)          # the id a default run uses
         try:
-            return {_usage_key(row) for batch in read_rows(conn, "usage") for row in batch}
+            return {
+                _usage_key(row, source_id)
+                for batch in read_rows(conn, "usage")
+                for row in batch
+            }
         finally:
             conn.close()
 
@@ -434,9 +531,12 @@ def test_usage_ids_survive_vacuum_so_migration_reruns_stay_idempotent(tmp_path: 
 
 
 def test_migrate_reads_legacy_usage_file_by_rowid(tmp_path: Path):
-    """A source file that still predates the column is read via ``rowid``, and the
-    key is identical to the one the migrated file would produce — so a migration
-    started before the upgrade and finished after it can't duplicate rows.
+    """A source file that still predates the column is read via ``rowid``, and for
+    the SAME source identity the key is identical to the one the migrated file
+    would produce — so a migration started before the upgrade and finished after
+    it can't duplicate rows. (The identity has to be pinned to the same value:
+    the two files have different paths, and keys are namespaced per source — see
+    ``test_two_sources_with_identical_usage_rows_both_land``.)
     """
     legacy = tmp_path / "legacy.sqlite3"
     _make_legacy_sqlite(legacy).close()
@@ -447,15 +547,20 @@ def test_migrate_reads_legacy_usage_file_by_rowid(tmp_path: Path):
         conn = sqlite3.connect(path)
         conn.row_factory = sqlite3.Row
         try:
-            return {_usage_key(row) for batch in read_rows(conn, "usage") for row in batch}
+            return {
+                _usage_key(row, "same-source")
+                for batch in read_rows(conn, "usage")
+                for row in batch
+            }
         finally:
             conn.close()
 
     assert _keys(legacy) == _keys(modern)
 
     sink = MemorySink()
-    assert migrate(legacy, sink)["usage"]["imported"] == 2
-    assert migrate(modern, sink)["usage"]["imported"] == 0    # same rows, same keys
+    assert migrate(legacy, sink, source_id="same-source")["usage"]["imported"] == 2
+    # same rows, same identity → same keys → nothing re-imported
+    assert migrate(modern, sink, source_id="same-source")["usage"]["imported"] == 0
 
 
 def test_read_rows_streams_in_batches(tmp_path: Path):
@@ -498,6 +603,43 @@ def test_migrate_across_batches_keeps_every_distinct_row(tmp_path: Path):
     assert first["usage"]["duplicates"] == 0
     assert sink.count("usage") == 2502
     assert migrate(db, sink)["usage"]["imported"] == 0
+
+
+def test_dry_run_counts_diverge_from_real_run_across_batches(tmp_path: Path):
+    """Dedupe is per-batch, so a usage key repeated in a LATER batch is not caught
+    by the in-run ``seen`` set — only by the destination's unique constraint.
+
+    A dry run has no destination, so it counts that repeat as imported while a
+    real run skips it: dry-run ``imported`` is an upper bound, not a preview of
+    the real run's (documented above ``migrate``, previously untested).
+    """
+    db = tmp_path / "repeat-key.sqlite3"
+    conn = sqlite3.connect(db)
+    conn.executescript(store._SCHEMA)
+    # A usage table with no uniqueness on the identity column, so the same key
+    # can occur either side of a batch boundary (read_rows keys on ``id`` here).
+    conn.executescript(
+        "DROP TABLE usage;"
+        "CREATE TABLE usage (id INTEGER, user_id TEXT, kind TEXT, n INTEGER, at INTEGER);"
+    )
+    repeated = (1, "u1", "generation", 1, 400)     # first row, and last row again
+    rows = [repeated]
+    rows += [(i, "u1", "shot", 1, 500 + i) for i in range(2, 1002)]
+    rows.append(repeated)
+    conn.executemany("INSERT INTO usage(id,user_id,kind,n,at) VALUES(?,?,?,?,?)", rows)
+    conn.commit()
+    conn.close()
+    assert len(rows) == 1002                       # > one 1000-row batch
+
+    real = migrate(db, MemorySink())
+    assert real["usage"]["source"] == 1002
+    assert real["usage"]["imported"] == 1001       # the repeat is skipped by the sink
+    assert real["usage"]["duplicates"] == 1
+
+    dry = migrate(db, MemorySink(), dry_run=True)
+    assert dry["usage"]["imported"] == 1002        # …but a dry run counts it twice
+    assert dry["usage"]["duplicates"] == 0
+    assert dry["usage"]["imported"] > real["usage"]["imported"]
 
 
 # ---------------------------------------------------------------------------
@@ -685,6 +827,63 @@ def test_ensure_dirs_falls_back_on_permission_error(tmp_path: Path, monkeypatch)
     assert app_config.JOBS_DIR == fallback / "jobs"
     assert app_config.DB_PATH == fallback / "capturd.sqlite3"
     assert (fallback / "jobs").is_dir()          # created where we asked
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="mode bits don't bind for root (or on Windows)",
+)
+def test_ensure_dirs_falls_back_when_data_dir_exists_but_is_not_writable(
+    tmp_path: Path, monkeypatch
+):
+    """A data dir that exists but is NOT writable must fall back too.
+
+    ``mkdir(exist_ok=True)`` returns success on an existing directory whatever
+    its mode, so the old check passed at mode 0500 and the run only failed later
+    with ``sqlite3.OperationalError: unable to open database file`` — exactly the
+    "previously ran under systemd, now running unprivileged" case the docstring
+    advertises. Both dirs are pre-created here so the mkdirs cannot fail the
+    check on their own: only the writability probe can.
+    """
+    readonly = tmp_path / "read-only-data"
+    (readonly / "jobs").mkdir(parents=True)          # DATA_DIR and JOBS_DIR exist
+    fallback = tmp_path / "fallback"
+    os.chmod(readonly, 0o500)                        # r-x only: no file may be created
+    monkeypatch.setattr(app_config, "DATA_DIR", readonly)
+    monkeypatch.setattr(app_config, "JOBS_DIR", readonly / "jobs")
+    monkeypatch.setattr(app_config, "DB_PATH", readonly / "capturd.sqlite3")
+    monkeypatch.setattr(app_config, "_FALLBACK_DATA_DIR", fallback)
+    monkeypatch.delenv("CAPTURD_DATA_DIR", raising=False)
+    monkeypatch.delenv("CAPTURD_JOBS_DIR", raising=False)
+
+    try:
+        app_config.ensure_dirs()
+
+        assert app_config.DATA_DIR == fallback
+        assert app_config.JOBS_DIR == fallback / "jobs"
+        assert app_config.DB_PATH == fallback / "capturd.sqlite3"
+        assert app_config.DB_PATH.parent == app_config.DATA_DIR
+        # the failed probe left no trace in the directory it could not write
+        assert not (readonly / ".capturd-write-probe").exists()
+        assert (fallback / "jobs").is_dir()
+    finally:
+        os.chmod(readonly, 0o700)                    # let pytest clean tmp_path up
+
+
+def test_ensure_dirs_leaves_no_probe_file_behind(tmp_path: Path, monkeypatch):
+    """The writability probe must not litter the live data dir."""
+    writable = tmp_path / "data"
+    monkeypatch.setattr(app_config, "DATA_DIR", writable)
+    monkeypatch.setattr(app_config, "JOBS_DIR", writable / "jobs")
+    monkeypatch.setattr(app_config, "DB_PATH", writable / "capturd.sqlite3")
+    monkeypatch.delenv("CAPTURD_DATA_DIR", raising=False)
+    monkeypatch.delenv("CAPTURD_JOBS_DIR", raising=False)
+
+    app_config.ensure_dirs()
+
+    assert app_config.DATA_DIR == writable
+    assert list(writable.glob(".capturd-write-probe")) == []
+    assert list((writable / "jobs").glob(".capturd-write-probe")) == []
 
 
 def test_ensure_dirs_fallback_keeps_explicit_jobs_dir(tmp_path: Path, monkeypatch):

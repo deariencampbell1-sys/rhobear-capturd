@@ -21,6 +21,11 @@ Usage:
   python service/scripts/migrate_sqlite_to_postgres.py
   python service/scripts/migrate_sqlite_to_postgres.py --sqlite /path/to/capturd.sqlite3
 
+More than one container-local source may be backfilled into the same Postgres, so
+``usage`` keys are namespaced per source file (``--source-id``, defaulted from the
+source path — see ``_usage_key``); pass a distinct one per source, and the same
+one when re-running a file whose path changed.
+
 Sink: CAPTURD_DATABASE_URL (psycopg). ``--dry-run`` reports counts against an
 *empty* destination (it does not read existing Postgres rows and does not create
 the schema); use a real run for true/repeatable numbers.
@@ -56,7 +61,21 @@ _COLS = {
 }
 
 
-def _usage_key(row: dict) -> str:
+def _default_source_id(sqlite_path: Path) -> str:
+    """Per-source identity for usage keys — 8 hex of the resolved source path.
+
+    Must be distinct across *different* source files and stable for the *same*
+    one: a rerun has to reproduce its keys (or it would duplicate every usage
+    row), while two files must not (or the second file's events are skipped as
+    duplicates). The resolved absolute path gives both — it is identical on a
+    rerun of one file, and container-local files live at different paths. When
+    it cannot be the identity (the same DB mounted at a different path, a copied
+    file), pass ``--source-id`` explicitly.
+    """
+    return hashlib.sha256(str(sqlite_path.resolve()).encode("utf-8")).hexdigest()[:8]
+
+
+def _usage_key(row: dict, source_id: str) -> str:
     """Idempotency key for a usage row (stable across processes AND re-runs).
 
     ``usage`` has no natural key, so a rerun needs a stable one. Key it on the
@@ -75,13 +94,21 @@ def _usage_key(row: dict) -> str:
     carried over from rowids by the store's one-shot rebuild, so a key computed
     either way is identical.
 
+    ``source_id`` namespaces the key by *source file* (``_default_source_id``,
+    or ``--source-id``). A sqlite file's ids restart at 1, so keying on the id
+    alone makes two sources collide whenever they hold the same
+    ``(user_id, kind, n, at)`` under the same id — e.g. one user hitting two
+    containers in the same second with the same ``kind`` and ``n``. The second
+    row would then be skipped as a duplicate (exit code 0, only visible as a
+    ``duplicates`` count) and usage/billing silently undercounted. Re-runs of
+    one file keep the same id, so they stay idempotent.
+
     Uses a fixed SHA-256 (not Python's seeded ``hash()``) so keys are identical
     across processes regardless of ``PYTHONHASHSEED``.
     """
     return hashlib.sha256(
-        f"{row['_rowid']}|{row['user_id']}|{row['kind']}|{row['n']}|{row['at']}".encode(
-            "utf-8"
-        )
+        f"{source_id}|{row['_rowid']}|{row['user_id']}|{row['kind']}|{row['n']}|"
+        f"{row['at']}".encode("utf-8")
     ).hexdigest()[:24]
 
 
@@ -171,9 +198,9 @@ class MemorySink:
         return None
 
 
-def _resolve_key(table: str, row: dict) -> str:
+def _resolve_key(table: str, row: dict, source_id: str) -> str:
     if table == "usage":
-        return _usage_key(row)
+        return _usage_key(row, source_id)
     return str(row.get("id") or row.get("token") or "")
 
 
@@ -253,8 +280,26 @@ def _source_count(conn, table: str) -> int:
         cur.close()
 
 
-def migrate(sqlite_path: Path, sink, *, dry_run: bool = False) -> dict[str, dict]:
-    conn = sqlite3.connect(sqlite_path)
+def _open_source(sqlite_path: Path) -> sqlite3.Connection:
+    """Open the sqlite source **read-only**, on one consistent snapshot.
+
+    The source is usually the live service database, so the migrator opens it
+    through a ``mode=ro`` URI: it has no business writing to the source (and a
+    typo'd path must fail loudly, not be created empty and migrated from). One
+    deferred read transaction is then held across every table, so the counts and
+    the rows come from the same snapshot instead of a writer committing between
+    ``_source_count`` and ``read_rows``.
+    """
+    conn = sqlite3.connect(f"file:{sqlite_path.as_posix()}?mode=ro", uri=True)
+    conn.execute("BEGIN")
+    return conn
+
+
+def migrate(
+    sqlite_path: Path, sink, *, dry_run: bool = False, source_id: str | None = None
+) -> dict[str, dict]:
+    source_id = source_id or _default_source_id(sqlite_path)
+    conn = _open_source(sqlite_path)
     report = {}
     try:
         for table in TABLES:
@@ -271,7 +316,7 @@ def migrate(sqlite_path: Path, sink, *, dry_run: bool = False) -> dict[str, dict
                 # ``duplicates`` via source - imported - rejected.
                 seen: set[str] = set()
                 for row in batch:
-                    key = _resolve_key(table, row)
+                    key = _resolve_key(table, row, source_id)
                     if not key:
                         rejected += 1
                         continue
@@ -303,6 +348,16 @@ def migrate(sqlite_path: Path, sink, *, dry_run: bool = False) -> dict[str, dict
             }
     finally:
         conn.close()
+    if not dry_run and report["usage"]["duplicates"] > 0:
+        # A skipped usage row is silent undercounting unless the operator hears
+        # about it: rerunning one file reports this too (expected — everything is
+        # already there), so name the other cause explicitly.
+        print(
+            f"[capturd] usage: {report['usage']['duplicates']} duplicate usage row(s) "
+            "skipped — if this was not a rerun of an already-migrated source, two "
+            "sources are sharing one identity; re-run with a distinct --source-id",
+            file=sys.stderr,
+        )
     return report
 
 
@@ -312,6 +367,13 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ap.add_argument("--sqlite", default=str(config.DB_PATH))
+    ap.add_argument(
+        "--source-id",
+        default=None,
+        help="namespaces this source's usage keys; defaults to a hash of the "
+             "source's resolved path — distinct per source file, stable per "
+             "rerun (set it explicitly if the file moves)",
+    )
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -340,7 +402,9 @@ def main() -> int:
         if not args.dry_run:
             sink = PostgresSink(url)
             sink.init_schema()
-        report = migrate(sqlite_path, sink, dry_run=args.dry_run)
+        report = migrate(
+            sqlite_path, sink, dry_run=args.dry_run, source_id=args.source_id
+        )
     except ModuleNotFoundError as exc:
         print(
             f"ERROR: missing dependency: {exc} — Postgres migration needs "
