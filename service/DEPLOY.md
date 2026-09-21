@@ -88,6 +88,16 @@ Notes: re-runs are safe (conflicting rows are skipped and reported as `duplicate
 
 The Postgres integration test is opt-in so normal CI stays dependency-free. Enforce it in CI
 against a disposable Postgres service by setting `CAPTURD_TEST_POSTGRES_URL` (point it at an
-ephemeral/test-only host+db — the test only ever touches the five tables the tool owns and
-refuses to run against a non-localhost/non-test host).
+ephemeral/test-only host+db).
+
+**That test is destructive.** Before it runs it issues `DROP TABLE IF EXISTS … CASCADE` for
+each of the five tables the tool owns (`users`, `mcp_tokens`, `sessions`, `jobs`, `usage`),
+then recreates them — so any data already in those five tables in the target database is
+destroyed. It guards itself by refusing to run unless the URL points at loopback
+(`localhost`, `127.0.0.1`, `::1`) or the host/database name contains `test` as a whole
+token (`pg-test-01.internal`, `capturd_ci_test`) — a substring is not accepted, so
+`latest-prod-db.example.com` and `contest_db` are refused. Point it at a scratch database,
+never at anything you intend to keep; tables outside those five are left untouched.
+
+Note the migrator itself never drops anything — this is a property of the test only.
 

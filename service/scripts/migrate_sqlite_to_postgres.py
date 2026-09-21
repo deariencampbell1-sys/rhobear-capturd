@@ -57,16 +57,26 @@ _COLS = {
 
 
 def _usage_key(row: dict) -> str:
-    """Idempotency key for a usage row (stable across processes).
+    """Idempotency key for a usage row (stable across processes AND re-runs).
 
-    usage has no natural key in sqlite, so a rerun needs a stable one. Key it on
-    the sqlite ``rowid`` (not just the second-resolution payload columns) so two
+    ``usage`` has no natural key, so a rerun needs a stable one. Key it on the
+    row's explicit ``id`` primary key (selected as ``_rowid`` — see
+    ``read_rows``), not just the second-resolution payload columns, so two
     distinct append-only events sharing ``(user_id, kind, n, at)`` — e.g. two
     events in the same second with the same ``n`` — are BOTH imported instead of
-    being silently collapsed and undercounting usage/billing. ``rowid`` is stable
-    for a given (unchanged) sqlite file, so reruns still stay idempotent. Uses a
-    fixed SHA-256 (not Python's seeded ``hash()``) so keys are identical across
-    processes regardless of ``PYTHONHASHSEED``.
+    being silently collapsed and undercounting usage/billing.
+
+    The source column is an explicit ``INTEGER PRIMARY KEY AUTOINCREMENT``
+    (see ``store._SCHEMA``), so it is monotonic, never recycled after a delete,
+    and — unlike an implicit rowid — not renumbered by ``VACUUM``. That is what
+    makes the key stable across migration re-runs rather than merely
+    "stable until someone vacuums". Legacy source files whose ``usage`` table
+    predates that column fall back to ``rowid`` (see ``read_rows``); ids are
+    carried over from rowids by the store's one-shot rebuild, so a key computed
+    either way is identical.
+
+    Uses a fixed SHA-256 (not Python's seeded ``hash()``) so keys are identical
+    across processes regardless of ``PYTHONHASHSEED``.
     """
     return hashlib.sha256(
         f"{row['_rowid']}|{row['user_id']}|{row['kind']}|{row['n']}|{row['at']}".encode(
@@ -201,23 +211,35 @@ class PostgresSink:
             pass
 
 
-def read_rows(conn, table: str):
-    """Yield each source row as a dict, in batches (never materializes the whole
+def _usage_pk_column(conn) -> str:
+    """The column that identifies a ``usage`` row in *this* source file.
+
+    ``id`` (the explicit ``INTEGER PRIMARY KEY AUTOINCREMENT``) on a current
+    store; ``rowid`` on a legacy file that predates the column — the rebuild in
+    ``store._migrate_usage_pk()`` carries rowids over as ids, so both choices
+    yield the same key for the same row.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(usage)")}
+    return "id" if "id" in cols else "rowid"
+
+
+def read_rows(conn, table: str, *, batch_size: int = 1000):
+    """Yield the source rows as batches of dicts (never materializes the whole
     table — a production-sized sessions/usage table would otherwise OOM the
-    migrator process). usage also selects the implicit ``rowid`` as ``_rowid``
-    for its per-event idempotency key.
+    migrator process). ``usage`` also selects its per-event identity column
+    (explicit ``id``, or ``rowid`` on a pre-migration file) as ``_rowid`` for its
+    idempotency key.
     """
     cur = conn.cursor()
     cur.row_factory = sqlite3.Row
-    columns = "rowid AS _rowid, *" if table == "usage" else "*"
+    columns = "*" if table != "usage" else f"{_usage_pk_column(conn)} AS _rowid, *"
     cur.execute(f"SELECT {columns} FROM {table}")
     try:
         while True:
-            batch = cur.fetchmany(1000)
+            batch = cur.fetchmany(batch_size)
             if not batch:
                 break
-            for r in batch:
-                yield dict(r)
+            yield [dict(r) for r in batch]
     finally:
         cur.close()
 
@@ -238,21 +260,29 @@ def migrate(sqlite_path: Path, sink, *, dry_run: bool = False) -> dict[str, dict
         for table in TABLES:
             before = sink.count(table)
             processed = rejected = 0
-            seen: set[str] = set()
             source = _source_count(conn, table)
-            for row in read_rows(conn, table):
-                key = _resolve_key(table, row)
-                if not key:
-                    rejected += 1
-                    continue
-                if key in seen:
-                    continue
-                seen.add(key)
-                if table == "usage":
-                    row = {**row, "_key": key}
-                if not dry_run:
-                    sink.upsert(table, row)
-                processed += 1
+            for batch in read_rows(conn, table):
+                # De-dupe WITHIN a batch only. A run-wide ``seen`` set grows with
+                # the table and would reintroduce the OOM this batching exists to
+                # avoid (reviewer finding). It is also redundant across batches:
+                # every table but ``usage`` has a PRIMARY KEY, and usage's key is
+                # its own unique id, so the destination's unique constraints (and
+                # MemorySink's first-write-wins) catch any repeat — counted under
+                # ``duplicates`` via source - imported - rejected.
+                seen: set[str] = set()
+                for row in batch:
+                    key = _resolve_key(table, row)
+                    if not key:
+                        rejected += 1
+                        continue
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    if table == "usage":
+                        row = {**row, "_key": key}
+                    if not dry_run:
+                        sink.upsert(table, row)
+                    processed += 1
             # One commit per table (not per row): keeps the run atomicish — a
             # failure mid-table rolls back that table's work on the real sink
             # instead of leaving N/2 rows in.

@@ -125,6 +125,16 @@ def status() -> dict:
     }
 
 
+def _jobs_for(base: Path) -> Path:
+    """Job root for a data root — ``CAPTURD_JOBS_DIR`` still wins when set.
+
+    Resolved at call time (not captured) so the unprivileged fallback below
+    keeps the "env vars always win" contract instead of silently relocating a
+    job directory the operator explicitly pinned.
+    """
+    return Path(_env("CAPTURD_JOBS_DIR", str(base / "jobs")))
+
+
 def ensure_dirs() -> None:
     """Create the data/job dirs, falling back to a user-writable location.
 
@@ -134,13 +144,16 @@ def ensure_dirs() -> None:
     instead fall back to ``~/.local/share/capturd`` (and rebuild the dependent
     ``JOBS_DIR``/``DB_PATH``) so an unprivileged run still comes up. The systemd
     unit always sets ``CAPTURD_DATA_DIR`` so production never hits this path.
+
+    An explicitly-set ``CAPTURD_JOBS_DIR`` survives the fallback: only the
+    *default* job root moves under the fallback data dir.
     """
     global DATA_DIR, JOBS_DIR, DB_PATH
 
     def _mkdir_ok(base: Path) -> bool:
         try:
             base.mkdir(parents=True, exist_ok=True)
-            (base / "jobs").mkdir(parents=True, exist_ok=True)
+            _jobs_for(base).mkdir(parents=True, exist_ok=True)
             return True
         except PermissionError:
             return False
@@ -161,5 +174,5 @@ def ensure_dirs() -> None:
         file=sys.stderr,
     )
     DATA_DIR = fallback
-    JOBS_DIR = fallback / "jobs"
+    JOBS_DIR = _jobs_for(fallback)
     DB_PATH = DATA_DIR / "capturd.sqlite3"
