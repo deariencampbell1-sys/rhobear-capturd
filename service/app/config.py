@@ -15,9 +15,37 @@ from __future__ import annotations
 
 import os
 import secrets
+import sys
 from pathlib import Path
 
-VAULT = Path(r"D:\rhobear-agent-vault")
+# Platform-appropriate defaults. The Windows defaults keep the owner's box
+# behavior bit-for-bit; on Linux (the VPS deploy) a Windows path would silently
+# become a relative directory named ``D:\...`` — the old landmine. Env vars
+# always win (the systemd unit sets CAPTURD_DATA_DIR=/var/lib/capturd).
+#
+# Kept as tiny pure functions (taking os.name) so both the nt and posix branches
+# are directly unit-testable on any host — the reviewer's Windows-default branch
+# can be asserted without a Windows CI lane.
+def _default_data_dir(os_name: str) -> Path:
+    if os_name == "nt":
+        return Path(r"D:\capturd-service\data")
+    return Path("/var/lib/capturd")
+
+
+def _default_vault_dir(os_name: str) -> Path:
+    if os_name == "nt":
+        return Path(r"D:\rhobear-agent-vault")
+    return Path("/var/lib/capturd-agent-vault")
+
+
+_DEFAULT_DATA_DIR = _default_data_dir(os.name)
+_DEFAULT_VAULT = _default_vault_dir(os.name)
+# User-writable fallback for unprivileged/non-systemd Linux runs (see ensure_dirs).
+_FALLBACK_DATA_DIR = Path.home() / ".local" / "share" / "capturd"
+
+def _vault_dir() -> Path:
+    v = os.environ.get("CAPTURD_VAULT_DIR", "").strip()
+    return Path(v) if v else _DEFAULT_VAULT
 
 
 def _env(name: str, default: str = "") -> str:
@@ -25,7 +53,7 @@ def _env(name: str, default: str = "") -> str:
     if v:
         return v
     # optional vault fallback: a file named after the var (lowercased) holds the value
-    f = VAULT / f"{name.lower()}.txt"
+    f = _vault_dir() / f"{name.lower()}.txt"
     if f.is_file():
         for line in f.read_text(encoding="utf-8").splitlines():
             line = line.strip()
@@ -34,10 +62,16 @@ def _env(name: str, default: str = "") -> str:
     return default
 
 
+VAULT = _vault_dir()
+
+
 # ---- service basics ----------------------------------------------------------
 BASE_URL = _env("CAPTURD_BASE_URL", "http://127.0.0.1:8099")
-DATA_DIR = Path(_env("CAPTURD_DATA_DIR", r"D:\capturd-service\data"))
-JOBS_DIR = Path(_env("CAPTURD_JOBS_DIR", r"D:\capturd-service\data\jobs"))
+DATA_DIR = Path(_env("CAPTURD_DATA_DIR", str(_DEFAULT_DATA_DIR)))
+# Jobs live under the DATA_DIR root, so an overridden CAPTURD_DATA_DIR keeps DB
+# and job artifacts in one tree rather than silently splitting them across two
+# roots. CAPTURD_JOBS_DIR still wins when set explicitly.
+JOBS_DIR = Path(_env("CAPTURD_JOBS_DIR", str(DATA_DIR / "jobs")))
 DB_PATH = DATA_DIR / "capturd.sqlite3"
 SESSION_SECRET = _env("CAPTURD_SESSION_SECRET") or secrets.token_hex(32)
 
@@ -91,6 +125,79 @@ def status() -> dict:
     }
 
 
+def _jobs_for(base: Path) -> Path:
+    """Job root for a data root — ``CAPTURD_JOBS_DIR`` still wins when set.
+
+    Resolved at call time (not captured) so the unprivileged fallback below
+    keeps the "env vars always win" contract instead of silently relocating a
+    job directory the operator explicitly pinned.
+    """
+    return Path(_env("CAPTURD_JOBS_DIR", str(base / "jobs")))
+
+
 def ensure_dirs() -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    """Create the data/job dirs, falling back to a user-writable location.
+
+    The Linux default (``/var/lib/capturd``) is root/systemd-oriented. When the
+    service is run outside the unit (dev container, manual run, user namespace)
+    that path is not writable and would raise ``PermissionError`` at startup;
+    instead fall back to ``~/.local/share/capturd`` (and rebuild the dependent
+    ``JOBS_DIR``/``DB_PATH``) so an unprivileged run still comes up. The systemd
+    unit always sets ``CAPTURD_DATA_DIR`` so production never hits this path.
+
+    An explicitly-set ``CAPTURD_JOBS_DIR`` survives the fallback: only the
+    *default* job root moves under the fallback data dir.
+    """
+    global DATA_DIR, JOBS_DIR, DB_PATH
+
+    def _probe_writable(directory: Path) -> bool:
+        """Can we actually create a file *inside* ``directory``?
+
+        ``mkdir(parents=True, exist_ok=True)`` succeeds on a directory that
+        already exists even when it is not writable, so the mkdirs alone cannot
+        answer this: a data dir left at mode 0500 by a root/systemd run passes
+        the check and only fails later as ``sqlite3.OperationalError: unable to
+        open database file``. The probe file is removed on every path, so a
+        failed check leaves nothing behind.
+        """
+        probe = directory / ".capturd-write-probe"
+        try:
+            probe.write_text("", encoding="utf-8")
+        except OSError:  # PermissionError, read-only fs, ENOTDIR, …
+            return False
+        finally:
+            try:
+                probe.unlink()
+            except OSError:  # best-effort cleanup; nothing to remove on failure
+                pass
+        return True
+
+    def _mkdir_ok(base: Path) -> bool:
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            jobs = _jobs_for(base)
+            jobs.mkdir(parents=True, exist_ok=True)
+        except OSError:  # PermissionError is an OSError; also EROFS/ENOTDIR/ENOSPC
+            return False
+        # Both roots must be *writable*, not merely present: the DB file is
+        # created in the data dir and job artifacts in the jobs dir.
+        return _probe_writable(base) and _probe_writable(jobs)
+
+    if _mkdir_ok(DATA_DIR):
+        return
+
+    fallback = _FALLBACK_DATA_DIR
+    if not _mkdir_ok(fallback):
+        raise PermissionError(
+            f"cannot create or write data dir {DATA_DIR} and cannot fall back to {fallback} "
+            "(run under systemd, or set CAPTURD_DATA_DIR / CAPTURD_JOBS_DIR to a "
+            "writable path)"
+        )
+    print(
+        f"[capturd] data dir not writable ({DATA_DIR}); using {fallback} "
+        "(set CAPTURD_DATA_DIR to silence)",
+        file=sys.stderr,
+    )
+    DATA_DIR = fallback
+    JOBS_DIR = _jobs_for(fallback)
+    DB_PATH = DATA_DIR / "capturd.sqlite3"

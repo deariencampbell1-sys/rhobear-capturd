@@ -38,8 +38,38 @@ CREATE TABLE IF NOT EXISTS jobs (
   created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS usage (
+  -- Explicit monotonic primary key. Without it `usage` has only an implicit
+  -- rowid, which SQLite is free to renumber on VACUUM and to reuse after a
+  -- delete — so anything keyed on the implicit rowid (the sqlite→Postgres
+  -- migrator's per-event idempotency key) could duplicate or drop a billing
+  -- row across migration re-runs. AUTOINCREMENT keeps the sequence monotonic
+  -- and never recycled. Legacy tables are rebuilt by _migrate_usage_pk().
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id TEXT NOT NULL,
   kind TEXT NOT NULL,                     -- generation | shot
+  n INTEGER NOT NULL DEFAULT 1,
+  at INTEGER NOT NULL
+);
+"""
+
+# The usage table as it existed before the explicit primary key (ADR-0001
+# Stage 5 / PR #40 review). Kept as the literal legacy shape so the tests build
+# a *real* pre-migration store instead of hand-rolling one that could drift.
+_USAGE_WITHOUT_PK = """
+CREATE TABLE IF NOT EXISTS usage (
+  user_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  n INTEGER NOT NULL DEFAULT 1,
+  at INTEGER NOT NULL
+);
+"""
+
+# Rebuild target for that one-shot migration (same shape as _SCHEMA's usage).
+_USAGE_WITH_PK = """
+CREATE TABLE usage_new (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
   n INTEGER NOT NULL DEFAULT 1,
   at INTEGER NOT NULL
 );
@@ -57,10 +87,35 @@ def _db():
         conn.close()
 
 
+def _migrate_usage_pk(c: sqlite3.Connection) -> None:
+    """Give a legacy ``usage`` table its explicit primary key (idempotent).
+
+    Pre-existing stores have ``usage(user_id,kind,n,at)`` with no primary key,
+    so its rowid is implicit and unstable (VACUUM may renumber it; a delete
+    recycles it). Rebuild the table with ``id INTEGER PRIMARY KEY AUTOINCREMENT``
+    carrying the *existing* rowids over as the new ids, so every row keeps the
+    identity the migrator already keyed it on. One transaction; a no-op on an
+    already-migrated (or brand-new) store.
+    """
+    # position, not r["name"]: PRAGMA rows must not depend on this connection
+    # having a sqlite3.Row factory (the migrator reads the same pragma as r[1]).
+    cols = {r[1] for r in c.execute("PRAGMA table_info(usage)")}
+    if not cols or "id" in cols:
+        return  # brand-new (created from _SCHEMA) or already migrated
+    c.execute(_USAGE_WITH_PK)
+    c.execute(
+        "INSERT INTO usage_new(id,user_id,kind,n,at) "
+        "SELECT rowid,user_id,kind,n,at FROM usage"
+    )
+    c.execute("DROP TABLE usage")
+    c.execute("ALTER TABLE usage_new RENAME TO usage")
+
+
 def init() -> None:
     config.ensure_dirs()
     with _db() as c:
         c.executescript(_SCHEMA)
+        _migrate_usage_pk(c)
 
 
 # ---- users ------------------------------------------------------------------
