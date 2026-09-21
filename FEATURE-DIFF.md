@@ -2,7 +2,7 @@
 
 Method: diff → purge the old at source → rebuild in the pack's likeness → eyes-verify.
 Surface = `service/web/` only (index.html desktop `GET /`, m.html mobile `GET /m`, manifest, sw).
-Wiring (`service/app/*.py`, render_worker, mcp_service) is the partner's lane (PR #27) — untouched.
+Wiring (`service/app/*.py`, render_worker, mcp_service) is the partner's lane (PR #27) — untouched, with one exception: the Rho companion pass-through added after the bounce (see Seams).
 
 ## What the current product has (read from the real source)
 
@@ -22,7 +22,7 @@ Wiring (`service/app/*.py`, render_worker, mcp_service) is the partner's lane (P
 | Your demos gallery | `#galgrid #galempty` ← `/api/jobs` | mxo8fj (desktop rows) / ln4kbp (mobile cards) |
 | Plan meter + Upgrade to Pro | `#usageLabel #usageBar #billingNote #mcpNote #upgrade` → `/billing/checkout` | — (kept in-likeness) |
 | First-run onboarding overlay (4 beats) | `#ctOnb .ctob-* [data-next] #ctobDone #ctobSkip` | 77f8v1 (mobile 4-step) informs it |
-| Rho companion embed | `window.RHOBEAR_COMPANION` + canonical `builds.rhobear.ai/companion-embed-orb4.js` → `#rho-launch` | teal orb bottom-right in every mock |
+| Rho companion embed | `window.RHOBEAR_COMPANION` + canonical **orb4** embed vendored same-origin (`/assets/companion-embed-orb4.js`) → `endpoint: '/companion'`, proxied by `service/app/main.py` to the rhobear-companion brain → `#rho-launch` | teal orb bottom-right in every mock |
 
 ## NO-MOCK SURVIVORS — KEEP, build in the system's likeness
 - **Plan meter + Upgrade to Pro** — no picture, but it's the Stripe Pro wall. Kept, restyled to pack glass.
@@ -33,10 +33,12 @@ Wiring (`service/app/*.py`, render_worker, mcp_service) is the partner's lane (P
 ## PURGE (old at source — ONE-VERSION / NO-OVERLAY)
 - `service/web/assets/capturd-premium.css` + `capturd-bridge.js` — orphaned overlay pass, verified unreferenced (grep) → **deleted**.
 - Self-hosted **Nacelle** `<link>` (dead — no `/assets/nacelle/` folder ships) → removed from index.html + m.html.
+- `service/web/assets/companion-embed.js` — the v2.4 self-hosted embed (77 KB). Once the canonical orb4 embed is vendored same-origin nothing references it (`grep` + `test_docroot_has_no_orphaned_companion_asset`) → **deleted**.
 - Old accent `#4a9eff` / `#2e7fdd`, old ground `#080810`/`#111120` → replaced by pack tokens (`--capturd-accent #4B7AC8`, `--capturd-bg #0A0F14`).
 - System-font stacks (`-apple-system`/New York/SF Mono) → Typekit `sbv5bcv` (rokkitt / lato / droid-sans-mono) + birch-std on the word "Captur'd".
 
 ## Seams NAMED for the wiring partner (PR #27)
+- **Rho pass-through** — `service/app/main.py` gained `/companion/*` → `CAPTURD_COMPANION_UPSTREAM` (default `http://127.0.0.1:8787`). This is the ONE wiring change, and it exists so the embed's documented contract (`endpoint: '/companion'`, same-origin) is actually true on capturd: streamed SSE, headers/cookies/token forwarded as-is, 502 with an honest JSON error when the brain is down. Pointing the embed at another host's `/companion` is what the bounce caught — that host serves an HTML placeholder for every path, which a classic `<script>` is not allowed to execute.
 - **Richer `/api/jobs` fields** — rows today carry only `job_id,status,detail,created_at,has_video`. The new demo rows render `url / template / voice / aspect / duration` **only when present** (`j.url`, `j.template`, `j.voice`, `j.aspect`, `j.duration_s`). Add them server-side to light up the row tags.
 - **Re-film** button (`.demo__act[data-act="refilm"]`) — prefills the studio from the job's fields client-side and scrolls up; a true re-run endpoint would let it resubmit. Wire if desired.
 - **Stop filming** — the bice8o mock shows a red "Stop filming"; there is **no cancel endpoint**, so it is intentionally NOT rendered (would be a fake control). Add `/api/jobs/{id}/cancel` to enable it.

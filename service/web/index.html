@@ -836,16 +836,23 @@ async function poll(job_id){
 refresh();
 </script>
 
-<!-- Rho — the RHOBEAR companion, Captur'd blue halo (canonical Builds-hosted embed) -->
+<!-- Rho — the RHOBEAR companion, Captur'd blue halo.
+     The canonical orb4 embed, VENDORED same-origin (assets/companion-embed-orb4.js is
+     byte-identical to rhobear-builds-web/companion-embed-orb4.js). The brain is reached
+     through the same-origin /companion that service/app/main.py proxies to
+     rhobear-companion — the embed's own documented contract (`endpoint: '/companion'`).
+     Do NOT point these back at builds.rhobear.ai: that host answers every path with an
+     HTML placeholder, and a non-JS <script src> is blocked by MIME checking, so the
+     companion disappears silently on both surfaces. -->
 <script>
   window.RHOBEAR_COMPANION = {
-    endpoint: 'https://builds.rhobear.ai/companion',
+    endpoint: '/companion',
     ready: true,
     accent: '#4B7AC8',
     surface: 'capturd',
   };
 </script>
-<script defer src="https://builds.rhobear.ai/companion-embed-orb4.js?v=voice-followup-20260821"></script>
+<script defer src="/assets/companion-embed-orb4.js?v=r4-capturd-rho-20260921"></script>
 <!-- first-run onboarding overlay (gated: signed-in only, once per user) -->
 <div id="ctOnb" role="dialog" aria-modal="true" aria-label="Welcome to Captur'd">
   <div class="ctob-brand">

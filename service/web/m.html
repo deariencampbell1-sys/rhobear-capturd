@@ -507,15 +507,16 @@ async function poll(job_id){
 refresh();
 </script>
 
-<!-- Rho — the RHOBEAR companion (canonical Builds-hosted embed) -->
+<!-- Rho — the RHOBEAR companion. Canonical orb4 embed vendored same-origin; the brain is
+     the same-origin /companion proxied by service/app/main.py to rhobear-companion. -->
 <script>
   window.RHOBEAR_COMPANION = {
-    endpoint: 'https://builds.rhobear.ai/companion',
+    endpoint: '/companion',
     ready: true,
     accent: '#4B7AC8',
     surface: 'capturd',
   };
 </script>
-<script defer src="https://builds.rhobear.ai/companion-embed-orb4.js?v=voice-followup-20260821"></script>
+<script defer src="/assets/companion-embed-orb4.js?v=r4-capturd-rho-20260921"></script>
 </body>
 </html>
