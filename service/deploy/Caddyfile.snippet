@@ -5,4 +5,7 @@ capturd.rhobear.ai {
     reverse_proxy 127.0.0.1:8099 {
         flush_interval -1
     }
+    # Rho's brain (/companion/* → rhobear-companion) is proxied by the app itself, on
+    # purpose: the embed's contract is a SAME-ORIGIN endpoint. Don't add a handle_path
+    # that shadows /companion/* here.
 }

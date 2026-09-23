@@ -350,3 +350,57 @@ async def mcp_proxy(request: Request, token: str, rest: str = ""):
         return JSONResponse({"error": f"mcp upstream unreachable: {exc}"}, status_code=502)
     out = {k: v for k, v in up.headers.items() if k.lower() not in _HOP_BY_HOP}
     return _Response(content=up.content, status_code=up.status_code, headers=out)
+
+
+# ---- Rho companion, same-origin ----------------------------------------------
+# The canonical embed documents its contract as `endpoint: '/companion'` (see
+# service/web/assets/companion-embed-orb4.js) — the host app is expected to supply
+# that same-origin route. Captur'd serves the orb + chat through this pass-through
+# to the rhobear-companion brain, so index.html / m.html need no CORS and depend on
+# no other host's deploy. The brain is not reimplemented here: it owns the Vertex
+# engine, the TTS pipeline and the SSE chat stream, all of which pass through
+# untouched (same cookie/token/auth headers ride along).
+#
+# /api/chat is an SSE stream and a voice turn idles between sentences, so there is
+# deliberately no read timeout — and the body must be pumped chunk-by-chunk, never
+# buffered, or Rho waits for the whole reply instead of speaking sentence by
+# sentence. Upstream errors surface honestly as 502 rather than an empty orb.
+
+from fastapi.responses import StreamingResponse as _Streaming            # noqa: E402
+
+_COMPANION_UPSTREAM = os.environ.get("CAPTURD_COMPANION_UPSTREAM",
+                                     "http://127.0.0.1:8787").rstrip("/")
+_COMPANION_TIMEOUT = _httpx.Timeout(connect=10.0, read=None, write=60.0, pool=10.0)
+# Starlette stamps its own date/server on every response; the brain sends both too,
+# and a duplicated Date is what makes caches disagree about freshness.
+_UPSTREAM_STAMPED = {"date", "server"}
+
+
+@app.api_route("/companion", methods=["GET", "POST", "OPTIONS"])
+@app.api_route("/companion/{rest:path}", methods=["GET", "POST", "OPTIONS", "HEAD"])
+async def companion_proxy(request: Request, rest: str = ""):
+    """Same-origin pass-through to the Rho companion brain (orb art + chat + TTS)."""
+    url = f"{_COMPANION_UPSTREAM}/{rest}" if rest else f"{_COMPANION_UPSTREAM}/"
+    headers = {k: v for k, v in request.headers.items()
+               if k.lower() not in _HOP_BY_HOP and k.lower() != "host"}
+    body = await request.body()
+    try:
+        async with _httpx.AsyncClient(timeout=_COMPANION_TIMEOUT) as cx:
+            up = await cx.send(cx.build_request(
+                request.method, url, content=body, headers=headers,
+                params=dict(request.query_params)), stream=True)
+    except _httpx.RequestError as exc:
+        return JSONResponse({"error": f"companion upstream unreachable: {exc}"},
+                            status_code=502)
+    out = {k: v for k, v in up.headers.items()
+           if k.lower() not in (_HOP_BY_HOP | _UPSTREAM_STAMPED)}
+    # Streamed, not buffered: an SSE voice turn must reach the orb sentence by
+    # sentence, so the upstream iterator is pumped straight through.
+    async def _pump():
+        try:
+            async for chunk in up.aiter_raw():
+                yield chunk
+        finally:
+            await up.aclose()
+
+    return _Streaming(_pump(), status_code=up.status_code, headers=out)

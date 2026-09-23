@@ -35,7 +35,7 @@
 (function () {
   'use strict';
   if (window.__rhoEmbedLoaded) return;      // never double-mount
-  window.__rhoEmbedLoaded = '2.4';
+  window.__rhoEmbedLoaded = '2.5';
 
   // ---- config -------------------------------------------------------------
   var scriptEl = document.currentScript;
@@ -47,6 +47,28 @@
   var ENDPOINT = (CFG.endpoint != null ? CFG.endpoint : attr('endpoint', '')).replace(/\/+$/, '');
   var READY    = CFG.ready != null ? !!CFG.ready : (attr('ready', 'false') === 'true');
   var TITLE    = CFG.title   || attr('title', 'Rho');
+
+  // ---- surface: which RHOBEAR app is Rho riding? -------------------------
+  // Rho carries one identity everywhere; the surface controls the live orb
+  // theme and the chrome accent (user bubble + send), and names the header
+  // subtitle "riding the <X>".
+  var SURFACE_MAP = { hub: 'the Hub', builds: 'Builds', plans: 'Plans', designs: 'Designs', capturd: "Captur'd", reviews: 'Reviews', sales: 'Sales', lab: 'the Lab' };
+  function detectSurface() {
+    var s = (CFG.surface || attr('surface', '') || '').toLowerCase();
+    if (s && SURFACE_MAP[s]) return s;
+    var h = '';
+    try { h = (location.hostname || '').toLowerCase(); } catch (e) {}
+    if (/workbench|hub/.test(h)) return 'hub';
+    if (/plans|cloud/.test(h)) return 'plans';
+    if (/designs/.test(h)) return 'designs';
+    if (/capturd|captur/.test(h)) return 'capturd';
+    if (/reviews/.test(h)) return 'reviews';
+    if (/sales/.test(h)) return 'sales';
+    if (/lab/.test(h)) return 'lab';
+    return 'hub';
+  }
+  var SURFACE = detectSurface();
+  var SURFACE_LABEL = SURFACE_MAP[SURFACE] || 'the Hub';
   // Unicode escapes (\u2014 etc) everywhere below: hosts may serve this file
   // without a UTF-8 charset header and raw em-dashes render as mojibake.
   var GREETING = CFG.greeting || attr('greeting', "Hey \u2014 I'm " + TITLE + ". Ask me anything.");
@@ -55,11 +77,17 @@
   // Personalization survives reloads; the surface accent is only the default.
   function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
   function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
-  var SURFACE_ACCENT = CFG.accent || attr('accent', '#7c5cff');
+  // Pack law: the live orb renderer owns the surface-specific orb body; the
+  // chrome accent (user bubble + send + glow) also tints to the host surface,
+  // per rho.css's [data-rho-surface] map. Section labels + the "riding"
+  // subtitle stay the shared teal #2A8FA8. The teal default covers unknowns.
+  var SURFACE_ACCENT_MAP = { hub: '#2A8FA8', builds: '#2A8FA8', plans: '#C84BAA', designs: '#C84B4B', capturd: '#4B7AC8', reviews: '#D4A843', sales: '#8FA82A', lab: '#6B2FA8' };
+  var SURFACE_ACCENT = SURFACE_ACCENT_MAP[SURFACE] || '#2A8FA8';
   var ACCENT = lsGet('rho.accent') || SURFACE_ACCENT;
   var VOICES = ['Charon', 'Puck', 'Kore', 'Fenrir', 'Aoede', 'Leda', 'Orus', 'Zephyr'];
   var VOICE = lsGet('rho.voice') || 'Charon';
-  var SWATCHES = [SURFACE_ACCENT, '#7c5cff', '#3bd6c3', '#f2545b', '#e0a63a', '#4f8ff7', '#a06df7'];
+  // Swatch palette = the host-surface accent + the pack per-surface accents.
+  var SWATCHES = [SURFACE_ACCENT, '#2A8FA8', '#C84BAA', '#C84B4B', '#4B7AC8', '#D4A843', '#8FA82A', '#6B2FA8'];
 
   // Derive the companion hues from the accent so every gradient is harmonious
   // on ANY chosen color (config `accent2` can still override the default).
@@ -87,6 +115,7 @@
   var sessionId = null;
   try { sessionId = localStorage.getItem('rho.session') || null; } catch (e) {}
   var activeAbort = null, activeChatId = null, greeted = false;
+  var ttsAbort = null; // AbortController for in-flight TTS fetch (race fix)
   var pendingImage = null; // data URL waiting to ride the next send
 
   // ---- identity: Rho is tied to RHOBEAR credits ----------------------------
@@ -98,6 +127,10 @@
   var EP_ORIGIN = (function () {
     try { return new URL(ENDPOINT || '/', location.href).origin; } catch (e) { return location.origin; }
   })();
+  // Builds is a first-party surface. Its app shell owns the RHOBEAR session,
+  // so the companion must never create a second Google-only sign-in gate.
+  // Cross-origin hosts keep the companion token flow below for compatibility.
+  var USE_CENTRAL_HOST_AUTH = SURFACE === 'builds' && EP_ORIGIN === location.origin;
   // Premium plasma orb art (photoreal, state-driven). Served by the companion
   // server under {endpoint}/assets/orb/*.png so BOTH same-origin (workbench) and
   // cross-origin (Plans) embeds load the exact same art from one place.
@@ -114,8 +147,24 @@
   @property --rho-edge-angle { syntax: '<angle>'; initial-value: 200deg; inherits: false; }
   #rho-embed, #rho-embed * { box-sizing: border-box; }
   #rho-embed {
+    /* ── _FIREFLY pack tokens (rho.css, verbatim) ───────────────────────── */
+    --rho-widget-bg:    #0D0E1D;   /* widget ground */
+    --rho-agent-bubble: #1A1B2A;
+    --rho-user-bubble:  #4A4B6A;   /* tinted per [data-rho-surface] below */
+    --rho-accent:       #2A8FA8;   /* shared teal — labels, subtitle, waveform */
+    --rho-send:         #5B3FA8;   /* purple send — tinted per surface */
+    --rho-text:         #FFFFFF;
+    --rho-subtitle:     #AAAAAA;
+    --rho-border:       rgba(255,255,255,0.08);
+    --rho-font-display: 'rokkitt', Georgia, serif;
+    --rho-font-body:    'lato', system-ui, -apple-system, 'Segoe UI', sans-serif;
+    --rho-font-brand:   'cooper-black-std', 'rokkitt', Georgia, serif;  /* the "Rho" word */
+    --rho-font-mono:    'droid-sans-mono', ui-monospace, 'Cascadia Mono', Consolas, monospace;
+
+    /* chrome accent = the host-surface tint (drives glow / user bubble / on-states).
+       The plasma trio + orb body stay fixed — that is Rho's identity. */
     --rho-a: ${ACCENT};
-    --rho-a2: ${CFG.accent2 || hueShift(ACCENT, 42, 0.08, 0.04)};
+    --rho-a2: ${CFG.accent2 || '#7B3FD4'};  /* orb identity: violet */
     --rho-a3: ${hueShift(ACCENT, -28, 0.05, 0.10)};
 
     /* ---- RHOBEAR LIQUID GLASS — the material system -----------------------
@@ -146,17 +195,28 @@
     --orb-error: url('${ORB_BASE}/error.png');
     --orb-loading: url('${ORB_BASE}/loading.png');
     position: fixed; z-index: 2147483000;
-    font-family: 'Assistant', system-ui, -apple-system, 'Segoe UI', sans-serif;
+    font-family: var(--rho-font-body);
   }
+
+  /* ── surface tint (rho.css [data-rho-surface] map) — chrome only, never the orb ── */
+  #rho-embed[data-rho-surface="hub"],
+  #rho-embed[data-rho-surface="builds"]   { --rho-user-bubble: #1E3A4A; --rho-send: #2A8FA8; }
+  #rho-embed[data-rho-surface="plans"]   { --rho-user-bubble: #3A1A35; --rho-send: #C84BAA; }
+  #rho-embed[data-rho-surface="designs"] { --rho-user-bubble: #3A1A1A; --rho-send: #C84B4B; }
+  #rho-embed[data-rho-surface="capturd"] { --rho-user-bubble: #1A2A3A; --rho-send: #4B7AC8; }
+  #rho-embed[data-rho-surface="reviews"] { --rho-user-bubble: #3A2A10; --rho-send: #D4A843; }
+  #rho-embed[data-rho-surface="sales"]   { --rho-user-bubble: #2A3010; --rho-send: #8FA82A; }
+  #rho-embed[data-rho-surface="lab"]     { --rho-user-bubble: #241540; --rho-send: #6B2FA8; }
 
   /* ---- launcher: the living orb (no glyph \u2014 the orb IS the brand) ---- */
   #rho-launch {
     position: fixed; right: 20px; bottom: 20px; z-index: 2147483000;
-    width: var(--rho-orb-size, 36px); height: var(--rho-orb-size, 36px); border-radius: 50%; border: none; cursor: pointer;
-    padding: 0; background: transparent;
+    width: 60px; height: 60px; border-radius: 50%; border: none; cursor: pointer;
+    padding: 0; background: transparent; touch-action: none;
     transition: transform .18s cubic-bezier(.34,1.56,.64,1);
     animation: rho-float 4.6s ease-in-out infinite;
   }
+  #rho-launch.rho-dragging { animation: none !important; cursor: grabbing; transition: none !important; }
   #rho-launch:hover { transform: scale(1.08); }
   #rho-launch:active { transform: scale(.93); }
   #rho-launch.rho-hidden { display: none; }
@@ -174,26 +234,14 @@
   .rho-orbimg[data-state="speaking"] { background-image: var(--orb-speaking); box-shadow: 0 8px 26px rgba(0,0,0,.45), 0 0 46px rgba(74,158,255,.72); animation: rho-orb-speak .5s ease-in-out infinite; }
   .rho-orbimg[data-state="error"]    { background-image: var(--orb-error);    box-shadow: 0 8px 26px rgba(0,0,0,.45), 0 0 26px rgba(255,58,58,.62); animation: rho-orb-shake .5s ease-out 1; }
   .rho-orbimg[data-state="loading"]  { background-image: var(--orb-loading);  animation: rho-orb-load 1.7s ease-in-out infinite; }
-  @keyframes rho-orb-idle  { 0%,100% { transform: scale(1); }   50% { transform: scale(1.06); } }
-  /* gentle breath used under reduced-motion — scale only, no positional travel */
-  @keyframes rho-orb-breathe { 0%,100% { transform: scale(1); } 50% { transform: scale(1.03); } }
+  @keyframes rho-orb-idle  { 0%,100% { transform: scale(1); }   50% { transform: scale(1.045); } }
   @keyframes rho-orb-think { 0%,100% { transform: scale(.975); } 50% { transform: scale(1.035); } }
   @keyframes rho-orb-speak { 0%,100% { transform: scale(1); }   50% { transform: scale(1.075); } }
   @keyframes rho-orb-shake { 0%,100% { transform: translateX(0); } 20% { transform: translateX(-5px); } 40% { transform: translateX(5px); } 60% { transform: translateX(-3px); } 80% { transform: translateX(3px); } }
   @keyframes rho-orb-load  { 0%,100% { opacity: .6; } 50% { opacity: .92; } }
-  @keyframes rho-float { 0%,100% { translate: 0 0; } 50% { translate: 0 -7px; } }
+  @keyframes rho-float { 0%,100% { translate: 0 0; } 50% { translate: 0 -5px; } }
   @media (prefers-reduced-motion: reduce) {
-    /* Reduce motion — but the orb is the brand's living identity, so it never
-       goes fully dead. Drop the positional float + the shake/rapid pulses (the
-       vestibular-trigger motions); keep a slow, gentle breath (scale only, no
-       travel) so it still reads as alive on every surface. */
-    #rho-launch { animation: none !important; }
-    .rho-orbimg,
-    .rho-orbimg[data-state="idle"],
-    .rho-orbimg[data-state="thinking"],
-    .rho-orbimg[data-state="speaking"],
-    .rho-orbimg[data-state="loading"] { animation: rho-orb-breathe 5s ease-in-out infinite !important; }
-    .rho-orbimg[data-state="error"] { animation: none !important; }
+    #rho-launch, .rho-orbimg { animation: none !important; }
   }
 
   /* ---- panel: glass with a living accent aura ---- */
@@ -202,20 +250,31 @@
     width: min(400px, calc(100vw - 32px));
     height: min(640px, calc(100vh - 40px));
     display: none; flex-direction: column; overflow: hidden;
-    border-radius: 24px;
-    background: rgba(10,9,20,.9);
+    border-radius: 20px;
+    background: var(--rho-widget-bg);
     backdrop-filter: blur(24px) saturate(1.25); -webkit-backdrop-filter: blur(24px) saturate(1.25);
     border: 1px solid rgba(255,255,255,.11);
     box-shadow: 0 26px 80px rgba(0,0,0,.62), 0 0 44px color-mix(in srgb, var(--rho-a) 20%, transparent);
     color: #fff; isolation: isolate;
     transition: width .38s cubic-bezier(.4,0,.2,1), height .38s cubic-bezier(.4,0,.2,1),
+      left .38s cubic-bezier(.4,0,.2,1), top .38s cubic-bezier(.4,0,.2,1),
       right .38s cubic-bezier(.4,0,.2,1), bottom .38s cubic-bezier(.4,0,.2,1), border-radius .38s ease;
   }
+  #rho-panel.rho-dragging { transition: none !important; user-select: none; }
   /* double-click the header orb → expand to a full-viewport surface */
-  #rho-embed.rho-expanded #rho-panel { width: 100vw; height: 100vh; height: 100dvh; right: 0; bottom: 0; border-radius: 0; }
+  #rho-embed.rho-expanded #rho-panel { width: 100vw; height: 100vh; height: 100dvh; left: 0 !important; top: 0 !important; right: 0 !important; bottom: 0 !important; border-radius: 0; }
   #rho-embed.rho-expanded #rho-thread { max-width: 860px; width: 100%; margin: 0 auto; padding-left: 20px; padding-right: 20px; }
   #rho-embed.rho-expanded #rho-barwrap { max-width: 860px; width: 100%; margin: 0 auto; }
-  #rho-embed.rho-expanded .rho-head-orb { width: 40px; height: 40px; }
+  /* expanded = full-viewport hero: big centered breathing orb + ambient glow (matches the mock) */
+  #rho-embed.rho-expanded #rho-head { flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: min(9vh,88px) 20px 20px; border-bottom: none; }
+  #rho-embed.rho-expanded .rho-head-orb { width: 116px; height: 116px; }
+  #rho-embed.rho-expanded .rho-name { font-size: 30px; letter-spacing: .4px; }
+  #rho-embed.rho-expanded .rho-spacer { display: none; }
+  #rho-embed.rho-expanded #rho-call-hdr { position: absolute; top: 18px; right: 98px; }
+  #rho-embed.rho-expanded #rho-expand { position: absolute; top: 18px; right: 58px; }
+  #rho-embed.rho-expanded #rho-close { position: absolute; top: 18px; right: 18px; }
+  #rho-embed.rho-expanded .rho-headtext { align-items: center; text-align: center; }
+  #rho-embed.rho-expanded #rho-panel::before { inset: -8% -10% auto -10%; height: 62%; filter: blur(58px); opacity: 1; }
   #rho-panel::before {
     content: ""; position: absolute; inset: -30% -20% auto -20%; height: 70%; z-index: -1;
     background:
@@ -228,20 +287,25 @@
   #rho-embed.rho-open #rho-panel { display: flex; animation: rho-rise .26s cubic-bezier(.21,1.02,.55,1); }
   @keyframes rho-rise { from { opacity: 0; transform: translateY(14px) scale(.97); } to { opacity: 1; transform: none; } }
 
-  #rho-head { display: flex; align-items: center; gap: 10px; padding: 14px 14px 12px; flex-shrink: 0; border-bottom: 1px solid rgba(255,255,255,.07); position: relative; }
-  .rho-head-orb { position: relative; width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0; }
+  #rho-head { display: flex; align-items: center; gap: 12px; padding: 12px 14px; flex-shrink: 0; border-bottom: 1px solid var(--rho-border); position: relative; cursor: grab; touch-action: none; }
+  #rho-head.rho-dragging { cursor: grabbing; }
+  .rho-head-orb { position: relative; width: 40px; height: 40px; border-radius: 50%; flex-shrink: 0; }
   .rho-head-orb .rho-orbrim { animation-duration: 9s; }
   #rho-embed.rho-busy .rho-head-orb { animation: rho-pulse 1.1s ease-in-out infinite; }
   @keyframes rho-pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.12); } }
-  #rho-head .rho-name { font-weight: 700; font-size: 15px; letter-spacing: .2px; }
+  #rho-head .rho-headtext { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  #rho-head .rho-name { font-family: var(--rho-font-brand); font-weight: 400; font-size: 20px; line-height: 1.05; letter-spacing: .2px; color: var(--rho-text); }
+  #rho-head .rho-sub { font-family: var(--rho-font-body); font-size: 12.5px; line-height: 1.1; color: var(--rho-accent); }
+  #rho-head .rho-sub b { font-weight: 700; }
   #rho-head .rho-chip {
+    font-family: var(--rho-font-mono);
     font-size: 9.5px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase;
     padding: 3px 8px; border-radius: 9px;
-    background: linear-gradient(120deg, rgba(251,146,60,.2), rgba(251,146,60,.1));
-    border: 1px solid rgba(251,146,60,.28); color: rgba(251,191,120,.95);
+    background: color-mix(in srgb, var(--rho-accent) 16%, transparent);
+    border: 1px solid color-mix(in srgb, var(--rho-accent) 34%, transparent); color: color-mix(in srgb, var(--rho-accent) 70%, #fff);
     animation: rho-chipglow 2.6s ease-in-out infinite;
   }
-  @keyframes rho-chipglow { 0%,100% { box-shadow: 0 0 0 transparent; } 50% { box-shadow: 0 0 12px rgba(251,146,60,.28); } }
+  @keyframes rho-chipglow { 0%,100% { box-shadow: 0 0 0 transparent; } 50% { box-shadow: 0 0 12px color-mix(in srgb, var(--rho-accent) 34%, transparent); } }
   #rho-head .rho-spacer { flex: 1; }
   .rho-hbtn {
     width: 30px; height: 30px; border: 1px solid rgba(255,255,255,.11); border-radius: 10px; cursor: pointer;
@@ -265,7 +329,7 @@
     animation: rho-rise .2s cubic-bezier(.21,1.02,.55,1);
   }
   #rho-settings.rho-on { display: block; }
-  .rho-set-label { font-size: 10px; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase; color: rgba(255,255,255,.45); margin: 0 0 8px; }
+  .rho-set-label { font-family: var(--rho-font-mono); font-size: 10px; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase; color: var(--rho-accent); margin: 0 0 8px; }
   .rho-set-label + .rho-set-label { margin-top: 14px; }
   .rho-swatches { display: flex; gap: 8px; flex-wrap: wrap; }
   .rho-swatch {
@@ -368,7 +432,7 @@
     position: relative; display: inline-flex; align-items: center; gap: 8px;
     padding: 6px 12px; border-radius: 12px;
     font-size: 12px; font-weight: 600; letter-spacing: .2px;
-    font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+    font-family: var(--rho-font-mono);
     background: var(--glass-body), rgba(9,10,12,.4);
     backdrop-filter: blur(16px) saturate(1.3); -webkit-backdrop-filter: blur(16px) saturate(1.3);
     border: 1px solid rgba(255,255,255,.1);
@@ -480,36 +544,20 @@
   .rho-bbtn.rho-on { background: linear-gradient(135deg, var(--rho-a3), var(--rho-a)); color: #fff; border-color: transparent; box-shadow: 0 0 16px color-mix(in srgb, var(--rho-a) 45%, transparent); }
   #rho-think.rho-on { background: linear-gradient(135deg, #2b2350, var(--rho-a)); }
   #rho-call { color: rgba(255,255,255,.85); }
-  /* send — a raised glass disc ringed in plasma (per the ref), not a solid blob.
-     The accent lives in the ring + the bloom; the arrow stays clean white. */
+  /* send — the pack's purple key (rho.css --rho-send), rounded-square, clean
+     white arrow. The one solid-colour control; everything else is glass. */
   #rho-send {
     position: relative;
-    width: 38px; height: 38px; border-radius: 50%; border: none; margin-left: 4px; color: #fff; cursor: pointer; flex-shrink: 0;
+    width: 40px; height: 40px; border-radius: 12px; border: none; margin-left: 4px; color: #fff; cursor: pointer; flex-shrink: 0;
     display: flex; align-items: center; justify-content: center;
-    background:
-      linear-gradient(160deg, rgba(255,255,255,.16), rgba(255,255,255,.05) 60%, color-mix(in srgb, var(--rho-a) 20%, transparent)),
-      rgba(9,10,12,.5);
-    backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
-    box-shadow: inset 0 1px 0 rgba(255,255,255,.34), 0 4px 16px rgba(0,0,0,.36);
-    transition: transform .12s, box-shadow .2s, opacity .2s;
+    background: var(--rho-send);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.28), 0 4px 16px color-mix(in srgb, var(--rho-send) 40%, transparent);
+    transition: transform .12s, box-shadow .2s, opacity .2s, filter .2s;
   }
-  #rho-send::after {
-    content: ""; position: absolute; inset: 0; border-radius: 50%; pointer-events: none;
-    padding: var(--glass-edge-w);
-    background: conic-gradient(from var(--rho-edge-angle) at 50% 50%,
-      var(--glass-c1), var(--glass-c2) 28%, var(--glass-c3) 52%, var(--glass-c2) 76%, var(--glass-c1));
-    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-    -webkit-mask-composite: xor;
-            mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-            mask-composite: exclude;
-    opacity: .85; transition: opacity .2s var(--glass-ease);
-  }
-  #rho-send:hover:not(:disabled) { transform: translateY(-1px); box-shadow: inset 0 1px 0 rgba(255,255,255,.34), 0 6px 22px rgba(0,0,0,.4), 0 0 20px color-mix(in srgb, var(--rho-a) 45%, transparent); }
-  #rho-send:hover:not(:disabled)::after { opacity: 1; }
-  #rho-send:disabled::after { opacity: .3; }
+  #rho-send:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.08); box-shadow: inset 0 1px 0 rgba(255,255,255,.28), 0 6px 22px color-mix(in srgb, var(--rho-send) 55%, transparent); }
   #rho-send:active { transform: scale(.92); }
-  #rho-send:disabled { opacity: .35; cursor: not-allowed; }
-  #rho-send svg { width: 16px; height: 16px; }
+  #rho-send:disabled { opacity: .4; cursor: not-allowed; }
+  #rho-send svg { width: 17px; height: 17px; }
   .rho-hint { font-size: 10px; color: rgba(255,255,255,.30); text-align: center; margin: 6px 0 0; }
 
   /* ---- plus menu ---- */
@@ -554,9 +602,11 @@
   #rho-embed.rho-v-thinking #rho-call-orb .rho-orbrim { animation-duration: 1.6s; }
   #rho-embed.rho-v-speaking #rho-call-orb { animation: rho-speakpulse .62s ease-in-out infinite; }
   @keyframes rho-speakpulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.055); } }
+  #rho-call-name { font-family: var(--rho-font-brand); font-weight: 400; font-size: clamp(30px, 6vmin, 46px); color: var(--rho-text); line-height: 1; margin-top: -6px; }
   #rho-call-state {
-    font-size: 12px; font-weight: 700; letter-spacing: 2.4px; text-transform: uppercase;
-    color: rgba(255,255,255,.55); min-height: 15px;
+    font-family: var(--rho-font-body);
+    font-size: clamp(15px, 2.2vmin, 19px); font-weight: 400; letter-spacing: .3px;
+    color: var(--rho-accent); min-height: 15px;
   }
   #rho-call-line {
     max-width: min(640px, 86vw); min-height: 52px; text-align: center;
@@ -569,6 +619,43 @@
     width: 42px; height: 42px; border-radius: 50%;
   }
   #rho-call-hint { position: absolute; bottom: max(20px, env(safe-area-inset-bottom)); font-size: 11.5px; color: rgba(255,255,255,.35); letter-spacing: .4px; }
+
+  /* ── live voice waveform (teal, pack signature) — real mic RMS drives it ── */
+  .rho-wave { display: none; height: 26px; align-items: center; gap: 2px; }
+  .rho-wave.rho-on { display: inline-flex; }
+  .rho-wave i {
+    width: 3px; height: 4px; border-radius: 2px; flex-shrink: 0;
+    background: var(--rho-accent);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--rho-accent) 60%, transparent);
+    transition: height .09s ease;
+  }
+  /* the composer's inline waveform sits between the mic and the send */
+  #rho-bar-wave { flex: 1; justify-content: center; min-width: 0; overflow: hidden; }
+  /* the voice surface's full-width strip above the bottom controls */
+  #rho-call-wave { height: 40px; gap: 3px; }
+  #rho-call-wave i { width: 4px; }
+
+  /* Voice follow-up stays visible without turning ordinary chat into a call.
+     Stop always means "back to normal dictation" - no hidden sticky mode. */
+  #rho-voice-dock {
+    display: none; position: fixed; top: max(14px, env(safe-area-inset-top)); right: 16px;
+    z-index: 2147483003; align-items: center; gap: 8px; padding: 8px 10px 8px 13px;
+    border: 1px solid color-mix(in srgb, var(--rho-a) 55%, rgba(255,255,255,.16)); border-radius: 15px;
+    background: rgba(13,12,24,.92); box-shadow: 0 12px 34px rgba(0,0,0,.38);
+    color: #fff; backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
+    font: 700 12px/1 var(--rho-font-body);
+  }
+  #rho-embed.rho-follow-on #rho-voice-dock { display: flex; }
+  #rho-voice-status { max-width: 160px; color: rgba(255,255,255,.86); }
+  .rho-voice-dock-btn {
+    width: 36px; height: 36px; padding: 0; border: 0; border-radius: 11px; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center; color: #fff;
+    background: linear-gradient(135deg, var(--rho-a3), var(--rho-a));
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.22), 0 3px 12px color-mix(in srgb, var(--rho-a) 35%, transparent);
+  }
+  .rho-voice-dock-btn:hover { filter: brightness(1.12); }
+  .rho-voice-dock-btn svg { width: 18px; height: 18px; }
+  #rho-voice-stop { background: rgba(255,255,255,.12); box-shadow: none; }
 
   /* Phones: the panel is a full-screen surface, not a floating window */
   @media (max-width: 520px) {
@@ -609,12 +696,15 @@
     think: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6.5 6.5 0 0 1 6.5 6.5c0 1.9-.86 3.4-2 4.5-.83.8-1.5 1.6-1.5 2.5V18h-6v-1.5c0-.9-.67-1.7-1.5-2.5-1.14-1.1-2-2.6-2-4.5A6.5 6.5 0 0 1 12 3z"/><path d="M9.5 21h5"/></svg>',
     mic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>',
     call: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12h2M7 8v8M11 5v14M15 8v8M19 10v4"/></svg>',
-    send: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V5"/><path d="M5.5 11.5L12 5l6.5 6.5"/></svg>',
+    send: '<svg viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><path d="M3.4 20.4l17.45-8.05a.5.5 0 0 0 0-.9L3.4 3.4a.5.5 0 0 0-.7.62l2.6 6.9a.5.5 0 0 0 .38.32l8.42 1.26-8.42 1.26a.5.5 0 0 0-.38.32l-2.6 6.9a.5.5 0 0 0 .7.62z"/></svg>',
+    expand: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/></svg>',
     image: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5-9 9"/></svg>',
     fresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>',
     copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>',
     speaker: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4V5z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a9 9 0 0 1 0 14"/></svg>',
     stopspk: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
+    pause: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 5h3v14H7zm7 0h3v14h-3z"/></svg>',
+    play: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="m8 5 11 7-11 7z"/></svg>',
     check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>'
   };
   var ORB = '<span class="rho-orbimg" data-state="idle"></span>';
@@ -626,10 +716,14 @@
     '<section id="rho-panel" role="dialog" aria-label="' + TITLE + ' chat">' +
       '<header id="rho-head">' +
         '<span class="rho-head-orb">' + ORB + '</span>' +
-        '<span class="rho-name">' + TITLE + '</span>' +
+        '<span class="rho-headtext">' +
+          '<span class="rho-name">' + TITLE + '</span>' +
+          '<span class="rho-sub">riding <b>' + SURFACE_LABEL + '</b></span>' +
+        '</span>' +
         (READY ? '' : '<span class="rho-chip" id="rho-chip">warming up</span>') +
         '<span class="rho-spacer"></span>' +
-        '<button class="rho-hbtn" id="rho-gear" aria-label="Personalize" title="Colors & voice">' + ICON.gear + '</button>' +
+        '<button class="rho-hbtn" id="rho-call-hdr" aria-label="Talk to ' + TITLE + '" title="Talk to ' + TITLE + '">' + ICON.mic + '</button>' +
+        '<button class="rho-hbtn" id="rho-expand" aria-label="Expand" title="Expand">' + ICON.expand + '</button>' +
         '<button class="rho-hbtn" id="rho-close" aria-label="Close">' + ICON.close + '</button>' +
         '<div id="rho-settings" role="menu" aria-label="Personalize ' + TITLE + '">' +
           '<p class="rho-set-label">Accent</p>' +
@@ -644,31 +738,50 @@
           '<button class="rho-pmitem" id="rho-pm-image">' + ICON.image + 'Attach an image</button>' +
           '<button class="rho-pmitem" id="rho-pm-new">' + ICON.fresh + 'Start fresh</button>' +
           '<button class="rho-pmitem" id="rho-pm-copy">' + ICON.copy + 'Copy conversation</button>' +
+          '<button class="rho-pmitem" id="rho-pm-personalize">' + ICON.gear + 'Personalize</button>' +
         '</div>' +
         '<div id="rho-bar">' +
-          '<textarea id="rho-input" rows="1" placeholder="Ask anything…" aria-label="Message ' + TITLE + '"></textarea>' +
+          '<textarea id="rho-input" rows="1" placeholder="Type your message…" aria-label="Message ' + TITLE + '"></textarea>' +
           '<div class="rho-barrow">' +
             '<button class="rho-bbtn" id="rho-plus" title="More" aria-label="More options">' + ICON.plus + '</button>' +
             '<button class="rho-bbtn" id="rho-think" title="Deep thinking" aria-label="Toggle deep thinking" aria-pressed="false">' + ICON.think + '</button>' +
             '<button class="rho-bbtn" id="rho-dictate" title="Dictate into the message" aria-label="Dictate">' + ICON.mic + '</button>' +
+            '<span class="rho-wave" id="rho-bar-wave" aria-hidden="true"></span>' +
             '<span class="grow"></span>' +
             '<button class="rho-bbtn" id="rho-call" title="Talk to ' + TITLE + '" aria-label="Talk to ' + TITLE + '">' + ICON.call + '</button>' +
             '<button id="rho-send" aria-label="Send" disabled>' + ICON.send + '</button>' +
           '</div>' +
         '</div>' +
-        '<p class="rho-hint">' + (READY ? 'Enter to send · Shift+Enter for a new line · the waveform opens a live voice call' : TITLE + ' is being wired in \u2014 answers land here soon') + '</p>' +
+        '<p class="rho-hint">' + (READY ? 'Mic dictates. Listen beneath a reply turns on voice follow-up. The waveform opens a live call.' : TITLE + ' is being wired in \u2014 answers land here soon') + '</p>' +
       '</div>' +
     '</section>' +
+    '<div id="rho-voice-dock" role="group" aria-label="Voice replies are on">' +
+      '<span id="rho-voice-status">Voice replies on</span>' +
+      '<button class="rho-voice-dock-btn" id="rho-voice-pause" type="button" aria-label="Pause voice playback" title="Pause voice playback">' + ICON.pause + '</button>' +
+      '<button class="rho-voice-dock-btn" id="rho-voice-stop" type="button" aria-label="Stop voice replies and return to dictation" title="Stop voice replies">' + ICON.stopspk + '</button>' +
+    '</div>' +
     '<div id="rho-call-surface" role="dialog" aria-label="Voice call with ' + TITLE + '">' +
       '<button class="rho-hbtn" id="rho-call-exit" aria-label="End the call">' + ICON.close + '</button>' +
       '<button id="rho-call-orb" aria-label="Tap to interrupt">' + ORB + '</button>' +
+      '<div id="rho-call-name">' + TITLE + '</div>' +
       '<div id="rho-call-state">connecting</div>' +
       '<div id="rho-call-line"></div>' +
       '<div id="rho-call-crew"></div>' +
+      '<span class="rho-wave" id="rho-call-wave" aria-hidden="true"></span>' +
       '<div id="rho-call-hint">Just talk \u2014 ' + TITLE + ' is listening. Tap the orb to cut in.</div>' +
     '</div>';
 
   function mount() {
+    // Typekit sbv5bcv — the ONE RHOBEAR font contract (rokkitt / lato /
+    // droid-sans-mono + cooper-black-std for the "Rho" word). NEVER Nacelle,
+    // never a Google-Fonts link. Idempotent across double-mounts.
+    if (!document.getElementById('rho-typekit')) {
+      var tk = document.createElement('link');
+      tk.id = 'rho-typekit'; tk.rel = 'stylesheet';
+      tk.href = 'https://use.typekit.net/sbv5bcv.css';
+      document.head.appendChild(tk);
+    }
+    root.setAttribute('data-rho-surface', SURFACE);
     document.head.appendChild(styleEl);
     document.body.appendChild(root);
     wire();
@@ -685,19 +798,160 @@
     var plusBtn = root.querySelector('#rho-plus');
     var plusMenu= root.querySelector('#rho-plusmenu');
     var thinkBtn= root.querySelector('#rho-think');
-    var gearBtn = root.querySelector('#rho-gear');
+    var personalizeBtn = root.querySelector('#rho-pm-personalize');
     var settings= root.querySelector('#rho-settings');
     var callBtn = root.querySelector('#rho-call');
+    var callHdrBtn = root.querySelector('#rho-call-hdr');
+    var expandBtn = root.querySelector('#rho-expand');
+    var barWave = root.querySelector('#rho-bar-wave');
+    var callWave = root.querySelector('#rho-call-wave');
+    var voiceDock = root.querySelector('#rho-voice-dock');
+    var voiceStatus = root.querySelector('#rho-voice-status');
+    var voicePause = root.querySelector('#rho-voice-pause');
+    var voiceStop = root.querySelector('#rho-voice-stop');
     var callExit= root.querySelector('#rho-call-exit');
     var callOrb = root.querySelector('#rho-call-orb');
     var callState = root.querySelector('#rho-call-state');
     var callLine  = root.querySelector('#rho-call-line');
     var callCrew  = root.querySelector('#rho-call-crew');
     var thinking = false;
+    var panel = root.querySelector('#rho-panel');
+    var head = root.querySelector('#rho-head');
+    var positionKey = 'rho.panel.position.v1.' + SURFACE;
+    var drag = null;
+    var launchPositionKey = 'rho.launch.position.v1.' + SURFACE;
+    var launchDrag = null;
+    var suppressLaunchClick = false;
+
+    function viewportPosition(pos) {
+      var rect = panel.getBoundingClientRect();
+      var width = rect.width || Math.min(400, Math.max(0, window.innerWidth - 32));
+      var height = rect.height || Math.min(640, Math.max(0, window.innerHeight - 40));
+      var maxLeft = Math.max(8, window.innerWidth - width - 8);
+      var maxTop = Math.max(8, window.innerHeight - height - 8);
+      return {
+        left: Math.max(8, Math.min(maxLeft, Number(pos.left) || 0)),
+        top: Math.max(8, Math.min(maxTop, Number(pos.top) || 0))
+      };
+    }
+    function setPanelPosition(pos, persist) {
+      var safe = viewportPosition(pos);
+      panel.style.left = safe.left + 'px';
+      panel.style.top = safe.top + 'px';
+      panel.style.right = 'auto';
+      panel.style.bottom = 'auto';
+      if (persist) lsSet(positionKey, JSON.stringify(safe));
+    }
+    function restorePanelPosition() {
+      var raw = lsGet(positionKey);
+      if (!raw) return;
+      try {
+        var pos = JSON.parse(raw);
+        if (pos && Number.isFinite(Number(pos.left)) && Number.isFinite(Number(pos.top))) setPanelPosition(pos, false);
+      } catch (e) {}
+    }
+    function clampPanelPosition() {
+      if (!panel.style.left || root.classList.contains('rho-expanded')) return;
+      setPanelPosition({ left: parseFloat(panel.style.left), top: parseFloat(panel.style.top) }, true);
+    }
+    function dragExcluded(target) {
+      for (var node = target; node && node !== head; node = node.parentNode) {
+        var tag = (node.tagName || '').toLowerCase();
+        if (tag === 'button' || tag === 'input' || tag === 'textarea' || tag === 'select' || tag === 'a') return true;
+        if (node.classList && node.classList.contains('rho-head-orb')) return true;
+      }
+      return false;
+    }
+    function onDragStart(e) {
+      if (root.classList.contains('rho-expanded') || drag || dragExcluded(e.target)) return;
+      var rect = panel.getBoundingClientRect();
+      drag = { id: e.pointerId, dx: e.clientX - rect.left, dy: e.clientY - rect.top };
+      panel.classList.add('rho-dragging');
+      head.classList.add('rho-dragging');
+      if (head.setPointerCapture) head.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    }
+    function onDragMove(e) {
+      if (!drag || e.pointerId !== drag.id) return;
+      setPanelPosition({ left: e.clientX - drag.dx, top: e.clientY - drag.dy }, false);
+      e.preventDefault();
+    }
+    function onDragEnd(e) {
+      if (!drag || (e.pointerId != null && e.pointerId !== drag.id)) return;
+      var left = parseFloat(panel.style.left), top = parseFloat(panel.style.top);
+      if (Number.isFinite(left) && Number.isFinite(top)) setPanelPosition({ left: left, top: top }, true);
+      if (head.releasePointerCapture && e.pointerId != null) {
+        try { head.releasePointerCapture(e.pointerId); } catch (err) {}
+      }
+      drag = null;
+      panel.classList.remove('rho-dragging');
+      head.classList.remove('rho-dragging');
+    }
+
+    function viewportLaunchPosition(pos) {
+      var rect = launch.getBoundingClientRect();
+      var width = rect.width || 76;
+      var height = rect.height || 76;
+      var maxLeft = Math.max(8, window.innerWidth - width - 8);
+      var maxTop = Math.max(8, window.innerHeight - height - 8);
+      return {
+        left: Math.max(8, Math.min(maxLeft, Number(pos.left) || 0)),
+        top: Math.max(8, Math.min(maxTop, Number(pos.top) || 0))
+      };
+    }
+    function setLaunchPosition(pos, persist) {
+      var safe = viewportLaunchPosition(pos);
+      launch.style.left = safe.left + 'px';
+      launch.style.top = safe.top + 'px';
+      launch.style.right = 'auto';
+      launch.style.bottom = 'auto';
+      if (persist) lsSet(launchPositionKey, JSON.stringify(safe));
+    }
+    function restoreLaunchPosition() {
+      var raw = lsGet(launchPositionKey);
+      if (!raw) return;
+      try {
+        var pos = JSON.parse(raw);
+        if (pos && Number.isFinite(Number(pos.left)) && Number.isFinite(Number(pos.top))) setLaunchPosition(pos, false);
+      } catch (e) {}
+    }
+    function clampLaunchPosition() {
+      if (!launch.style.left || root.classList.contains('rho-open')) return;
+      setLaunchPosition({ left: parseFloat(launch.style.left), top: parseFloat(launch.style.top) }, true);
+    }
+    function onLaunchPointerDown(e) {
+      if (launchDrag) return;
+      var rect = launch.getBoundingClientRect();
+      launchDrag = { id: e.pointerId, startX: e.clientX, startY: e.clientY, dx: e.clientX - rect.left, dy: e.clientY - rect.top, moved: false };
+      launch.classList.add('rho-dragging');
+      if (launch.setPointerCapture) launch.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    }
+    function onLaunchPointerMove(e) {
+      if (!launchDrag || e.pointerId !== launchDrag.id) return;
+      if (!launchDrag.moved && Math.hypot(e.clientX - launchDrag.startX, e.clientY - launchDrag.startY) > 5) launchDrag.moved = true;
+      if (launchDrag.moved) {
+        setLaunchPosition({ left: e.clientX - launchDrag.dx, top: e.clientY - launchDrag.dy }, false);
+        e.preventDefault();
+      }
+    }
+    function onLaunchPointerEnd(e) {
+      if (!launchDrag || (e.pointerId != null && e.pointerId !== launchDrag.id)) return;
+      if (launchDrag.moved) {
+        setLaunchPosition({ left: parseFloat(launch.style.left), top: parseFloat(launch.style.top) }, true);
+        suppressLaunchClick = true;
+      }
+      if (launch.releasePointerCapture && e.pointerId != null) {
+        try { launch.releasePointerCapture(e.pointerId); } catch (err) {}
+      }
+      launchDrag = null;
+      launch.classList.remove('rho-dragging');
+    }
 
     function open() {
       root.classList.add('rho-open');
       launch.classList.add('rho-hidden');
+      restorePanelPosition();
       if (!greeted) { greeted = true; attachActions(append('assistant', GREETING)); }
       checkAuth();
       setTimeout(function () { input.focus(); }, 260);
@@ -708,10 +962,31 @@
       settings.classList.remove('rho-on');
       plusMenu.classList.remove('rho-on');
       stopMsgSpeak();
+      exitVoiceFollow();
     }
 
-    launch.addEventListener('click', open);
+    restoreLaunchPosition();
+    launch.addEventListener('pointerdown', onLaunchPointerDown);
+    launch.addEventListener('pointermove', onLaunchPointerMove);
+    launch.addEventListener('pointerup', onLaunchPointerEnd);
+    launch.addEventListener('pointercancel', onLaunchPointerEnd);
+    launch.addEventListener('click', function () {
+      if (suppressLaunchClick) { suppressLaunchClick = false; return; }
+      open();
+    });
     closeBtn.addEventListener('click', close);
+
+    // Rho is a movable companion, not a fixed obstruction. Drag the header
+    // chrome anywhere in the viewport; buttons and the expand orb retain
+    // their click/double-click contracts. The position is remembered per
+    // surface so a useful placement in Builds does not hijack Plans.
+    head.setAttribute('title', 'Drag to move Rho');
+    head.addEventListener('pointerdown', onDragStart);
+    head.addEventListener('pointermove', onDragMove);
+    head.addEventListener('pointerup', onDragEnd);
+    head.addEventListener('pointercancel', onDragEnd);
+    window.addEventListener('resize', clampPanelPosition);
+    window.addEventListener('resize', clampLaunchPosition);
 
     // double-click the header orb → expand the panel to a full-viewport surface
     var headOrb = root.querySelector('.rho-head-orb');
@@ -723,20 +998,56 @@
 
     // ---- sign-in: Rho spends credits, so Rho knows who you are --------------
     var signinCard = null;
+    function centralAuthResult() {
+      if (window.__user && window.__user.email) {
+        return Promise.resolve({ ok: true, status: 200, data: { user: window.__user } });
+      }
+      if (USE_CENTRAL_HOST_AUTH && window.HubAPI && typeof window.HubAPI.me === 'function') {
+        return window.HubAPI.me();
+      }
+      return fetch('/api/me', { credentials: 'include' }).then(function (r) {
+        return r.json().catch(function () { return null; }).then(function (j) {
+          return { ok: r.ok, status: r.status, data: j };
+        });
+      });
+    }
+    function authResultHasUser(result) {
+      var data = result && result.data ? result.data : result;
+      var user = data && (data.user || data);
+      return !!(result && result.ok && user && user.email);
+    }
     function checkAuth() {
       if (!READY || !ENDPOINT) return;
-      fetch(ENDPOINT + '/api/me', { credentials: 'include', headers: TOKEN ? { 'Authorization': 'Bearer ' + TOKEN } : {} })
-        .then(function (r) { return r.json(); })
-        .then(function (j) {
+      var probe = USE_CENTRAL_HOST_AUTH
+        ? centralAuthResult()
+        : fetch(ENDPOINT + '/api/me', { credentials: 'include', headers: TOKEN ? { 'Authorization': 'Bearer ' + TOKEN } : {} })
+          .then(function (r) { return r.json().catch(function () { return null; }).then(function (j) { return { ok: r.ok, status: r.status, data: j }; }); });
+      probe.then(function (result) {
+          if (USE_CENTRAL_HOST_AUTH) {
+            var signedIn = authResultHasUser(result);
+            auth.checked = true;
+            auth.required = !signedIn;
+            auth.signedIn = signedIn;
+            auth.signin = '/login?next=' + encodeURIComponent(location.pathname + location.hash);
+            // The Builds shell is the only auth surface. Never render a second
+            // sign-in card on top of its magic-link/central-auth gate.
+            hideSigninCard();
+            return;
+          }
+          var j = result && result.data ? result.data : result;
           auth.checked = true;
           auth.required = !!(j && j.authRequired);
           auth.signedIn = !!(j && j.signedIn);
           auth.signin = (j && j.signin) || 'https://workbench.rhobear.ai/signin';
           if (auth.required && !auth.signedIn) showSigninCard();
           else hideSigninCard();
-        }).catch(function () {});
+        }).catch(function () {
+          // A failed central probe must not resurrect the old Google card.
+          if (USE_CENTRAL_HOST_AUTH) hideSigninCard();
+        });
     }
     function showSigninCard() {
+      if (USE_CENTRAL_HOST_AUTH) { hideSigninCard(); return; }
       if (signinCard && signinCard.isConnected) { thread.scrollTop = thread.scrollHeight; return; }
       signinCard = document.createElement('div');
       signinCard.className = 'rho-signin';
@@ -810,7 +1121,7 @@
       if (!READY || !ENDPOINT) return;
       fetch(ENDPOINT + '/api/tts', {
         method: 'POST', headers: authHeaders(), credentials: 'include',
-        body: JSON.stringify({ text: 'Hey, this is ' + TITLE + ' \u2014 sounding like ' + v + '.', voice: v })
+        body: JSON.stringify({ text: 'Hey, this is ' + TITLE + ' \u2014 sounding like ' + v + '.', voice: v, style: 'rho' })
       }).then(function (r) { return r.ok ? r.blob() : null; }).then(function (b) {
         if (!b) return;
         var a = new Audio(URL.createObjectURL(b));
@@ -819,11 +1130,16 @@
     }
     renderSwatches();
     renderVoices();
-    gearBtn.addEventListener('click', function (e) {
+    // Personalize (accent + voice) — moved off the header into the + menu so the
+    // header reads mic / expand / close like the mock. Feature kept, not dropped.
+    personalizeBtn.addEventListener('click', function (e) {
       e.stopPropagation();
       plusMenu.classList.remove('rho-on');
       settings.classList.toggle('rho-on');
     });
+    // header controls: mic → live voice call · expand → full-viewport surface
+    callHdrBtn.addEventListener('click', function () { callOpen(); });
+    expandBtn.addEventListener('click', function () { root.classList.toggle('rho-expanded'); });
 
     // ---- plus menu ---------------------------------------------------------
     plusBtn.addEventListener('click', function (e) {
@@ -832,7 +1148,7 @@
       plusMenu.classList.toggle('rho-on');
     });
     document.addEventListener('click', function (e) {
-      if (!settings.contains(e.target) && e.target !== gearBtn) settings.classList.remove('rho-on');
+      if (!settings.contains(e.target) && e.target !== personalizeBtn && !personalizeBtn.contains(e.target)) settings.classList.remove('rho-on');
       if (!plusMenu.contains(e.target) && e.target !== plusBtn) plusMenu.classList.remove('rho-on');
     });
     root.querySelector('#rho-pm-new').addEventListener('click', function () {
@@ -918,33 +1234,159 @@
       if (_orbTimer) { clearTimeout(_orbTimer); _orbTimer = null; }
       var t = orbEls();
       for (var i = 0; i < t.length; i++) t[i].setAttribute('data-state', state);
+      // Drive the ONE orb engine (rho-orb-live.js) so the living canvas actually
+      // animates through states — the PNG data-state is only the fallback skin.
+      // rho-orb-live knows idle/thinking/speaking; map error/loading onto them.
+      if (window.RhoSetState) {
+        try { window.RhoSetState(state === 'error' || state === 'loading' ? 'thinking' : state); }
+        catch (e) { if (window.console && console.warn) console.warn('[rho] RhoSetState failed', e); }
+      }
       if (holdMs) _orbTimer = setTimeout(function () { setOrb('idle'); }, holdMs);
     }
 
-    // ---- global speech-out: Copy + Listen on every agent message -----------
-    // (plan's "speech everywhere, both ways" standing rule). Listen streams the
-    // block through our TTS (POST /api/tts) — never a browser/Google voice.
-    var msgAudio = null, msgSpkBtn = null;
-    function stopMsgSpeak() {
-      if (msgAudio) { try { msgAudio.pause(); } catch (e) {} msgAudio = null; }
-      if (msgSpkBtn) { msgSpkBtn.classList.remove('rho-on'); msgSpkBtn.firstChild.innerHTML = ICON.speaker; msgSpkBtn = null; }
+    // ── live waveform — teal bars (pack signature). A self-driving rAF makes
+    //    them travel while active; real mic RMS (WhisperSTT onLevel) sets the
+    //    amplitude when listening, a steady pulse stands in while Rho speaks. ──
+    var WAVE_BARS = 32, waveTargets = [], waveRAF = 0, waveAmp = 0.14, waveSeed = 0;
+    function waveInit(el) {
+      if (el.__bars) return;
+      el.__bars = [];
+      for (var i = 0; i < WAVE_BARS; i++) { var b = document.createElement('i'); el.appendChild(b); el.__bars.push(b); }
     }
-    function speakMsg(text, btn) {
-      if (msgSpkBtn === btn) { stopMsgSpeak(); return; }   // tap again = stop
-      stopMsgSpeak();
-      if (!READY || !ENDPOINT || !text) return;
-      msgSpkBtn = btn;
-      btn.classList.add('rho-on'); btn.firstChild.innerHTML = ICON.stopspk;
+    function waveLoop() {
+      waveSeed += 1;
+      // iterate a snapshot — a state transition can waveStop() (splice) between
+      // frames; a copy keeps this frame's pass stable regardless.
+      var targets = waveTargets.slice();
+      for (var t2 = 0; t2 < targets.length; t2++) {
+        var el = targets[t2]; if (!el.__bars) continue;
+        var maxH = el.id === 'rho-call-wave' ? 34 : 20;
+        for (var i = 0; i < el.__bars.length; i++) {
+          var w = 0.5 + 0.5 * Math.sin(waveSeed * 0.18 + i * 0.55);
+          el.__bars[i].style.height = (3 + waveAmp * maxH * w).toFixed(1) + 'px';
+        }
+      }
+      waveRAF = waveTargets.length ? requestAnimationFrame(waveLoop) : 0;
+    }
+    function waveStart(el) { if (!el) return; waveInit(el); el.classList.add('rho-on'); if (waveTargets.indexOf(el) < 0) waveTargets.push(el); if (!waveRAF) waveRAF = requestAnimationFrame(waveLoop); }
+    function waveStop(el) { if (!el) return; el.classList.remove('rho-on'); var k = waveTargets.indexOf(el); if (k >= 0) waveTargets.splice(k, 1); if (el.__bars) for (var i = 0; i < el.__bars.length; i++) el.__bars[i].style.height = '4px'; }
+    function waveSetAmp(a) { waveAmp = Math.min(1, Math.max(0.06, a)); }
+
+    // ---- voice follow-up: Listen turns on a deliberate, reversible mode ---
+    // The visible response stays clean. The server receives the `rho` delivery
+    // style separately, so speech has Rho's cadence without stage directions
+    // leaking into the chat or getting read aloud as literal tags.
+    var voiceFollow = {
+      on: false, listening: false, queue: [], playing: false, audio: null,
+      pendingSentence: '', sourceBtn: null, turnActive: false
+    };
+    function setVoiceFollowStatus(text, paused) {
+      if (!voiceFollow.on) return;
+      voiceStatus.textContent = text || (voiceFollow.listening ? 'Listening for your next turn' : 'Voice replies on');
+      voicePause.innerHTML = paused ? ICON.play : ICON.pause;
+      voicePause.setAttribute('aria-label', paused ? 'Play voice playback' : 'Pause voice playback');
+      voicePause.title = paused ? 'Play voice playback' : 'Pause voice playback';
+    }
+    function clearVoiceFollowButton() {
+      if (!voiceFollow.sourceBtn) return;
+      voiceFollow.sourceBtn.classList.remove('rho-on');
+      if (voiceFollow.sourceBtn.firstChild) voiceFollow.sourceBtn.firstChild.innerHTML = ICON.speaker;
+      voiceFollow.sourceBtn = null;
+    }
+    function voiceFollowStopAudio() {
+      voiceFollow.queue = [];
+      voiceFollow.pendingSentence = '';
+      if (ttsAbort) { try { ttsAbort.abort(); } catch (e) {} ttsAbort = null; }
+      if (voiceFollow.audio) { try { voiceFollow.audio.pause(); } catch (e) {} voiceFollow.audio = null; }
+      voiceFollow.playing = false;
+      clearVoiceFollowButton();
+      if (voiceFollow.on) setVoiceFollowStatus(voiceFollow.listening ? 'Listening for your next turn' : 'Voice replies on', false);
+    }
+    function voiceFollowPump() {
+      if (!voiceFollow.on || voiceFollow.playing || !voiceFollow.queue.length) return;
+      voiceFollow.playing = true;
+      var sentence = voiceFollow.queue.shift();
+      setVoiceFollowStatus('Rho is speaking', false);
+      var controller = new AbortController();
+      ttsAbort = controller;
       fetch(ENDPOINT + '/api/tts', {
         method: 'POST', headers: authHeaders(), credentials: 'include',
-        body: JSON.stringify({ text: text, voice: VOICE })
-      }).then(function (r) { return r.ok ? r.blob() : null; }).then(function (b) {
-        if (msgSpkBtn !== btn) return;                     // superseded
-        if (!b) { stopMsgSpeak(); return; }
-        var a = new Audio(URL.createObjectURL(b)); msgAudio = a;
-        a.onended = a.onerror = function () { if (msgSpkBtn === btn) stopMsgSpeak(); };
-        a.play().catch(function () { a.onended(); });
-      }).catch(function () { if (msgSpkBtn === btn) stopMsgSpeak(); });
+        body: JSON.stringify({ text: sentence, voice: VOICE, style: 'rho' }),
+        signal: controller.signal
+      }).then(function (r) { return r.ok ? r.blob() : null; }).then(function (blob) {
+        if (!voiceFollow.on || controller.signal.aborted) return;
+        ttsAbort = null;
+        if (!blob) { voiceFollow.playing = false; voiceFollowPump(); return; }
+        var audio = new Audio(URL.createObjectURL(blob));
+        voiceFollow.audio = audio;
+        audio.onplay = function () { if (voiceFollow.audio === audio) setVoiceFollowStatus('Rho is speaking', false); };
+        audio.onpause = function () { if (voiceFollow.audio === audio && !audio.ended) setVoiceFollowStatus('Voice paused', true); };
+        audio.onended = audio.onerror = function () {
+          if (voiceFollow.audio !== audio) return;
+          voiceFollow.audio = null; voiceFollow.playing = false;
+          if (voiceFollow.queue.length) voiceFollowPump();
+          else setVoiceFollowStatus('Voice replies on', false);
+        };
+        audio.play().catch(function () {
+          if (voiceFollow.audio === audio) setVoiceFollowStatus('Ready to play', true);
+        });
+      }).catch(function () { voiceFollow.playing = false; voiceFollowPump(); });
+    }
+    function voiceFollowEnqueue(text) {
+      text = (text || '').trim();
+      if (!text || !voiceFollow.on) return;
+      voiceFollow.queue.push(text);
+      voiceFollowPump();
+    }
+    function voiceFollowAddDelta(delta) {
+      if (!voiceFollow.on) return;
+      voiceFollow.pendingSentence += delta || '';
+      var sentence;
+      while ((sentence = voiceFollow.pendingSentence.match(/^([\s\S]*?[.!?])(\s|$)/))) {
+        voiceFollowEnqueue(sentence[1]);
+        voiceFollow.pendingSentence = voiceFollow.pendingSentence.slice(sentence[0].length);
+      }
+    }
+    function voiceFollowFlush() {
+      if (voiceFollow.pendingSentence.trim()) voiceFollowEnqueue(voiceFollow.pendingSentence);
+      voiceFollow.pendingSentence = '';
+      voiceFollow.turnActive = false;
+    }
+    function startVoiceFollow(btn) {
+      if (!READY || !ENDPOINT) return false;
+      voiceFollow.on = true;
+      root.classList.add('rho-follow-on');
+      if (btn) {
+        clearVoiceFollowButton();
+        voiceFollow.sourceBtn = btn;
+        btn.classList.add('rho-on');
+        if (btn.firstChild) btn.firstChild.innerHTML = ICON.stopspk;
+      }
+      setVoiceFollowStatus('Voice replies on', false);
+      return true;
+    }
+    function exitVoiceFollow() {
+      if (!voiceFollow.on && !voiceFollow.listening) return;
+      voiceFollow.on = false;
+      voiceFollow.listening = false;
+      if (voiceFollow.turnActive) interrupt();
+      voiceFollow.turnActive = false;
+      voiceFollowStopAudio();
+      try { if (window.WhisperSTT) WhisperSTT.stop(); } catch (e) {}
+      dictate.classList.remove('rho-on');
+      waveStop(barWave);
+      input.setAttribute('placeholder', input.getAttribute('data-rho-ph') || 'Message Rho…');
+      root.classList.remove('rho-follow-on');
+    }
+    function stopMsgSpeak() { voiceFollowStopAudio(); }
+    function speakMsg(text, btn) {
+      if (voiceFollow.on && voiceFollow.sourceBtn === btn) { exitVoiceFollow(); return; }
+      if (!startVoiceFollow(btn) || !text) return;
+      voiceFollowStopAudio();
+      voiceFollow.sourceBtn = btn;
+      btn.classList.add('rho-on');
+      if (btn.firstChild) btn.firstChild.innerHTML = ICON.stopspk;
+      voiceFollowEnqueue(text);
     }
     function attachActions(node) {
       if (!node || node.__acted) return; node.__acted = 1;
@@ -1023,6 +1465,10 @@
     async function send() {
       var text = input.value.trim();
       if (!text) return;
+      // Capture this turn's mode once. A Stop tap during the request clears the
+      // audio queue and aborts the request; it must not make a later SSE delta
+      // unexpectedly start speaking again.
+      var voiceReply = voiceFollow.on;
       stopMsgSpeak();
       if (READY && ENDPOINT && auth.checked && auth.required && !auth.signedIn) {
         // keep their words in the box \u2014 sign in, then hit send again
@@ -1047,12 +1493,21 @@
       sendBtn.disabled = true;
       setBusy(true);
       setOrb('thinking');
+      if (voiceReply) {
+        voiceFollow.turnActive = true;
+        voiceFollow.pendingSentence = '';
+        setVoiceFollowStatus('Rho is thinking', false);
+      }
       try {
         await askBrain(text, {
           image: pendingImage || undefined,
           thinking: thinking,
-          mode: 'text',
-          onDelta: function (_d, full) { if (!node.__spoke) { node.__spoke = 1; setOrb('speaking'); } setText(node, full); },
+          mode: voiceReply ? 'voice' : 'text',
+          onDelta: function (d, full) {
+            if (!node.__spoke) { node.__spoke = 1; setOrb('speaking'); }
+            setText(node, full);
+            if (voiceReply && voiceFollow.on) voiceFollowAddDelta(d);
+          },
           onTool: function (name) { crewChip('t:' + name, name); },
           onToolDone: function () {},
           onAgent: function (id, kind, task) { crewChip('a:' + id, kind, task); },
@@ -1064,15 +1519,21 @@
         node.classList.remove('is-streaming');
         crewAllDone();
         setOrb('idle');
-        if (!node.textContent) setText(node, "…I didn't catch a reply that time. Try me again?");
+        if (!node.textContent) {
+          var fallbackReply = "…I didn't catch a reply that time. Try me again?";
+          setText(node, fallbackReply);
+          if (voiceReply && voiceFollow.on) voiceFollowEnqueue(fallbackReply);
+        }
+        if (voiceReply && voiceFollow.on) voiceFollowFlush();
         attachActions(node);
       } catch (err) {
         node.classList.remove('is-streaming');
         crewAllDone();
+        if (voiceReply) voiceFollow.turnActive = false;
         if (err && err.rho === 'signin') {
           node.remove();
           setOrb('idle');
-          showSigninCard();
+          if (!USE_CENTRAL_HOST_AUTH) showSigninCard();
         } else if (err && err.rho === 'credits') {
           setOrb('idle');
           setText(node, err.message + ' Top up at workbench.rhobear.ai.');
@@ -1186,11 +1647,11 @@
     // NOTE: bump WHISPER_VER on every whisper-stt.js change — Cloudflare caches
     // no-query static JS for hours, so a fresh ?v= is how the update actually
     // reaches users (query-string = cache miss).
-    var WHISPER_VER = '11';
+    var WHISPER_VER = '12';
     var WHISPER_JS = (function () {
       var q = '/whisper-stt.js?v=' + WHISPER_VER;
       try { var o = new URL(document.currentScript && document.currentScript.src || '').origin; if (o && o !== 'null') return o + q; } catch (e) {}
-      return 'https://workbench.rhobear.ai' + q;
+      return 'https://builds.rhobear.ai' + q;
     })();
     function ensureWhisper(cb) {
       if (window.WhisperSTT) return cb();
@@ -1201,34 +1662,99 @@
       s.onerror = function () { dictate.style.display = 'none'; };
       document.head.appendChild(s);
     }
-    dictate.addEventListener('click', function () {
-      // Hands-free CONTINUOUS dictation: tap on → it listens, auto-detects the
-      // silence, types each utterance, keeps listening → tap the mic to stop.
-      if (dictate.classList.contains('rho-on')) {
-        try { window.WhisperSTT && WhisperSTT.stopTalk && WhisperSTT.stopTalk(); } catch (e) {}
-        dictate.classList.remove('rho-on');
-        input.setAttribute('placeholder', input.getAttribute('data-rho-ph') || 'Message Rho…');
-        return;
-      }
+    // Plain dictation is intentionally boring: tap to record, tap again to
+    // finish, review the words, then send when ready. Voice follow-up changes
+    // only after a person explicitly presses Listen beneath an answer.
+    var plainDictating = false;
+    function composerPlaceholder() { return input.getAttribute('data-rho-ph') || 'Message Rho…'; }
+    function resetComposerDictation() {
+      plainDictating = false;
+      dictate.classList.remove('rho-on');
+      waveStop(barWave);
+      input.setAttribute('placeholder', composerPlaceholder());
+    }
+    function startPlainDictation() {
       ensureWhisper(function () {
-        if (!window.WhisperSTT || !WhisperSTT.available() || !WhisperSTT.talkContinuous) { dictate.style.display = 'none'; return; }
-        var origPh = input.getAttribute('placeholder') || 'Message Rho…';
-        input.setAttribute('data-rho-ph', origPh);
-        var flash = function (msg, revert) { input.setAttribute('placeholder', msg); if (revert) setTimeout(function () { input.setAttribute('placeholder', origPh); }, revert); };
+        if (!window.WhisperSTT || !WhisperSTT.available() || !WhisperSTT.dictate) { dictate.style.display = 'none'; return; }
+        var original = input.getAttribute('placeholder') || 'Message Rho…';
+        input.setAttribute('data-rho-ph', original);
+        if (plainDictating) { WhisperSTT.dictate({}); return; }
+        plainDictating = true;
         dictate.classList.add('rho-on');
-        WhisperSTT.talkContinuous({
+        input.setAttribute('placeholder', 'Listening — tap the mic when you are done');
+        waveStart(barWave);
+        WhisperSTT.dictate({
           onStatus: function (st) {
-            if (st === 'listening') { dictate.classList.add('rho-on'); flash('🎙 Listening — just talk; pause and it types. Tap the mic to stop.'); }
-            else if (st === 'transcribing') { flash('Transcribing…'); }
-            else if (st === 'stopped') { dictate.classList.remove('rho-on'); input.setAttribute('placeholder', origPh); }
-            else if (st.indexOf('error') === 0 || st.indexOf('mic') === 0) { dictate.classList.remove('rho-on'); flash(st.replace('error:', 'whisper: '), 3500); }
+            st = String(st || '');
+            if (st === 'transcribing') input.setAttribute('placeholder', 'Transcribing…');
+            else if (st.indexOf('error:') === 0 || st.indexOf('mic:') === 0) {
+              resetComposerDictation();
+              input.setAttribute('placeholder', st.indexOf('mic:') === 0 ? 'Microphone permission is off' : 'Transcription hit a snag');
+              setTimeout(function () { if (!voiceFollow.on) input.setAttribute('placeholder', original); }, 3000);
+            }
           },
-          onFinal: function (t) {
-            if (t && t.trim()) { input.value = (input.value ? input.value.trim() + ' ' : '') + t.trim(); input.setAttribute('placeholder', origPh); autogrow(); refreshSend(); try { input.focus(); } catch (e) {} }
+          onText: function (text) {
+            resetComposerDictation();
+            if (text && text.trim()) {
+              input.value = (input.value ? input.value.trim() + ' ' : '') + text.trim();
+              autogrow(); refreshSend();
+              try { input.focus(); } catch (e) {}
+            }
           }
         });
       });
+    }
+    function startVoiceFollowTurn() {
+      ensureWhisper(function () {
+        if (!voiceFollow.on) return;
+        if (!window.WhisperSTT || !WhisperSTT.available() || !WhisperSTT.talk) { exitVoiceFollow(); return; }
+        var original = input.getAttribute('placeholder') || 'Message Rho…';
+        input.setAttribute('data-rho-ph', original);
+        voiceFollow.listening = true;
+        dictate.classList.add('rho-on');
+        waveStart(barWave);
+        setVoiceFollowStatus('Listening — tap mic to return to dictation', false);
+        input.setAttribute('placeholder', 'Listening — pause naturally when you are done');
+        WhisperSTT.talk({
+          onLevel: function (rms) { if (voiceFollow.listening) waveSetAmp(rms * 3.4); },
+          onStatus: function (st) {
+            st = String(st || '');
+            if (!voiceFollow.on) return;
+            if (st === 'transcribing') { setVoiceFollowStatus('Transcribing your turn', false); input.setAttribute('placeholder', 'Transcribing…'); }
+            else if (st.indexOf('error:') === 0 || st.indexOf('mic:') === 0) exitVoiceFollow();
+          },
+          onFinal: function (text) {
+            if (!voiceFollow.on) return;
+            voiceFollow.listening = false;
+            dictate.classList.remove('rho-on');
+            waveStop(barWave);
+            input.setAttribute('placeholder', original);
+            if (!text || !text.trim()) { setVoiceFollowStatus('Voice replies on', false); return; }
+            // Put the transcript in the normal composer first so the user can
+            // see exactly what was heard, then send this voice-mode turn.
+            input.value = text.trim(); autogrow(); refreshSend();
+            send();
+          }
+        });
+      });
+    }
+    dictate.addEventListener('click', function () {
+      if (voiceFollow.on) {
+        // The second mic tap is the escape hatch the user asked for: quit the
+        // smart voice path completely and leave ordinary dictation untouched.
+        if (voiceFollow.listening) exitVoiceFollow();
+        else startVoiceFollowTurn();
+        return;
+      }
+      startPlainDictation();
     });
+    voicePause.addEventListener('click', function () {
+      var audio = voiceFollow.audio;
+      if (!audio) return;
+      if (audio.paused) audio.play().catch(function () {});
+      else audio.pause();
+    });
+    voiceStop.addEventListener('click', exitVoiceFollow);
 
     /* ---- THE BIG ONE: live voice call --------------------------------------
        Continuous listening -> brain -> spoken reply, sentence by sentence.
@@ -1244,7 +1770,11 @@
       root.classList.remove('rho-v-listening', 'rho-v-thinking', 'rho-v-speaking');
       if (s !== 'idle') root.classList.add('rho-v-' + s);
       setOrb(s === 'thinking' ? 'thinking' : s === 'speaking' ? 'speaking' : 'idle');
-      callState.textContent = s === 'listening' ? 'listening' : s === 'thinking' ? 'thinking' : s === 'speaking' ? 'speaking' : '';
+      callState.textContent = s === 'listening' ? 'listening…' : s === 'thinking' ? 'thinking…' : s === 'speaking' ? 'speaking…' : '';
+      // waveform rides the whole call: mic RMS while listening, a steady pulse
+      // while Rho speaks (the mock shows the strip alive during "speaking…").
+      if (s === 'idle') { waveStop(callWave); }
+      else { waveStart(callWave); if (s !== 'listening') waveSetAmp(s === 'speaking' ? 0.5 : 0.18); }
     }
 
     function callCrewChip(label, task) {
@@ -1269,7 +1799,7 @@
       var s = call.queue.shift();
       fetch(ENDPOINT + '/api/tts', {
         method: 'POST', headers: authHeaders(), credentials: 'include',
-        body: JSON.stringify({ text: s, voice: VOICE })
+        body: JSON.stringify({ text: s, voice: VOICE, style: 'rho' })
       }).then(function (r) { return r.ok ? r.blob() : null; }).then(function (b) {
         if (!call.on) { call.playing = false; return; }
         if (!b) { call.playing = false; ttsPump(); return; }
@@ -1298,7 +1828,19 @@
       ensureWhisper(function () {
         if (!call.on || !window.WhisperSTT) return;
         WhisperSTT.talk({
-          onStatus: function (st) { if (st === 'listening' && call.state !== 'speaking') callSetState('listening'); },
+          onLevel: function (rms) { if (call.state === 'listening') waveSetAmp(rms * 3.4); },
+          onStatus: function (st) {
+            st = '' + st;
+            if (st === 'listening' && call.state !== 'speaking') callSetState('listening');
+            // mic denied / transcribe error → don't stick on "connecting"; tell
+            // the user and drop to idle so a tap on the orb can retry.
+            else if (call.on && (st.indexOf('mic') === 0 || st.indexOf('error') === 0)) {
+              callLine.textContent = st.indexOf('mic') === 0
+                ? 'I can’t hear a mic — check the browser’s mic permission, then tap the orb to retry.'
+                : 'Voice hit a snag — tap the orb to try again.';
+              callSetState('idle');
+            }
+          },
           onFinal: function (t) {
             if (!call.on) return;
             if (t && t.trim()) { callLine.innerHTML = '<span class="rho-heard"></span>'; callLine.firstChild.textContent = t; callTurn(t.trim()); }
@@ -1356,6 +1898,7 @@
     function callOpen() {
       if (!READY || !ENDPOINT) { open(); return; }
       if (auth.checked && auth.required && !auth.signedIn) { open(); return; }
+      exitVoiceFollow();
       call.on = true;
       root.classList.add('rho-call-open');
       callCrew.innerHTML = '';
@@ -1375,6 +1918,7 @@
       try { if (window.WhisperSTT) WhisperSTT.stop(); } catch (e) {}
       call.rec = null;
       callSetState('idle');
+      waveStop(callWave);
       root.classList.remove('rho-call-open');
     }
     callBtn.addEventListener('click', callOpen);
