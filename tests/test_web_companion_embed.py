@@ -47,8 +47,9 @@ EMBED_REF = f"/assets/{EMBED_NAME}"
 
 # The canonical build vendored from rhobear-builds-web. Pinned on purpose: a silent
 # drift (or a downgrade back to the pre-orb4 embed) must fail here, not in prod.
-CANONICAL_SHA256 = "f580d6252343eaf1d3bcd5de0e7eefeda28d7b9a857482b9a8d4eae67b2a987a"
-CANONICAL_BYTES = 106_668
+# NOTE: updated after TTS race-condition fix (AbortController + signal).
+CANONICAL_SHA256 = "aae14a24d9e7b3e28e8e1598c75b4ce7d6d926fa08d3aa2e27e3e64ced8c4846"
+CANONICAL_BYTES = 106_989
 
 # Hosts this repo must never depend on for the companion to render.
 DEAD_COMPANION_HOSTS = ("builds.rhobear.ai", "workbench.rhobear.ai")
@@ -133,6 +134,19 @@ def test_embed_is_the_canonical_build():
     # It must still be the orb4 embed and still know about this surface.
     assert "window.__rhoEmbedLoaded = '2.5'" in text
     assert "capturd:" in text, "canonical embed no longer declares the capturd surface"
+
+
+def test_voice_follow_tts_is_abortable():
+    """Race fix (PR #39 reviewer): voiceFollowStopAudio must abort an in-flight
+    TTS fetch, not just pause the current Audio, so a stale reply can't resolve
+    and play after a new turn starts."""
+    text = (ASSETS / EMBED_NAME).read_text(encoding="utf-8")
+    # the stop path cancels the controller
+    assert "ttsAbort.abort()" in text
+    # the fetch carries the controller's signal
+    assert "signal: controller.signal" in text
+    # the resolve path bails if the fetch was aborted mid-flight
+    assert "controller.signal.aborted" in text
 
 
 def test_docroot_has_no_orphaned_companion_asset():

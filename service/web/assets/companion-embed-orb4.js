@@ -115,6 +115,7 @@
   var sessionId = null;
   try { sessionId = localStorage.getItem('rho.session') || null; } catch (e) {}
   var activeAbort = null, activeChatId = null, greeted = false;
+  var ttsAbort = null; // AbortController for in-flight TTS fetch (race fix)
   var pendingImage = null; // data URL waiting to ride the next send
 
   // ---- identity: Rho is tied to RHOBEAR credits ----------------------------
@@ -1295,6 +1296,7 @@
     function voiceFollowStopAudio() {
       voiceFollow.queue = [];
       voiceFollow.pendingSentence = '';
+      if (ttsAbort) { try { ttsAbort.abort(); } catch (e) {} ttsAbort = null; }
       if (voiceFollow.audio) { try { voiceFollow.audio.pause(); } catch (e) {} voiceFollow.audio = null; }
       voiceFollow.playing = false;
       clearVoiceFollowButton();
@@ -1305,11 +1307,15 @@
       voiceFollow.playing = true;
       var sentence = voiceFollow.queue.shift();
       setVoiceFollowStatus('Rho is speaking', false);
+      var controller = new AbortController();
+      ttsAbort = controller;
       fetch(ENDPOINT + '/api/tts', {
         method: 'POST', headers: authHeaders(), credentials: 'include',
-        body: JSON.stringify({ text: sentence, voice: VOICE, style: 'rho' })
+        body: JSON.stringify({ text: sentence, voice: VOICE, style: 'rho' }),
+        signal: controller.signal
       }).then(function (r) { return r.ok ? r.blob() : null; }).then(function (blob) {
-        if (!voiceFollow.on) return;
+        if (!voiceFollow.on || controller.signal.aborted) return;
+        ttsAbort = null;
         if (!blob) { voiceFollow.playing = false; voiceFollowPump(); return; }
         var audio = new Audio(URL.createObjectURL(blob));
         voiceFollow.audio = audio;
