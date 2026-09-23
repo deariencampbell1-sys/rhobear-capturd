@@ -174,7 +174,9 @@ def client(tmp_path, monkeypatch):
 
     from app import main as app_main
 
-    with TestClient(app_main.app) as c:
+    # Use follow_redirects to avoid httpx stream races in TestClient.
+    # The proxy tests need real async streaming, so we mark them separately.
+    with TestClient(app_main.app, follow_redirects=True) as c:
         yield c
 
 
@@ -231,6 +233,8 @@ class _StubBrain(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
+            # Tell the client we're done so it stops waiting for more chunks.
+            self.send_header("Connection", "close")
             self.end_headers()
             for ev in (b'event: session\ndata: {"sessionId":"s1"}\n\n',
                        b'event: delta\ndata: {"text":"hey"}\n\n',
@@ -273,12 +277,16 @@ def test_companion_route_forwards_json_and_identity(client, stub_brain):
 
 
 def test_companion_route_streams_sse_unchanged(client, stub_brain):
-    r = client.post("/companion/api/chat",
-                    json={"text": "hello Rho", "sessionId": "s1", "mode": "chat"})
-    assert r.status_code == 200
-    assert "text/event-stream" in r.headers.get("content-type", "")
+    # Use stream=True to iterate chunk-by-chunk; TestClient + StreamingResponse
+    # can race when the upstream generator outlives the test context.
+    with client.stream("POST", "/companion/api/chat",
+                       json={"text": "hello Rho", "sessionId": "s1", "mode": "chat"}) as r:
+        assert r.status_code == 200
+        assert "text/event-stream" in r.headers.get("content-type", "")
+        chunks = [chunk.decode() for chunk in r.iter_bytes()]
+    body = "".join(chunks)
     for ev in ("event: session", "event: delta", "event: done"):
-        assert ev in r.text, f"SSE event {ev!r} did not survive the proxy"
+        assert ev in body, f"SSE event {ev!r} did not survive the proxy"
     posted = [s for s in _StubBrain.seen if s[0] == "POST" and s[1].startswith("/api/chat")]
     assert posted, "the brain never saw /api/chat"
     assert json.loads(posted[-1][3].decode()) == {

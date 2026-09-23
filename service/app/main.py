@@ -384,23 +384,23 @@ async def companion_proxy(request: Request, rest: str = ""):
     headers = {k: v for k, v in request.headers.items()
                if k.lower() not in _HOP_BY_HOP and k.lower() != "host"}
     body = await request.body()
+    cx = _httpx.AsyncClient(timeout=_COMPANION_TIMEOUT)
     try:
-        async with _httpx.AsyncClient(timeout=_COMPANION_TIMEOUT) as cx:
-            up = await cx.send(cx.build_request(
-                request.method, url, content=body, headers=headers,
-                params=dict(request.query_params)), stream=True)
+        up = await cx.send(cx.build_request(
+            request.method, url, content=body, headers=headers,
+            params=dict(request.query_params)), stream=True)
     except _httpx.RequestError as exc:
+        await cx.aclose()
         return JSONResponse({"error": f"companion upstream unreachable: {exc}"},
                             status_code=502)
     out = {k: v for k, v in up.headers.items()
            if k.lower() not in (_HOP_BY_HOP | _UPSTREAM_STAMPED)}
-    # Streamed, not buffered: an SSE voice turn must reach the orb sentence by
-    # sentence, so the upstream iterator is pumped straight through.
+
     async def _pump():
         try:
             async for chunk in up.aiter_raw():
                 yield chunk
         finally:
-            await up.aclose()
+            await cx.aclose()
 
     return _Streaming(_pump(), status_code=up.status_code, headers=out)
