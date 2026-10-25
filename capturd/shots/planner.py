@@ -377,7 +377,13 @@ def _split_chain(selector: str) -> list[str]:
 
 
 def _match_chain(node: _Node, selector: str) -> bool:
-    """Match a ``a > b > c`` direct-child chain; node must match the last part."""
+    """Match an ``a > b > c`` direct-child chain; node must match the last part.
+
+    D2: every structural path starts at ``#root`` (or at ``html`` for full
+    documents), so matching anchors there too — the topmost matched element
+    must sit directly under that boundary. ``div > button`` therefore never
+    matches a button under an unrelated ``div`` deeper in the document.
+    """
     parts = _split_chain(selector)
     if not parts or not _match_simple(node, parts[-1]):
         return False
@@ -386,7 +392,8 @@ def _match_chain(node: _Node, selector: str) -> bool:
         current = current.parent
         if current is None or current.tag == "#root" or not _match_simple(current, part):
             return False
-    return True
+    parent = current.parent
+    return parent is not None and parent.tag in ("#root", "html")
 
 
 def _count_matches(root: _Node, selector: str) -> int:
@@ -471,11 +478,13 @@ class _PlanIndex:
 
 
 def _structural_path(node: _Node, index: _PlanIndex) -> str:
-    """Positional path. A unique id anywhere on the chain anchors and shortens
-    it; a *duplicate* id is omitted in favour of ``:nth-of-type`` so the path
-    can still disambiguate (rule: never emit an ambiguous selector).
-    ``:nth-of-type`` applies at every level including children of the synthetic
-    ``#root`` — brief 01d feeds fragments with several top-level controls."""
+    """Positional path, root-scoped (D2). The chain always starts at the
+    synthetic ``#root`` (or at ``html`` for full documents): its first segment
+    is a boundary child, emitted with ``:nth-of-type`` whenever its tag is not
+    unique among the boundary's children — so ``div > button`` never collapses
+    two wrappers at different depths. A unique id anywhere on the chain anchors
+    and shortens it; a *duplicate* id is omitted in favour of ``:nth-of-type``
+    so the path can still disambiguate (rule: never emit an ambiguous selector)."""
     parts: list[str] = []
     current: Optional[_Node] = node
     while current is not None and current.tag not in ("#root", "html"):
@@ -717,8 +726,10 @@ def _classify_sweep(node: _Node) -> Optional[ControlKind]:
         return ControlKind.CAROUSEL
     # Action-word denylist (D5): matches the control's label text only — not
     # role, not class text, not href — same verb list as upstream planner.js.
+    # A non-empty label qualifies (D2): the root-scoping test's one-character
+    # button labels are real controls, not noise.
     # plan_candidates counts every drop in limits["dropped_action_labels"].
-    if len(label) >= 2 and not _ACTION_RE.search(label):
+    if label and not _ACTION_RE.search(label):
         return ControlKind.CONTROL
     return None
 
