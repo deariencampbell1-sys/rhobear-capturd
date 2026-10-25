@@ -289,7 +289,6 @@ _TAG_RE = re.compile(r"^(\*|[a-zA-Z][a-zA-Z0-9-]*)")
 _ATTR_RE = re.compile(r'^([\w-]+)="(.*)"$', re.DOTALL)
 _NTH_PREFIX = ":nth-of-type("
 _LEADING_DIGIT_RE = re.compile(r"^(-?)([0-9])")
-_LEADING_DIGIT_RE = re.compile(r"^(-?)([0-9])")
 
 
 def _match_simple(node: _Node, part: str) -> bool:
@@ -519,7 +518,8 @@ def unique_selector(node: Node) -> tuple[Optional[str], str]:
 
     Returns ``(selector, strategy)`` with strategy one of ``id`` / ``attribute`` /
     ``structural``. The ``structural`` fallback is not guaranteed unique on its
-    own — callers verify with :func:`_count_matches` and drop ambiguous candidates.
+    own — :func:`plan_candidates` runs the uniqueness verifier and drops
+    ambiguous candidates, so only the plan's selectors are verified-unique.
     """
     return _PlanIndex(_tree_root(node)).unique_selector(node)
 

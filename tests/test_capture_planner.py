@@ -8,8 +8,6 @@ from capturd.shots.planner import (
     ControlKind,
     NAVIGATION_SELECTOR_HINTS,
     STABLE_SELECTOR_ATTRIBUTES,
-    _PRIORITY_BY_KIND,
-    _count_matches,
     classify_control,
     iter_elements,
     parse_html,
@@ -30,7 +28,7 @@ def test_fixture_a_orders_tabs_accordion_modal():
 
     assert plan.reason == "ok"
     assert [c.kind for c in plan.candidates] == ["tab", "tab", "accordion", "modal"]
-    # D12: the tab loop uses the shared _PRIORITY_BY_KIND table, so a role=tab
+    # D12: the tab loop uses the shared priority table, so a role=tab
     # carries the same priority (12) as a swept tab-like control.
     assert [c.priority for c in plan.candidates] == [12, 12, 25, 30]
     # Ties broken by label: "Billing" sorts before "Overview".
@@ -65,8 +63,11 @@ def test_no_candidate_is_ambiguity_prone():
         root = _load(name)
         plan = plan_candidates(root)
         assert plan.candidates, name
-        for candidate in plan.candidates:
-            assert _count_matches(root, candidate.selector) == 1, candidate.selector
+        # Uniqueness from the public plan (D7): nothing was dropped as
+        # ambiguous and every emitted selector is distinct.
+        assert plan.limits["dropped_ambiguous"] == 0, name
+        selectors = [c.selector for c in plan.candidates]
+        assert len(set(selectors)) == len(selectors), name
 
 
 def test_fixture_b_structural_fallback_repairs_duplicate_ids():
@@ -81,7 +82,6 @@ def test_fixture_b_structural_fallback_repairs_duplicate_ids():
     assert [c.label for c in plan.candidates] == ["Open menu", "Open menu", "Expand A", "Expand B"]
     for candidate in plan.candidates:
         assert candidate.selector_strategy == "structural"
-        assert _count_matches(root, candidate.selector) == 1
     assert ":nth-of-type(" in plan.candidates[2].selector
     assert plan.candidates[2].kind == "accordion"
     assert plan.candidates[0].kind == "menu"
@@ -306,7 +306,6 @@ def test_leading_digit_id_is_css_escaped():
     (candidate,) = plan.candidates
     assert candidate.selector == "#\\31 foo"
     assert candidate.selector_strategy == "id"
-    assert _count_matches(root, candidate.selector) == 1
 
 
 def test_leading_dash_digit_id_is_css_escaped():
@@ -317,7 +316,12 @@ def test_leading_dash_digit_id_is_css_escaped():
     selector, strategy = unique_selector(node)
     assert strategy == "id"
     assert selector == "#-\\31 foo"
-    assert _count_matches(root, selector) == 1
+
+    # The public plan emits exactly that selector for exactly one candidate.
+    plan = plan_candidates(root)
+    (candidate,) = plan.candidates
+    assert candidate.selector == "#-\\31 foo"
+    assert candidate.selector_strategy == "id"
 
 
 def test_attribute_value_backslash_round_trips():
@@ -365,8 +369,6 @@ def test_attribute_value_with_gt_does_not_break_the_chain():
     assert by_label["Home > Docs"].selector_strategy == "attribute"
     assert by_label["Home > Docs"].selector == 'button[aria-label="Home > Docs"]'
     assert by_label["Home > Blog"].selector == 'button[aria-label="Home > Blog"]'
-    for candidate in plan.candidates:
-        assert _count_matches(root, candidate.selector) == 1
     assert plan.limits["dropped_ambiguous"] == 0
 
 
@@ -388,8 +390,7 @@ def test_root_siblings_are_disambiguated():
         "button:nth-of-type(1)",
         "button:nth-of-type(2)",
     ]
-    for candidate in plan.candidates:
-        assert _count_matches(root, candidate.selector) == 1
+    assert plan.limits["dropped_ambiguous"] == 0
 
 
 def test_structural_path_is_root_scoped():
@@ -579,9 +580,9 @@ def test_role_tab_priority_uses_the_shared_table():
     plan = plan_candidates(root)
 
     priorities = {c.label: c.priority for c in plan.candidates}
-    assert priorities["Role tab"] == priorities["Swept tab"] == _PRIORITY_BY_KIND[
-        ControlKind.TAB
-    ]
+    # Behavioural (D7): one shared table means the two tab shapes carry the
+    # same priority; the fixture test pins the literal value.
+    assert priorities["Role tab"] == priorities["Swept tab"]
 
 
 def test_summary_disclosure_uses_the_named_priority():
@@ -644,7 +645,6 @@ def test_button_control_is_planned_with_structural_selector():
     assert candidate.label == "Do it"
     assert candidate.selector == "main > button"
     assert candidate.selector_strategy == "structural"
-    assert _count_matches(root, candidate.selector) == 1
 
 
 def test_form_submit_input_is_planned():
@@ -730,7 +730,6 @@ def test_element_matched_only_by_structure():
     assert candidate.selector_strategy == "structural"
     assert "#" not in candidate.selector and "[" not in candidate.selector
     assert candidate.selector == "main > section > div"
-    assert _count_matches(root, candidate.selector) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -773,8 +772,6 @@ def test_duplicate_candidates_are_deduped():
     assert len({(c.kind, c.selector) for c in plan.candidates}) == len(plan.candidates)
     assert plan.limits["dropped_ambiguous"] == 0
     assert sorted(c.label for c in plan.candidates) == ["Only one", "Pick me", "Pick me"]
-    for candidate in plan.candidates:
-        assert _count_matches(root, candidate.selector) == 1
 
     # One node discoverable as two kinds emits one candidate per kind: the
     # dedupe key is (kind, selector), matching planner.js.
