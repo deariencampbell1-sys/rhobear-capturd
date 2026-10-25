@@ -272,3 +272,135 @@ def test_licence_tripwire_fires_on_planted_violations(tmp_path, kind, body):
     offenders = _licence_assignment_violations([planted])
     assert len(offenders) == 1, offenders
     assert f"planted.{kind}:2" in offenders[0], offenders
+
+
+# ---------------------------------------------------------------------------
+# 5. Runtime dependencies must be declared where the evidence puts them.
+#    The four runtime deps used to be declared only in the `dev` extra while
+#    production entry points need them at IMPORT time. Verdicts (each proven
+#    experimentally — see the pyproject dependencies comment and the PR
+#    comment):
+#      fastapi      -> dependencies  (service/app/main.py imports it unguarded
+#                                      at module import)
+#      uvicorn      -> dependencies  (the `capturd serve` chain — fastmcp ->
+#                                      mcp — fails to import without it; also
+#                                      the service/mcp_service.py runner)
+#      numpy        -> dependencies  (capturd/walk/voice.py imports it
+#                                      unguarded at module import; on the
+#                                      capturd.mcp.server / capturd walk chains)
+#      cryptography -> dependencies  (first-party use is LAZY in
+#                                      capturd/pro.py, but mcp 2.3.0 imports it
+#                                      at module import on the `capturd serve`
+#                                      chain)
+# ---------------------------------------------------------------------------
+
+# Declared exactly like pyproject.toml declares them.
+_RUNTIME_DEPS = ("fastapi", "uvicorn[standard]", "numpy", "cryptography")
+_ALL_FOUR = tuple(_RUNTIME_DEPS)
+
+
+def _pyproject_main_dependencies_text() -> str:
+    """The body of [project] dependencies = [...] (not the dev extra's).
+    Scanned line-wise: a string-split on ']' would stop at the ']' inside
+    \"uvicorn[standard]\"."""
+    lines = (REPO / "pyproject.toml").read_text(encoding="utf-8").splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.strip() == "dependencies = [")
+    end = next(i for i in range(start + 1, len(lines)) if lines[i].strip() == "]")
+    return "\n".join(lines[start + 1:end])
+
+
+# (entry module, blocked top-level names, expected, documented reason).
+# blocked = _ALL_FOUR simulates a production install with NO dev extras.
+_ENTRY_VERDICTS = (
+    ("capturd.cli", _ALL_FOUR, "ok",
+     "lazy dispatcher — imports none of the four at import time"),
+    ("capturd.shots.cli", _ALL_FOUR, "ok",
+     "screenshots CLI — stdlib + playwright only"),
+    ("capturd.mcp.server", ("uvicorn",), "fail",
+     "`capturd serve`: fastmcp -> mcp needs uvicorn at import time"),
+    ("capturd.mcp.server", ("numpy",), "fail",
+     "capturd/walk/voice.py imports numpy unguarded at import time"),
+    ("capturd.mcp.server", ("cryptography",), "fail",
+     "mcp 2.3.0 imports cryptography at module import (request_state)"),
+    ("capturd.mcp.server", ("fastapi",), "ok",
+     "the MCP server surface does not need fastapi"),
+    ("app.main", ("fastapi",), "fail",
+     "service/app/main.py imports fastapi unguarded at module import"),
+    ("app.main", ("uvicorn",), "ok",
+     "uvicorn only enters via service/mcp_service.py's __main__ runner"),
+    ("app.main", ("numpy",), "ok",
+     "the service app does not import the walk/voice chain"),
+    ("app.main", ("cryptography",), "ok",
+     "the service app never touches the signed-licence path"),
+)
+
+
+def _import_under_blocklist(module: str, blocked: tuple[str, ...]) -> subprocess.CompletedProcess:
+    """Import *module* in a fresh subprocess with a sys.meta_path finder that
+    raises ImportError for every blocked top-level name."""
+    blocklist = ", ".join(repr(b.split("[")[0]) for b in blocked) or "set()"
+    code = (
+        "import sys\n"
+        f"BLOCKED = {{{blocklist}}}\n"
+        "class _Blocker:\n"
+        "    def find_spec(self, name, path=None, target=None):\n"
+        "        if name.split('.')[0] in BLOCKED:\n"
+        "            raise ImportError('blocked-by-test production dependency: ' + name)\n"
+        "        return None\n"
+        "    find_module = find_spec\n"
+        "sys.meta_path.insert(0, _Blocker())\n"
+        f"__import__({module!r})\n"
+        "print('IMPORT_OK')\n"
+    )
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    if module == "app.main":
+        # the hosted service lays out `app/` under service/ and imports
+        # capturd from the repo root
+        env["PYTHONPATH"] = os.pathsep.join([str(REPO / "service"), str(REPO)])
+    else:
+        env["PYTHONPATH"] = str(REPO)
+    return subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True,
+        timeout=120, env=env, cwd=tempfile.gettempdir())
+
+
+@pytest.mark.parametrize("module,blocked,expected,reason", _ENTRY_VERDICTS)
+def test_production_entry_module_imports_per_dependency_verdict(
+        module, blocked, expected, reason):
+    """Pin the per-package verdict executably: 'ok' = the entry module imports
+    with the listed names blocked; 'fail' = it fails with a CLEAN ImportError
+    naming the missing production dependency (or fastmcp's documented
+    server-support message) — which is exactly why that dependency is declared
+    in [project] dependencies, not left in dev."""
+    proc = _import_under_blocklist(module, blocked)
+    combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    if expected == "ok":
+        assert proc.returncode == 0 and "IMPORT_OK" in proc.stdout, (
+            f"{module} must import without {blocked} ({reason}):\n{combined}")
+    else:
+        assert proc.returncode != 0, (
+            f"{module} was expected to REQUIRE {blocked} ({reason}) but imported "
+            f"cleanly — revisit the dependency verdicts")
+        assert "ImportError" in combined or "ModuleNotFoundError" in combined or \
+            "FastMCP server support" in combined, (
+            f"{module} failed without {blocked} but not with a clean import "
+            f"error ({reason}):\n{combined}")
+
+
+def test_production_entry_modules_import_without_optional_dev_deps():
+    """The runtime deps the production entry points need at IMPORT time must be
+    declared in [project] dependencies (not only in the dev extra) — and the
+    console-script entry points that need NONE of them must import with all
+    four blocked (a production install without dev extras)."""
+    declared = _pyproject_main_dependencies_text()
+    # every verdict dep is declared with a version specifier: "name>="
+    missing = [d for d in _RUNTIME_DEPS if f'"{d}>=' not in declared]
+    assert not missing, (
+        f"import-time-required runtime deps missing from [project] dependencies: "
+        f"{missing} — a production install (pip install .) would ship an entry "
+        f"point that cannot import")
+    for module in ("capturd.cli", "capturd.shots.cli"):
+        proc = _import_under_blocklist(module, _ALL_FOUR)
+        assert proc.returncode == 0 and "IMPORT_OK" in proc.stdout, (
+            f"{module} must import with all four runtime deps blocked:\n"
+            f"{proc.stderr}")
