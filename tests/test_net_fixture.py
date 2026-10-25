@@ -194,6 +194,26 @@ def test_registration_and_allowance_are_logged_as_fixture(caplog):
     assert any("allowing" in m and "8123" in m for m in fixture_lines), fixture_lines
 
 
+def test_allowance_warns_once_then_debug(caplog):
+    """First allowance per origin logs WARNING (visible fixture signal);
+    subsequent hits on the same origin drop to DEBUG — same marker text, so
+    existing greps still find every record while the E2E log is not flooded."""
+    register_test_fixture_origin("http://127.0.0.1:8123")
+    with caplog.at_level(logging.DEBUG, logger="capturd._net.fixture"):
+        assert is_fixture_origin("http://127.0.0.1:8123/a") is True
+        assert is_fixture_origin("http://127.0.0.1:8123/b") is True
+        assert is_fixture_origin("http://127.0.0.1:8123/c") is True
+    hits = [r for r in caplog.records if "allowing" in r.message]
+    assert [r.levelno for r in hits] == [logging.WARNING, logging.DEBUG, logging.DEBUG], hits
+    assert all("[capturd TEST FIXTURE]" in r.message for r in hits)
+    # a NEW registration session warns again from the first hit
+    register_test_fixture_origin("http://127.0.0.1:9001")
+    with caplog.at_level(logging.DEBUG, logger="capturd._net.fixture"):
+        assert is_fixture_origin("http://127.0.0.1:9001/z") is True
+    again = [r for r in caplog.records if "allowing" in r.message and "9001" in r.message]
+    assert [r.levelno for r in again] == [logging.WARNING]
+
+
 # ---------------------------------------------------------------------------
 # The wrapped guard: fixture origin allowed, everything else delegated to the
 # real (fail-closed) guard.

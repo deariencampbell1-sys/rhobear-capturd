@@ -47,13 +47,19 @@ from urllib.parse import urlparse
 #   that (scheme, host, port) triple — no other port, host or scheme.
 # * fail-closed: registration and matching raise/return-False on any parse
 #   surprise; the wrapped guard delegates everything else to the real one.
-# * visible: every registration and every allowance hit is logged with a
-#   ``TEST FIXTURE`` marker so logs/results can't pass silently as production.
+# * visible: every registration logs at WARNING and every allowance hit logs
+#   with a ``[capturd TEST FIXTURE]`` marker — the FIRST allowance per origin
+#   at WARNING (the visible signal a fixture run is running), subsequent hits
+#   on the same origin at DEBUG so a long E2E run does not flood the log.
 
 _FIXTURE_LOGGER = logging.getLogger("capturd._net.fixture")
 
 # (scheme, host, port) of the single registered fixture origin, or None.
 _fixture_origin: tuple[str, str, int] | None = None
+
+# Origins whose first allowance hit has already been logged at WARNING; reset
+# on every register/clear so each fixture session warns once.
+_warned_allowances: set[tuple[str, str, int]] = set()
 
 
 class FixtureOriginError(ValueError):
@@ -100,6 +106,7 @@ def register_test_fixture_origin(origin: str) -> str:
         raise FixtureOriginError(
             f"fixture origin {origin!r} has an unusable port {port}")
     _fixture_origin = (scheme, host.lower(), port)
+    _warned_allowances.clear()
     _FIXTURE_LOGGER.warning(
         "[capturd TEST FIXTURE] loopback allowance registered for %s — "
         "valid ONLY inside this explicitly-launched test process", origin)
@@ -110,6 +117,7 @@ def clear_test_fixture_origin() -> None:
     """Drop any registered fixture origin (back to production fail-closed state)."""
     global _fixture_origin
     _fixture_origin = None
+    _warned_allowances.clear()
 
 
 def registered_test_fixture_origin() -> str | None:
@@ -143,7 +151,14 @@ def is_fixture_origin(url: str) -> bool:
         return False
     if (scheme, host.lower(), port) != _fixture_origin:
         return False
-    _FIXTURE_LOGGER.warning(
+    # First allowance for this origin: WARNING (the visible signal a fixture
+    # run is running). Subsequent hits: DEBUG, same marker text, so the E2E
+    # log is not flooded on every frame/caption request.
+    key = (scheme, host.lower(), port)
+    level = logging.WARNING if key not in _warned_allowances else logging.DEBUG
+    _warned_allowances.add(key)
+    _FIXTURE_LOGGER.log(
+        level,
         "[capturd TEST FIXTURE] allowing %s — matches the registered loopback "
         "fixture origin; the SSRF guard is bypassed for THIS origin only in "
         "this test process", url)
