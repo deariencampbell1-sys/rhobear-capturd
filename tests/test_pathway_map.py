@@ -8,6 +8,7 @@ output. No network, no Playwright — this module is pure parsing.
 from __future__ import annotations
 
 import json
+import traceback
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,7 @@ from capturd.shots.pathway_map import (
 )
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "capture-foundations"
+HARDENING = FIXTURES / "pathway-manifest-hardening.md"
 
 
 def test_parse_manifest_sample_extracts_pathways():
@@ -203,6 +205,129 @@ def test_verifier_raw_keeps_the_source_text():
     text = '{"summary": {}, "checks": {}}'
     parsed = parse_verifier_json_text(text)
     assert parsed["raw"] == text
+
+
+def test_unwired_flag_sees_a_bare_warning_marker():
+    parsed = parse_manifest_md(HARDENING)
+    row = next(p for p in parsed["pathways"] if p["id"] == "catalog-search")
+    # A lone ⚠ in the unwired-flag cell (empty status column): the flag must
+    # fire and the status must normalise to UNWIRED — never stay raw "⚠".
+    assert row["unwiredFlag"] is True
+    assert row["rawStatus"] == "⚠"
+    assert row["status"] == "UNWIRED"
+
+
+def test_low_severity_finding_is_never_labelled_wired():
+    def status_for(severity: str | None) -> str:
+        finding = {"id": "f1", "code": 'get("/api/x")', "path": "/api/x"}
+        if severity is not None:
+            finding["severity"] = severity
+        text = json.dumps({"checks": {"api-wiring": {"findings": [finding]}}})
+        return parse_verifier_json_text(text)["pathways"][0]["status"]
+
+    # A finding exists — whatever its severity (or lack of one), it must never
+    # read as the strongest "nothing wrong here" label.
+    assert status_for("low") == "UNCLEAR"
+    assert status_for("info") == "UNCLEAR"
+    assert status_for(None) == "UNCLEAR"
+
+
+def test_non_ui_route_diff_check_reads_severity():
+    def status_for(check: str, severity: str) -> str:
+        finding = {"id": "f1", "code": 'get("/api/x")', "path": "/api/x", "severity": severity}
+        text = json.dumps({"checks": {check: {"findings": [finding]}}})
+        return parse_verifier_json_text(text)["pathways"][0]["status"]
+
+    assert status_for("suspicious-call", "critical") == "INCOMPLETE"
+    assert status_for("suspicious-call", "high") == "INCOMPLETE"
+    assert status_for("suspicious-call", "medium") == "UNCLEAR"
+    # The ui-route-diff special case still wins, whatever the severity says.
+    assert status_for("ui-route-diff", "low") == "UNWIRED"
+
+
+def test_heading_inside_a_fenced_block_does_not_split_sections():
+    parsed = parse_manifest_md(HARDENING)
+    # The fenced ``` block sits mid-section and contains a `#` line; neither
+    # the table above it nor the table below it may lose rows to a phantom
+    # section carved out at the fenced heading.
+    assert [p["id"] for p in parsed["pathways"]] == [
+        "capture-start", "catalog-search", "export-rows", "settings-open",
+    ]
+
+
+def test_pipe_inside_a_code_span_does_not_shift_columns():
+    parsed = parse_manifest_md(HARDENING)
+    row = next(p for p in parsed["pathways"] if p["id"] == "export-rows")
+    # The `a || b` cell keeps the row's column mapping intact — no shift, no
+    # silent drop.
+    assert row["downstreamCall"] == "`a || b`"
+    assert row["status"] == "MOCKED"
+    assert row["unwiredFlag"] is False
+
+
+def test_non_list_findings_raise():
+    # A non-list findings value must refuse, not silently parse to zero
+    # pathways.
+    with pytest.raises(PathwayMapError, match="findings must be a list"):
+        parse_verifier_json_text('{"checks": {"api-wiring": {"findings": {"a": 1}}}}')
+    with pytest.raises(PathwayMapError, match="findings must be a list"):
+        parse_verifier_json_text('{"checks": {"api-wiring": {"findings": "oops"}}}')
+
+
+def test_oserror_chain_carries_no_host_path(tmp_path):
+    manifest = tmp_path / "manifest.md"
+    manifest.write_bytes(b"\xff\xfe not utf-8")
+    map_file = tmp_path / "map.json"
+    map_file.write_bytes(b"\xff\xfe not utf-8")
+    for path, key in ((manifest, "manifest_path"), (map_file, "map_path")):
+        with pytest.raises(PathwayMapError) as excinfo:
+            load_pathway_map(**{key: path})
+        # Render the FULL exception chain: no host directory may appear in it.
+        rendered = "".join(traceback.format_exception(
+            type(excinfo.value), excinfo.value, excinfo.value.__traceback__,
+        ))
+        assert str(tmp_path) not in rendered
+        assert excinfo.value.__cause__ is None
+
+
+def test_empty_manifest_text_is_not_silently_ignored():
+    # "" is a PROVIDED input, not an absent one: two inputs still collide…
+    with pytest.raises(PathwayMapError, match="not both"):
+        load_pathway_map(manifest_text="", map_text='{"checks": {}}')
+    # …and a lone empty manifest_text must reach the parser's empty refusal,
+    # not the loader's "required" complaint.
+    with pytest.raises(PathwayMapError, match="empty"):
+        load_pathway_map(manifest_text="")
+
+
+def test_routes_do_not_invent_a_method():
+    parsed = parse_manifest_md(HARDENING)
+    methods = {r["path"]: r["method"] for r in parsed["routes"]}
+    assert methods["/api/captures"] == "GET"
+    # An empty Method cell stays "" — the parser never invents a verb.
+    assert methods["/api/catalog"] == ""
+
+
+def test_pathways_table_is_not_counted_as_routes():
+    parsed = parse_manifest_md(HARDENING)
+    paths = [r["path"] for r in parsed["routes"]]
+    # The pathways table (keyed by a `pathway` column) must never feed
+    # `routes` — only the routes table's paths may appear.
+    assert paths == ["/api/captures", "/api/catalog"]
+    assert "/settings" not in paths
+
+
+def test_empty_manifest_summary_is_not_replaced_by_another_shape():
+    text = json.dumps({
+        "manifest_summary": {},
+        "summary": {"pathwaysTotal": 99},
+        "checks": {},
+    })
+    parsed = parse_verifier_json_text(text)
+    # A present-but-empty manifest_summary wins over a differently-shaped
+    # summary: every count stays unset instead of borrowing foreign fields.
+    assert parsed["summary"] == {}
+    assert parsed["summary"].get("pathwaysTotal") is None
 
 
 def test_file_field_is_basename_never_a_host_path(tmp_path):
