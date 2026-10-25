@@ -423,6 +423,21 @@ def test_summary_in_navigation_is_excluded_and_counted():
     assert plan.limits["navigation_excluded"] == 1
 
 
+def test_dual_role_navigation_node_is_counted_once():
+    # D6 (round 2): <summary role="tab"> is discovered by both the tab loop
+    # and the summary loop; inside navigation it must be excluded — and
+    # counted — exactly once, not once per discovery loop.
+    root = parse_html(
+        "<header class='navbar'><details><summary role='tab'>Menu</summary></details></header>"
+        "<main><summary role='tab'>Content</summary></main>"
+    )
+    plan = plan_candidates(root)
+
+    assert sorted(c.label for c in plan.candidates) == ["Content", "Content"]
+    assert all(c.is_navigation is False for c in plan.candidates)
+    assert plan.limits["navigation_excluded"] == 1
+
+
 def test_role_tab_in_navigation_is_excluded_and_counted():
     # The role=tab loop must skip nodes inside navigation exactly like the
     # sweep does; no candidate may ever come out with is_navigation=True.
