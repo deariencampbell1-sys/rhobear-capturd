@@ -106,6 +106,16 @@ def test_registration_refuses_metadata_even_with_explicit_port():
         register_test_fixture_origin("http://169.254.169.254:8123")
 
 
+@pytest.mark.parametrize("url", ["http://[::1:8123/", "http://[::1/"])
+def test_unbalanced_ipv6_bracket_fails_closed(url):
+    """A parse surprise (unbalanced IPv6 bracket) must raise FixtureOriginError
+    on register and return False on match — never a raw ValueError."""
+    with pytest.raises(FixtureOriginError):
+        register_test_fixture_origin(url)
+    assert registered_test_fixture_origin() is None
+    assert is_fixture_origin(url) is False
+
+
 @pytest.mark.parametrize("origin", [
     "http://127.0.0.1:8123",
     "http://127.0.0.1:8123/",
@@ -146,6 +156,20 @@ def test_reregistration_replaces_the_single_origin():
     assert is_fixture_origin("http://127.0.0.1:8123/") is False
     assert is_fixture_origin("http://127.0.0.1:9001/") is True
     assert registered_test_fixture_origin() == "http://127.0.0.1:9001"
+
+
+def test_ipv6_origin_round_trips_bracketed():
+    """registered_test_fixture_origin() must bracket IPv6 literals so the
+    rendered origin is itself a valid URL that can be registered again."""
+    assert register_test_fixture_origin("http://[::1]:8123") == "http://[::1]:8123"
+    rendered = registered_test_fixture_origin()
+    assert rendered == "http://[::1]:8123"  # bracketed — NOT "http://::1:8123"
+    # idempotent: the rendered form registers again, unchanged
+    assert register_test_fixture_origin(rendered) == rendered
+    assert registered_test_fixture_origin() == rendered
+    # matching still exact: right host+port matches, other port does not
+    assert is_fixture_origin("http://[::1]:8123/x") is True
+    assert is_fixture_origin("http://[::1]:9999/x") is False
 
 
 def test_clear_restores_production_default():

@@ -73,14 +73,14 @@ def register_test_fixture_origin(origin: str) -> str:
     global _fixture_origin
     try:
         parts = urlparse(origin)
-        port = parts.port  # raises ValueError on malformed ports
+        port = parts.port      # raises ValueError on malformed ports
+        host = parts.hostname  # raises ValueError on malformed IPv6 literals
     except ValueError as exc:
         raise FixtureOriginError(f"malformed fixture origin {origin!r}: {exc}") from exc
     scheme = (parts.scheme or "").lower()
     if scheme not in ("http", "https"):
         raise FixtureOriginError(
             f"fixture origin {origin!r} must be http(s)://, got scheme {parts.scheme!r}")
-    host = parts.hostname
     if not host:
         raise FixtureOriginError(f"fixture origin {origin!r} has no host")
     try:
@@ -117,7 +117,10 @@ def registered_test_fixture_origin() -> str | None:
     if _fixture_origin is None:
         return None
     scheme, host, port = _fixture_origin
-    return f"{scheme}://{host}:{port}"
+    # Bracket IPv6 literals so the rendered origin round-trips through
+    # urlparse: "http://[::1]:8123", never the malformed "http://::1:8123".
+    host_repr = f"[{host}]" if ":" in host else host
+    return f"{scheme}://{host_repr}:{port}"
 
 
 def is_fixture_origin(url: str) -> bool:
@@ -131,11 +134,11 @@ def is_fixture_origin(url: str) -> bool:
         return False
     try:
         parts = urlparse(url)
-        port = parts.port  # raises ValueError on malformed ports
+        port = parts.port      # raises ValueError on malformed ports
+        host = parts.hostname  # raises ValueError on malformed IPv6 literals
     except ValueError:
         return False
     scheme = (parts.scheme or "").lower()
-    host = parts.hostname
     if not host or port is None:
         return False
     if (scheme, host.lower(), port) != _fixture_origin:
