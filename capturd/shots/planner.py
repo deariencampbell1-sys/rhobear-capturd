@@ -38,9 +38,11 @@ __all__ = [
     "ControlKind",
     "Candidate",
     "CapturePlan",
+    "Node",
     "NAVIGATION_SELECTOR_HINTS",
     "STABLE_SELECTOR_ATTRIBUTES",
     "classify_control",
+    "iter_elements",
     "parse_html",
     "plan_candidates",
 ]
@@ -65,6 +67,11 @@ class _Node:
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return f"<_Node {self.tag} attrs={sorted(self.attrs.items())!r} children={len(self.children)}>"
+
+
+#: Public alias for :class:`_Node` (D13): brief 01d consumes parsed trees and
+#: imports this name; ``_Node`` stays as an alias for the same class.
+Node = _Node
 
 
 class _NodeBuilder(HTMLParser):
@@ -112,7 +119,7 @@ class _NodeBuilder(HTMLParser):
             self._stack[-1].text_chunks.append(data)
 
 
-def parse_html(html: str) -> _Node:
+def parse_html(html: str) -> Node:
     """Parse an HTML string into a tree; returns the synthetic ``#root`` node."""
     builder = _NodeBuilder()
     builder.feed(html)
@@ -126,7 +133,7 @@ def _tree_root(node: _Node) -> _Node:
     return node
 
 
-def iter_elements(root: _Node) -> Iterator[_Node]:
+def iter_elements(root: Node) -> Iterator[Node]:
     """Pre-order (document order) walk over element nodes, excluding the root.
 
     Iterative (explicit stack), never recursion: a deeply nested document must
@@ -476,7 +483,7 @@ def _structural_path(node: _Node, index: _PlanIndex) -> str:
     return " > ".join(parts)
 
 
-def unique_selector(node: _Node) -> tuple[Optional[str], str]:
+def unique_selector(node: Node) -> tuple[Optional[str], str]:
     """Best selector for ``node``: ``#id``, then a stable attribute, then structure.
 
     Returns ``(selector, strategy)`` with strategy one of ``id`` / ``attribute`` /
@@ -705,7 +712,7 @@ def _classify_sweep(node: _Node) -> Optional[ControlKind]:
     return None
 
 
-def classify_control(node: Optional[_Node]) -> tuple[ControlKind, bool]:
+def classify_control(node: Optional[Node]) -> tuple[ControlKind, bool]:
     """Classify one node: ``(kind, is_navigation)``. ``NONE`` for non-controls."""
     if node is None or node.tag == "#root":
         return ControlKind.NONE, False
@@ -812,7 +819,7 @@ def _target_summary(index: _PlanIndex, node: _Node) -> tuple[str, Optional[bool]
     return controls, None
 
 
-def plan_candidates(root: _Node, base_url: Optional[str] = None, max_states: int = 24) -> CapturePlan:
+def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int = 24) -> CapturePlan:
     """Turn a parsed document into an ordered, deduped candidate list.
 
     Deterministic: document order drives discovery, the final order is
@@ -905,7 +912,9 @@ def plan_candidates(root: _Node, base_url: Optional[str] = None, max_states: int
         if _in_navigation(node):
             navigation_excluded += 1
             continue
-        add(node, ControlKind.TAB, f"role tab {index_no + 1}", 10)
+        # D12: one source of truth for priorities - the tab loop uses the same
+        # table as the swept classification.
+        add(node, ControlKind.TAB, f"role tab {index_no + 1}", _PRIORITY_BY_KIND[ControlKind.TAB])
     for index_no, node in enumerate(summaries):
         if _in_navigation(node):
             navigation_excluded += 1

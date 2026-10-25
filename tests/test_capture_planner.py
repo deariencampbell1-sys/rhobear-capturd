@@ -30,7 +30,9 @@ def test_fixture_a_orders_tabs_accordion_modal():
 
     assert plan.reason == "ok"
     assert [c.kind for c in plan.candidates] == ["tab", "tab", "accordion", "modal"]
-    assert [c.priority for c in plan.candidates] == [10, 10, 25, 30]
+    # D12: the tab loop uses the shared _PRIORITY_BY_KIND table, so a role=tab
+    # carries the same priority (12) as a swept tab-like control.
+    assert [c.priority for c in plan.candidates] == [12, 12, 25, 30]
     # Ties broken by label: "Billing" sorts before "Overview".
     assert plan.candidates[0].label == "Billing"
     assert plan.candidates[1].label == "Overview"
@@ -687,8 +689,8 @@ def test_plan_orders_by_priority_then_label():
     plan = plan_candidates(root)
 
     assert [(c.priority, c.label) for c in plan.candidates] == [
-        (10, "Alpha tab"),
-        (10, "Zulu tab"),
+        (12, "Alpha tab"),
+        (12, "Zulu tab"),
         (35, "Open menu"),
         (40, "More details"),
         (50, "Jump"),
