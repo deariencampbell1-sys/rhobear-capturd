@@ -6,12 +6,16 @@ cover the four cases that matter plus the shape tolerances.
 
 from __future__ import annotations
 
+import pytest
+
 from capturd.shots.quality import (
     BASELINE_ONLY,
     CaptureQuality,
+    FAIL,
     NO_CAPTURES,
     NO_SUCCESSFUL_CAPTURE,
     PASS,
+    VERDICTS,
     build_quality_error,
     classify_result,
     is_passing,
@@ -54,7 +58,7 @@ def test_all_baseline_is_baseline_only_and_not_passing() -> None:
     assert quality.baseline_only_files == ["rested.png"]
     assert quality.empty_files == []
     assert quality.reason_codes == [BASELINE_ONLY]
-    assert quality.verdict == "FAIL"
+    assert quality.verdict == FAIL
     assert is_passing(result) is False
     verdict, codes = classify_result(result)
     assert verdict == "FAIL"
@@ -70,7 +74,7 @@ def test_no_successful_capture_is_empty_and_not_passing() -> None:
     assert quality.empty_files == ["dead.png"]
     assert quality.reason_codes == [NO_SUCCESSFUL_CAPTURE]
     assert is_passing(result) is False
-    assert classify_result(result) == ("FAIL", [NO_SUCCESSFUL_CAPTURE])
+    assert classify_result(result) == (FAIL, [NO_SUCCESSFUL_CAPTURE])
 
 
 def test_baseline_plus_one_real_state_passes() -> None:
@@ -166,7 +170,7 @@ def test_non_mapping_capture_entry_is_tolerated() -> None:
     quality = summarize_capture_quality(junk_only)
     assert quality.empty_files == ["junk.png"]
     assert quality.baseline_only_files == []
-    assert quality.verdict == "FAIL"
+    assert quality.verdict == FAIL
     assert is_passing(junk_only) is False
 
     junk_plus_real = {
@@ -210,16 +214,6 @@ def test_empty_results_is_not_a_pass() -> None:
     empty_list = summarize_capture_quality({"results": []})
     assert empty_list.verdict == NO_CAPTURES
     assert is_passing({"results": []}) is False
-
-
-def test_results_key_absent_is_not_a_pass() -> None:
-    # {} — a result with no ``results`` key at all: NO_CAPTURES (D1).
-    quality = summarize_capture_quality({})
-    assert quality.no_captures is True
-    assert quality.baseline_only_files == []
-    assert quality.empty_files == []
-    assert classify_result({}) == (NO_CAPTURES, [NO_CAPTURES])
-    assert is_passing({}) is False
 
 
 def test_results_that_is_not_a_list_is_not_a_pass() -> None:
@@ -286,12 +280,13 @@ def test_string_success_is_not_a_success() -> None:
     assert quality.baseline_only_files == []
     assert quality.reason_codes == [NO_SUCCESSFUL_CAPTURE]
     assert is_passing(result) is False
-    assert classify_result(result) == ("FAIL", [NO_SUCCESSFUL_CAPTURE])
+    assert classify_result(result) == (FAIL, [NO_SUCCESSFUL_CAPTURE])
 
 
-def test_is_passing_reads_the_verdict() -> None:
+def test_is_passing_reads_the_verdict(monkeypatch: pytest.MonkeyPatch) -> None:
     # D8: is_passing consults quality.verdict == PASS — one source of
-    # truth, never a second recomputation of the lists.
+    # truth, never a second recomputation of the lists. Patching goes
+    # through the monkeypatch fixture, so restoration is pytest's job.
     import capturd.shots.quality as quality_module
 
     cases = [
@@ -307,18 +302,18 @@ def test_is_passing_reads_the_verdict() -> None:
 
     # A verdict that does not match the lists still decides the predicate.
     sentinel = CaptureQuality(no_captures=True)
-    monkeypatched = lambda result: sentinel
-    original = quality_module.summarize_capture_quality
-    quality_module.summarize_capture_quality = monkeypatched  # type: ignore[assignment]
-    try:
-        assert sentinel.verdict == NO_CAPTURES
-        assert sentinel.baseline_only_files == [] and sentinel.empty_files == []
-        assert is_passing({}) is False
-        passing = CaptureQuality()
-        quality_module.summarize_capture_quality = lambda result: passing  # type: ignore[assignment]
-        assert is_passing({}) is True
-    finally:
-        quality_module.summarize_capture_quality = original  # type: ignore[assignment]
+    assert sentinel.verdict == NO_CAPTURES
+    assert sentinel.baseline_only_files == [] and sentinel.empty_files == []
+    monkeypatch.setattr(
+        quality_module, "summarize_capture_quality", lambda result: sentinel
+    )
+    assert is_passing({}) is False
+    monkeypatch.setattr(
+        quality_module,
+        "summarize_capture_quality",
+        lambda result: CaptureQuality(),
+    )
+    assert is_passing({}) is True
 
 
 def test_passing_summary_has_no_error_text() -> None:
@@ -364,3 +359,98 @@ def test_capture_without_kind_is_not_baseline() -> None:
     failed = _result(_file("kindless-failed.png", [_capture(None, False)]))
     assert summarize_capture_quality(failed).empty_files == ["kindless-failed.png"]
     assert is_passing(failed) is False
+
+
+def test_non_mapping_results_entries_are_no_captures() -> None:
+    # D4: a results list made only of unreadable entries landed nothing —
+    # NO_CAPTURES, not a silent pass and not empty_files.
+    result = {"results": [42, None]}
+    quality = summarize_capture_quality(result)
+    assert quality.verdict == NO_CAPTURES
+    assert quality.reason_codes == [NO_CAPTURES]
+    assert quality.no_captures is True
+    assert quality.empty_files == []
+    assert quality.baseline_only_files == []
+    assert is_passing(result) is False
+    assert classify_result(result) == (NO_CAPTURES, [NO_CAPTURES])
+    assert build_quality_error(quality).startswith("[NO_CAPTURES] ")
+
+
+def test_non_mapping_manifest_is_empty() -> None:
+    # D5: a manifest that is not a mapping cannot be read — the file is
+    # empty, no crash ({"results": [{"file": "a.png", "manifest": "junk"}]}).
+    result = {"results": [{"file": "a.png", "manifest": "junk"}]}
+    quality = summarize_capture_quality(result)
+    assert quality.empty_files == ["a.png"]
+    assert quality.baseline_only_files == []
+    assert quality.verdict == FAIL
+    assert is_passing(result) is False
+
+
+def test_non_list_captures_is_empty() -> None:
+    # D5: a captures value that is not a list cannot be read — the file is
+    # empty, no crash ({"captures": {"kind": "modal"}}).
+    result = {
+        "results": [
+            {"file": "a.png", "manifest": {"captures": {"kind": "modal"}}}
+        ]
+    }
+    quality = summarize_capture_quality(result)
+    assert quality.empty_files == ["a.png"]
+    assert quality.baseline_only_files == []
+    assert quality.verdict == FAIL
+    assert is_passing(result) is False
+
+
+def test_nameless_entries_are_not_deduplicated() -> None:
+    # D7: an empty file name is never deduplicated — two nameless failing
+    # entries are reported twice, so the count in the error does not
+    # understate the damage.
+    nameless = {
+        "manifest": {"captures": [{"kind": "modal", "success": False}]}
+    }
+    result = {"results": [dict(nameless), dict(nameless)]}
+    quality = summarize_capture_quality(result)
+    assert quality.empty_files == ["", ""]
+    message = build_quality_error(quality)
+    assert (
+        '[NO_SUCCESSFUL_CAPTURE] 2 files produced no successful screenshots: '
+        '"", "".' in message
+    )
+    assert is_passing(result) is False
+
+
+def test_empty_first_ordering_is_stable() -> None:
+    # D8: bucket ordering is first-seen-wins — a file first seen as empty
+    # stays in empty_files even when a later entry would make it
+    # baseline-only.
+    result = _result(
+        _file("dup.png", []),
+        _file("dup.png", [_capture("baseline", True)]),
+    )
+    quality = summarize_capture_quality(result)
+    assert quality.empty_files == ["dup.png"]
+    assert quality.baseline_only_files == []
+    assert quality.reason_codes == [NO_SUCCESSFUL_CAPTURE]
+    assert quality.verdict == FAIL
+    assert is_passing(result) is False
+
+
+def test_verdict_set_is_closed() -> None:
+    # D2: the verdict vocabulary is closed — every verdict a summary can
+    # produce is in VERDICTS, and only PASS is a pass.
+    assert set(VERDICTS) == {PASS, FAIL, NO_CAPTURES}
+    assert NO_CAPTURES != PASS
+    assert FAIL != PASS
+    samples = [
+        {},
+        {"results": []},
+        {"results": [42, None]},
+        _result(_file("rested.png", [_capture("baseline", True)])),
+        _result(_file("dead.png", [])),
+        _result(_file("page.png", [_capture("baseline", True), _capture("modal", True)])),
+    ]
+    for sample in samples:
+        verdict, _codes = classify_result(sample)
+        assert verdict in VERDICTS
+        assert summarize_capture_quality(sample).verdict in VERDICTS
