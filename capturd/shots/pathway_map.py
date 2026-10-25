@@ -63,16 +63,19 @@ def load_pathway_map(
             ("manifest_text", manifest_text),
             ("map_text", map_text),
         )
-        if value
+        if value is not None
     ]
     if len(provided) > 1:
         raise PathwayMapError(
             "provide a manifest or a map, not both — got "
             + ", ".join(sorted(provided))
         )
-    if manifest_text:
+    # ``is not None``, not truthiness: "" is a PROVIDED input — two inputs
+    # must still collide, and a lone empty paste must reach the parser's
+    # empty-input refusal, not the loader's "required" complaint.
+    if manifest_text is not None:
         return parse_manifest_text(manifest_text, source="<pasted manifest>")
-    if map_text:
+    if map_text is not None:
         return parse_verifier_json_text(map_text, source="<pasted map>")
     if manifest_path:
         path = Path(manifest_path)
@@ -97,10 +100,13 @@ def load_pathway_map(
 def parse_manifest_md(manifest_path: Path) -> dict[str, Any]:
     try:
         raw = manifest_path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError):
+        # ``from None``: the chained error would carry the host path in
+        # ``__cause__.filename`` (and UnicodeDecodeError is no OSError), and
+        # the parsed map promises never to leak host paths.
         raise PathwayMapError(
             "manifest_path could not be read as UTF-8 text"
-        ) from exc
+        ) from None
     return parse_manifest_text(raw, source=str(manifest_path))
 
 
@@ -134,10 +140,10 @@ def parse_manifest_text(raw: str, source: str = "<pasted manifest>") -> dict[str
 def parse_verifier_json(map_path: Path) -> dict[str, Any]:
     try:
         text = map_path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError):
         raise PathwayMapError(
             "map_path could not be read as UTF-8 text"
-        ) from exc
+        ) from None
     return parse_verifier_json_text(text, source=str(map_path))
 
 
