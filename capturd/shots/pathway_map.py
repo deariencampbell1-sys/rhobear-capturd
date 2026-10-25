@@ -260,12 +260,14 @@ def _status_from_finding(check_name: str, finding: dict[str, Any]) -> str:
 def _split_sections(raw: str) -> list[dict[str, Any]]:
     """Split into heading sections. Heading matches inside a fenced code
     block (``` or ~~~) are ignored — a ``# comment`` in a fence must not
-    carve out a phantom section and gut the table above it."""
+    carve out a phantom section and gut the table above it. Each section
+    carries ``start``: the 0-based index of its first body line in ``raw``,
+    so a refused table row can name its line number in the input."""
     lines = raw.split("\n")
     sections: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
     open_fence: str | None = None  # the opening marker, e.g. "```" or "~~~"
-    for line in lines:
+    for idx, line in enumerate(lines):
         fence_match = re.match(r"^\s*(`{3,}|~{3,})", line)
         if open_fence is None:
             if fence_match:
@@ -275,7 +277,7 @@ def _split_sections(raw: str) -> list[dict[str, Any]]:
                 if match:
                     if current:
                         sections.append(current)
-                    current = {"heading": match.group(2).strip(), "level": len(match.group(1)), "body": []}
+                    current = {"heading": match.group(2).strip(), "level": len(match.group(1)), "body": [], "start": idx + 1}
                     continue
         else:
             # A closing fence is a bare run of the same marker, at least as
@@ -286,7 +288,7 @@ def _split_sections(raw: str) -> list[dict[str, Any]]:
         if current is not None:
             current["body"].append(line)
         else:
-            current = {"heading": None, "level": 0, "body": [line]}
+            current = {"heading": None, "level": 0, "body": [line], "start": idx}
     if current:
         sections.append(current)
     return sections
@@ -306,32 +308,32 @@ def _extract_summary(sections: list[dict[str, Any]]) -> dict[str, Any]:
     for sec in sections:
         text = "\n".join(sec["body"])
         # IGNORECASE makes the uppercase spellings cover every case variant;
-        # TODO/FIXME mapped to no downstream branch, so they are gone.
+        # TODO/FIXME mapped to no downstream branch, so they are gone. ROUTES
+        # and PLUGINS ride the same cell shape — counts come from summary
+        # cells only, never from prose or a pathway row's text.
         for match in re.finditer(
-            r"\|\s*\*{0,2}(WIRED|MOCKED|UNWIRED|INCOMPLETE|UNCLEAR|TOTAL PATHWAYS)\*{0,2}\s*\|?\s*(\d+)\s*\|",
+            r"\|\s*\*{0,2}(WIRED|MOCKED|UNWIRED|INCOMPLETE|UNCLEAR|TOTAL PATHWAYS|ROUTES|PLUGINS)\*{0,2}\s*\|?\s*(\d+)\s*\|",
             text,
             re.IGNORECASE,
         ):
             key = match.group(1).lower()
             val = int(match.group(2))
-            if "wire" in key and "un" not in key:
+            if "unwire" in key:
+                summary["unwired"] = val
+            elif "wire" in key:
                 summary["wired"] = val
             elif "mock" in key:
                 summary["mocked"] = val
-            elif "unwire" in key:
-                summary["unwired"] = val
             elif "incomplete" in key:
                 summary["incomplete"] = val
             elif "unclear" in key:
                 summary["unclear"] = val
             elif "total" in key:
                 summary["pathwaysTotal"] = val
-        routes_match = re.search(r"(\d+)\s+(?:FastAPI\s+)?routes?", text, re.IGNORECASE)
-        if routes_match and summary["routesCount"] is None:
-            summary["routesCount"] = int(routes_match.group(1))
-        plugins_match = re.search(r"(\d+)\+?\s+(?:bundled\s+)?plugins?", text, re.IGNORECASE)
-        if plugins_match and summary["pluginsCount"] is None:
-            summary["pluginsCount"] = int(plugins_match.group(1))
+            elif "route" in key:
+                summary["routesCount"] = val
+            elif "plugin" in key:
+                summary["pluginsCount"] = val
     return summary
 
 
@@ -342,7 +344,7 @@ def _extract_pathways(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
         heading = str(sec.get("heading") or "")
         if re.search(r"suspicious|risk|anti-?pattern|open questions|plugin", heading, re.I):
             continue
-        for table in _extract_tables("\n".join(sec["body"])):
+        for table in _extract_tables("\n".join(sec["body"]), sec["start"] + 1):
             headers = [h.lower() for h in table["headers"]]
             if "rank" in headers:
                 continue
@@ -494,7 +496,7 @@ def _normalize_status(status: str) -> str:
 def _extract_routes(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
     routes: list[dict[str, Any]] = []
     for sec in sections:
-        for table in _extract_tables("\n".join(sec["body"])):
+        for table in _extract_tables("\n".join(sec["body"]), sec["start"] + 1):
             headers = [h.lower() for h in table["headers"]]
             # Anchored: a `pathway` column in a pathways table must not pull
             # its rows into routes.
@@ -523,7 +525,7 @@ def _extract_plugins(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for sec in sections:
         if not re.search(r"plugin", sec.get("heading") or "", re.I):
             continue
-        for table in _extract_tables("\n".join(sec["body"])):
+        for table in _extract_tables("\n".join(sec["body"]), sec["start"] + 1):
             headers = [h.lower() for h in table["headers"]]
             if not any(re.search(r"^name$|plugin|skill", h) for h in headers):
                 continue
@@ -543,7 +545,7 @@ def _extract_suspicious(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for sec in sections:
         if not re.search(r"suspicious|top\s+\d|risk", sec.get("heading") or "", re.I):
             continue
-        for table in _extract_tables("\n".join(sec["body"])):
+        for table in _extract_tables("\n".join(sec["body"]), sec["start"] + 1):
             headers = [h.lower() for h in table["headers"]]
             if not headers:
                 continue
@@ -562,7 +564,7 @@ def _extract_anti_patterns(sections: list[dict[str, Any]]) -> list[dict[str, Any
     for sec in sections:
         if not re.search(r"anti-?pattern|finding|grep|catch", sec.get("heading") or "", re.I):
             continue
-        for table in _extract_tables("\n".join(sec["body"])):
+        for table in _extract_tables("\n".join(sec["body"]), sec["start"] + 1):
             headers = [h.lower() for h in table["headers"]]
             if not any(re.search(r"category|type|anti-?pattern|pattern", h) for h in headers):
                 continue
@@ -589,7 +591,11 @@ def _extract_anti_patterns(sections: list[dict[str, Any]]) -> list[dict[str, Any
     return patterns
 
 
-def _extract_tables(text: str) -> list[dict[str, list[str]]]:
+def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, list[str]]]:
+    """Extract markdown pipe tables. ``first_line`` is the 1-based line number
+    of ``text``'s first line within the original input, so a refused row can
+    name its line. A row shorter than its header is REFUSED, not dropped — a
+    half-filled map is the failure this module exists to prevent."""
     tables: list[dict[str, list[str]]] = []
     lines = text.split("\n")
     i = 0
@@ -610,8 +616,12 @@ def _extract_tables(text: str) -> list[dict[str, list[str]]]:
         j = i + 2
         while j < len(lines) and "|" in lines[j]:
             row = _split_row(lines[j])
-            if len(row) >= len(cells) - 1:
-                rows.append(row)
+            if len(row) < len(cells):
+                raise PathwayMapError(
+                    f"table row at line {first_line + j} has {len(row)} cells but its "
+                    f"header has {len(cells)} — refusing short row, first cell: '{row[0]}'"
+                )
+            rows.append(row)
             j += 1
         tables.append({"headers": [c.strip() for c in cells], "rows": rows})
         i = j
