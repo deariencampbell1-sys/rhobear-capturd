@@ -302,12 +302,13 @@ def _extract_summary(sections: list[dict[str, Any]]) -> dict[str, Any]:
         "unclear": None,
         "routesCount": None,
         "pluginsCount": None,
-        "raw": None,
     }
     for sec in sections:
         text = "\n".join(sec["body"])
+        # IGNORECASE makes the uppercase spellings cover every case variant;
+        # TODO/FIXME mapped to no downstream branch, so they are gone.
         for match in re.finditer(
-            r"\|\s*\*{0,2}(WIRED|MOCKED|UNWIRED|INCOMPLETE|UNCLEAR|Wired|Mocked|Unwired|Incomplete|Unclear|Total pathways|TODO|FIXME)\*{0,2}\s*\|?\s*(\d+)\s*\|",
+            r"\|\s*\*{0,2}(WIRED|MOCKED|UNWIRED|INCOMPLETE|UNCLEAR|TOTAL PATHWAYS)\*{0,2}\s*\|?\s*(\d+)\s*\|",
             text,
             re.IGNORECASE,
         ):
@@ -436,13 +437,16 @@ def _extract_routes(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for sec in sections:
         for table in _extract_tables("\n".join(sec["body"])):
             headers = [h.lower() for h in table["headers"]]
-            if not any(re.search(r"path|route|endpoint", h) for h in headers):
+            # Anchored: a `pathway` column in a pathways table must not pull
+            # its rows into routes.
+            if not any(re.search(r"^path$|^route$|^endpoint$", h) for h in headers):
                 continue
             for row in table["rows"]:
                 row_map: dict[str, str] = {}
                 for i, header in enumerate(headers):
                     row_map[header] = row[i] if i < len(row) else ""
-                method = (row_map.get("method") or row_map.get("http method") or "GET").upper().strip()
+                # "" when the manifest gives no verb — never invent GET.
+                method = (row_map.get("method") or row_map.get("http method") or "").upper().strip()
                 path = (row_map.get("path") or row_map.get("route") or row_map.get("endpoint") or "").strip().strip("`")
                 if not path:
                     continue
