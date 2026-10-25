@@ -32,6 +32,11 @@ Tolerances (each documented here, per the lane rule):
   successful capture;
 - an entry without a usable ``file`` string is still counted, recorded as
   ``""`` rather than given an invented name.
+
+Verdicts: ``PASS`` when meaningful states landed, ``FAIL`` when files
+failed, ``NO_CAPTURES`` when nothing landed at all. An empty or absent
+``results`` collection is ``NO_CAPTURES`` — a deliberate divergence from
+upstream ``isPassingResult``, which has the same hole and passes on it.
 """
 
 from __future__ import annotations
@@ -44,6 +49,7 @@ __all__ = [
     "BASELINE_ONLY",
     "BASELINE_KIND",
     "FAIL",
+    "NO_CAPTURES",
     "NO_SUCCESSFUL_CAPTURE",
     "PASS",
     "CaptureQuality",
@@ -58,6 +64,8 @@ __all__ = [
 PASS = "PASS"
 BASELINE_ONLY = "BASELINE_ONLY"
 NO_SUCCESSFUL_CAPTURE = "NO_SUCCESSFUL_CAPTURE"
+# Nothing landed at all: empty or unreadable results collection (D1).
+NO_CAPTURES = "NO_CAPTURES"
 
 # Verdict values returned by classify_result / CaptureQuality.verdict.
 FAIL = "FAIL"
@@ -72,15 +80,19 @@ class CaptureQuality:
 
     ``baseline_only_files``: files whose successful captures are all
     rested-baseline screenshots. ``empty_files``: files with no successful
-    capture at all. A run passes only when both lists are empty.
+    capture at all. ``no_captures``: the run landed no readable files at
+    all. A run passes only when none of the three is populated.
     """
 
     baseline_only_files: list[str] = field(default_factory=list)
     empty_files: list[str] = field(default_factory=list)
+    no_captures: bool = False
 
     @property
     def reason_codes(self) -> list[str]:
         """Named reason codes for this quality summary (fixed spellings)."""
+        if self.no_captures:
+            return [NO_CAPTURES]
         codes: list[str] = []
         if self.baseline_only_files:
             codes.append(BASELINE_ONLY)
@@ -92,7 +104,10 @@ class CaptureQuality:
 
     @property
     def verdict(self) -> str:
-        """``PASS`` only when neither list is populated, else ``FAIL``."""
+        """``NO_CAPTURES`` when nothing landed, ``PASS`` only when no file
+        is baseline-only and no file is empty, else ``FAIL``."""
+        if self.no_captures:
+            return NO_CAPTURES
         if not self.baseline_only_files and not self.empty_files:
             return PASS
         return FAIL
@@ -103,21 +118,30 @@ def _file_name(item: Mapping[str, Any]) -> str:
     return name if isinstance(name, str) else ""
 
 
-def summarize_capture_quality(result: Mapping[str, Any]) -> CaptureQuality:
+def summarize_capture_quality(result: Any) -> CaptureQuality:
     """Split a capture result's files into baseline-only and empty lists.
 
     A file whose manifest has no successful capture is empty; a file whose
-    successful captures are all ``kind == "baseline"`` is baseline-only.
-    Read-only: nothing here mutates ``result`` or the filesystem.
+    successful captures are all ``kind == "baseline"`` is baseline-only;
+    a result whose ``results`` is absent, empty or not a list reports
+    ``no_captures`` (``NO_CAPTURES``). Read-only: nothing here mutates
+    ``result`` or the filesystem.
     """
+    if not isinstance(result, Mapping):
+        return CaptureQuality(no_captures=True)
+    results = result.get("results")
+    if not isinstance(results, list):
+        # Absent, empty-shaped or truthy non-list (string, dict, number):
+        # no captures, never a silent pass (D1/D3).
+        return CaptureQuality(no_captures=True)
+
     baseline_only: list[str] = []
     empty: list[str] = []
-    if not isinstance(result, Mapping):
-        return CaptureQuality(baseline_only_files=baseline_only, empty_files=empty)
-
-    for item in result.get("results") or []:
+    read_any = False
+    for item in results:
         if not isinstance(item, Mapping):
             continue
+        read_any = True
         manifest = item.get("manifest")
         captures: list[Any] = []
         if isinstance(manifest, Mapping) and isinstance(manifest.get("captures"), list):
@@ -137,10 +161,13 @@ def summarize_capture_quality(result: Mapping[str, Any]) -> CaptureQuality:
         elif not useful:
             baseline_only.append(_file_name(item))
 
+    if not read_any:
+        # A results list of unreadable entries means nothing landed.
+        return CaptureQuality(no_captures=True)
     return CaptureQuality(baseline_only_files=baseline_only, empty_files=empty)
 
 
-def classify_result(result: Mapping[str, Any]) -> tuple[str, list[str]]:
+def classify_result(result: Any) -> tuple[str, list[str]]:
     """Map a capture result to ``(verdict, reason_codes)`` in one step."""
     quality = summarize_capture_quality(result)
     return quality.verdict, quality.reason_codes
@@ -165,7 +192,7 @@ def build_quality_error(quality: CaptureQuality) -> str:
     return " ".join(parts)
 
 
-def is_passing(result: Mapping[str, Any]) -> bool:
-    """True only when no file is baseline-only and no file is empty."""
+def is_passing(result: Any) -> bool:
+    """True only when the verdict is ``PASS`` — one source of truth (D8)."""
     quality = summarize_capture_quality(result)
-    return not quality.baseline_only_files and not quality.empty_files
+    return quality.verdict == PASS
