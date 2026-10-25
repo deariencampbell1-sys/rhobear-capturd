@@ -121,11 +121,22 @@ def test_max_states_truncates_deterministically():
 
 
 def test_max_states_zero_is_a_failed_plan():
+    # Deliberate update (review round 1, D4): a cap that truncates the plan to
+    # zero is reason="truncated" — the operator must see that their max_states
+    # did this, not that the document had nothing to capture.
     root = _load("planner_tabs_accordion_modal.html")
     plan = plan_candidates(root, max_states=0)
 
     assert plan.candidates == []
-    assert plan.reason == "no-candidates"
+    assert plan.reason == "truncated"
+    assert plan.limits["truncated"] is True
+    assert plan.limits["max_states"] == 0
+    assert plan.limits["discovered"] >= 1
+
+    # A negative cap behaves like zero.
+    negative = plan_candidates(root, max_states=-3)
+    assert negative.reason == "truncated"
+    assert negative.limits["max_states"] == 0
 
 
 def test_plan_is_byte_deterministic():
@@ -245,6 +256,32 @@ def test_disabled_class_is_skipped():
     )
     plan = plan_candidates(root)
     assert [c.label for c in plan.candidates] == ["Live"]
+
+
+# ---------------------------------------------------------------------------
+# The action-word denylist: label text only, and every drop is counted.
+# ---------------------------------------------------------------------------
+
+
+def test_action_word_denylist_matches_label_only_and_counts_drops():
+    # Deliberate scope (review round 1, D5): the denylist matches the control's
+    # label text only - not role, not class text, not href - keeps the same
+    # verb list, and every drop is counted for the operator. <a href="/submit">
+    # with a neutral label is kept; <button>Save</button> is still dropped
+    # (upstream parity) but now visibly counted.
+    root = parse_html(
+        "<main>"
+        "<a href='/submit'>Docs</a>"
+        "<button>Save</button>"
+        "<button>Cancel changes</button>"
+        "<a class='submit-button' href='/more'>Read more</a>"
+        "</main>"
+    )
+    plan = plan_candidates(root)
+
+    assert [c.label for c in plan.candidates] == ["Docs", "Read more"]
+    assert plan.limits["dropped_action_labels"] == 2
+    assert plan.reason == "ok"
 
 
 # ---------------------------------------------------------------------------
