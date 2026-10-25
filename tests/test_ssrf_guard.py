@@ -18,6 +18,15 @@ from capturd._net import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _clean_fixture_registry():
+    """Never leak a registered fixture origin across tests: cleanup runs even
+    when an assertion fails mid-test (no reliance on a finally surviving)."""
+    clear_test_fixture_origin()
+    yield
+    clear_test_fixture_origin()
+
+
 # Every address here MUST be treated as private/internal (BLOCKED). Includes
 # the headline cloud-metadata bypass (IPv6-mapped IPv4) that the old
 # hand-rolled guard let through.
@@ -96,13 +105,12 @@ def test_production_url_guard_untouched_by_fixture_registration():
     from capturd.mcp.server import _reject_private_url
 
     register_test_fixture_origin("http://127.0.0.1:8123")
-    try:
-        with pytest.raises(ValueError):
-            _reject_private_url("http://127.0.0.1:8123/signup-flow.html")
-        with pytest.raises(ValueError):
-            _reject_private_url("http://127.0.0.1/signup-flow.html")
-    finally:
-        clear_test_fixture_origin()
+    # cleanup is guaranteed by the autouse _clean_fixture_registry fixture;
+    # no finally needed (and none survives an assertion failure anyway).
+    with pytest.raises(ValueError):
+        _reject_private_url("http://127.0.0.1:8123/signup-flow.html")
+    with pytest.raises(ValueError):
+        _reject_private_url("http://127.0.0.1/signup-flow.html")
 
 
 def test_mcp_server_delegates_to_shared_guard():
