@@ -1,0 +1,35 @@
+{
+  "version": "0.1.0",
+  "repo": "sample",
+  "manifest_found": true,
+  "manifest_summary": { "pathwaysTotal": 2 },
+  "summary": { "findings_total": 2 },
+  "checks": {
+    "ui-route-diff": {
+      "name": "ui-route-diff",
+      "passed": false,
+      "findings": [
+        {
+          "id": "route-not-found-_api_state",
+          "check": "ui-route-diff",
+          "severity": "high",
+          "file": "hub/ui_kits/app/BoardView.jsx",
+          "line": 188,
+          "code": "fetch(url + \"/api/state\")",
+          "path": "/api/state",
+          "message": "UI calls path \"/api/state\" but no matching backend route exists."
+        },
+        {
+          "id": "route-not-found-_api_control",
+          "check": "ui-route-diff",
+          "severity": "high",
+          "file": "hub/ui_kits/app/BoardView.jsx",
+          "line": 216,
+          "code": "post(\"/api/control\", { [key]: val })",
+          "path": "/api/control",
+          "message": "UI calls path \"/api/control\" but no matching backend route exists."
+        }
+      ]
+    }
+  }
+}
