@@ -219,6 +219,44 @@ def test_prose_with_pipe_after_a_table_is_not_a_row():
     assert [p["id"] for p in parsed["pathways"]] == ["p1"]
 
 
+def test_duplicate_pathway_id_is_refused():
+    # D3: a repeated id is REFUSED, not silently dropped — a map that says
+    # the same pathway twice is ambiguous and must not half-parse.
+    text = "\n".join([
+        "# Pathway Manifest — duplicate id",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| dup-pathway | WIRED |",
+        "| dup-pathway | MOCKED |",
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(text)
+    assert "dup-pathway" in str(excinfo.value)
+
+
+def test_overlong_pathway_id_is_refused():
+    # D3: an id longer than 200 characters is REFUSED, naming the length and
+    # the first 40 characters — not silently dropped.
+    long_id = "long-" + "x" * 196  # 201 characters
+    text = "\n".join([
+        "# Pathway Manifest — overlong id",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        f"| {long_id} | WIRED |",
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(text)
+    message = str(excinfo.value)
+    assert "201" in message
+    assert long_id[:40] in message
+
+
 def test_verifier_with_no_checks_is_refused():
     # Zero pathways AND zero routes is refused, exactly like the manifest
     # flavour — an empty verifier map must not parse to a success.

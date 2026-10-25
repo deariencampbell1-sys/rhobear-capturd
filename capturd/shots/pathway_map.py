@@ -428,10 +428,21 @@ def _extract_pathways(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     or row_map.get("file:line")
                     or f"{row_map.get('file', '')}:{row_map.get('line', '')}".strip(":")
                 ).strip()
-                if not pid or pid in {"id", "slug", "element"} or len(pid) > 200:
+                # The placeholder-header skip stays a skip — `id`/`slug`/
+                # `element` is a header row, not a pathway. But a real id that
+                # is over-long or already seen is REFUSED, not dropped: a
+                # half-filled map is the failure this module exists to prevent.
+                if not pid or pid in {"id", "slug", "element"}:
                     continue
+                if len(pid) > 200:
+                    raise PathwayMapError(
+                        f"pathway id is {len(pid)} characters (max 200), "
+                        f"first 40: '{pid[:40]}' — refusing"
+                    )
                 if pid in seen_ids:
-                    continue
+                    raise PathwayMapError(
+                        f"duplicate pathway id '{pid}' — refusing"
+                    )
                 seen_ids.add(pid)
                 pathways.append({
                     "id": pid,
