@@ -38,6 +38,7 @@ import capturd._net as net
 from capturd._net import (
     FixtureOriginError,
     clear_test_fixture_origin,
+    enable_test_fixture_allowance,
     guard_with_test_fixture_allowance,
     is_fixture_origin,
     registered_test_fixture_origin,
@@ -49,9 +50,50 @@ REPO = Path(__file__).resolve().parents[1]
 
 @pytest.fixture(autouse=True)
 def _clean_fixture_registry():
+    clear_test_fixture_origin()   # also DISARMS the seam (production default)
+    enable_test_fixture_allowance()  # tests opt in by default; the explicit-
+    yield                         # enable test re-clears to reach the disarmed state
     clear_test_fixture_origin()
-    yield
+
+
+# ---------------------------------------------------------------------------
+# The seam is DISARMED until an explicit in-process call enables it. This is
+# the runtime half of the guard: the text scan in test_import_path_hygiene.py
+# is a tripwire on committed SOURCE; this gate is what actually keeps the
+# bypass inert in any process that did not deliberately arm it.
+# ---------------------------------------------------------------------------
+
+def test_registration_requires_explicit_enable():
+    """Edge case 4: with the seam disarmed (the default in every fresh
+    process), ``register_test_fixture_origin`` raises and ``is_fixture_origin``
+    stays False — including for a previously-registered origin after a reset.
+    Only an explicit ``enable_test_fixture_allowance()`` call arms it; there is
+    no environment knob."""
+    clear_test_fixture_origin()  # production default: disarmed
+    with pytest.raises(FixtureOriginError):
+        register_test_fixture_origin("http://127.0.0.1:8123")
+    assert registered_test_fixture_origin() is None
+    assert is_fixture_origin("http://127.0.0.1:8123/signup-flow.html") is False
+    # even a loopback IP literal needs the explicit arm:
+    enable_test_fixture_allowance()
+    register_test_fixture_origin("http://127.0.0.1:8123")
+    assert is_fixture_origin("http://127.0.0.1:8123/signup-flow.html") is True
+    # a reset disarms again — the previously-registered origin stops matching:
     clear_test_fixture_origin()
+    assert is_fixture_origin("http://127.0.0.1:8123/signup-flow.html") is False
+    with pytest.raises(FixtureOriginError):
+        register_test_fixture_origin("http://127.0.0.1:8123")
+
+
+def test_seam_scan_docstring_states_its_honest_limit():
+    """Edge case 5: no test can prove the negative (a dynamically-built getattr
+    or importlib name can dodge a text scan), so the scan's own documentation
+    must say in words that it is a tripwire, not a proof."""
+    hygiene = (REPO / "tests" / "test_import_path_hygiene.py").read_text(
+        encoding="utf-8")
+    assert "tripwire" in hygiene, (
+        "the seam text-scan docstring must state its honest limit: it catches "
+        "the literal-name leak and is a tripwire, not a proof")
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +295,7 @@ def test_e2e_wrapper_uses_the_canonical_seam():
     from _e2e_fixture_wrapper import SERVER_FIXTURE_WRAPPER
 
     compile(textwrap.dedent(SERVER_FIXTURE_WRAPPER), "<server-fixture-wrapper>", "exec")
+    assert "enable_test_fixture_allowance" in SERVER_FIXTURE_WRAPPER
     assert "register_test_fixture_origin" in SERVER_FIXTURE_WRAPPER
     assert "guard_with_test_fixture_allowance" in SERVER_FIXTURE_WRAPPER
     assert "capturd.mcp.server" in SERVER_FIXTURE_WRAPPER

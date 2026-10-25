@@ -13,6 +13,7 @@ import pytest
 
 from capturd._net import (
     clear_test_fixture_origin,
+    enable_test_fixture_allowance,
     is_private_ip,
     register_test_fixture_origin,
 )
@@ -21,8 +22,12 @@ from capturd._net import (
 @pytest.fixture(autouse=True)
 def _clean_fixture_registry():
     """Never leak a registered fixture origin across tests: cleanup runs even
-    when an assertion fails mid-test (no reliance on a finally surviving)."""
+    when an assertion fails mid-test (no reliance on a finally surviving).
+    Also disarms on entry (clear) then arms, so tests that exercise the
+    allowance behave like the explicitly-launched E2E wrapper process; the
+    final clear returns the module to the production default (disarmed)."""
     clear_test_fixture_origin()
+    enable_test_fixture_allowance()
     yield
     clear_test_fixture_origin()
 
@@ -97,13 +102,14 @@ def test_production_url_guard_rejects_internal_literals(url):
 def test_production_url_guard_untouched_by_fixture_registration():
     """The test-fixture seam must be opt-in per process, never global.
 
-    Registering a loopback fixture origin (as the live-drive E2E wrapper does
-    in its own subprocess) must NOT relax the production
+    Arming + registering a loopback fixture origin (exactly what the live-drive
+    E2E wrapper does in its own subprocess) must NOT relax the production
     ``capturd.mcp.server._reject_private_url`` — the wrapped guard only exists
     in the explicitly-launched test server process.
     """
     from capturd.mcp.server import _reject_private_url
 
+    enable_test_fixture_allowance()
     register_test_fixture_origin("http://127.0.0.1:8123")
     # cleanup is guaranteed by the autouse _clean_fixture_registry fixture;
     # no finally needed (and none survives an assertion failure anyway).

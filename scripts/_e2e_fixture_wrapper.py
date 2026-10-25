@@ -28,6 +28,7 @@ import sys
 from capturd import _net
 import capturd.mcp.server as _srv
 
+_net.enable_test_fixture_allowance()  # the seam is inert by default: arm it in THIS test process
 _net.register_test_fixture_origin(sys.argv[1])
 _srv._reject_private_url = _net.guard_with_test_fixture_allowance(_srv._reject_private_url)
 
