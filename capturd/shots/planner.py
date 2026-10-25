@@ -373,28 +373,97 @@ def _match_chain(node: _Node, selector: str) -> bool:
 
 def _count_matches(root: _Node, selector: str) -> int:
     """queryCount: 0 for invalid/empty selectors, else number of matching nodes."""
-    if not selector:
-        return 0
-    return sum(1 for node in iter_elements(root) if _match_chain(node, selector))
+    return _PlanIndex(root).count_matches(selector)
 
 
-def _is_unique(root: _Node, selector: str) -> bool:
-    return _count_matches(root, selector) == 1
+#: A single-part ``tag[attr="value"]`` selector, for the index fast path.
+_ATTR_SELECTOR_RE = re.compile(r'^([a-zA-Z][a-zA-Z0-9-]*)\[([\w-]+)="(.*)"\]$', re.DOTALL)
 
 
-def _structural_path(node: _Node) -> str:
+class _PlanIndex:
+    """One-pass id/attribute index over a document, built once per plan (D7).
+
+    Counting a candidate's selector through the index keeps planning roughly
+    linear in the document size instead of rescanning the whole tree per
+    candidate, and counts are memoised per selector because the tree is
+    immutable during a plan. Structural chains still verify by scanning, but
+    only for candidates that have no id or stable attribute.
+    """
+
+    def __init__(self, root: _Node) -> None:
+        self.root = root
+        self.nodes: list[_Node] = list(iter_elements(root))
+        self.by_id: dict[str, list[_Node]] = {}
+        self.by_attr: dict[tuple[str, str], list[_Node]] = {}
+        for node in self.nodes:
+            node_id = node.attrs.get("id")
+            if node_id:
+                self.by_id.setdefault(node_id, []).append(node)
+            for name, value in node.attrs.items():
+                if value:
+                    self.by_attr.setdefault((name, value), []).append(node)
+        self._counts: dict[str, int] = {}
+
+    def count_matches(self, selector: str) -> int:
+        """queryCount: 0 for invalid/empty selectors, else number of matches."""
+        if not selector:
+            return 0
+        cached = self._counts.get(selector)
+        if cached is None:
+            cached = self._count_uncached(selector)
+            self._counts[selector] = cached
+        return cached
+
+    def _count_uncached(self, selector: str) -> int:
+        parts = _split_chain(selector)
+        if len(parts) == 1:
+            part = parts[0]
+            if part.startswith("#"):
+                ident, remainder = _scan_ident(part[1:])
+                if remainder == "" and ident:
+                    return len(self.by_id.get(_css_unescape(ident), ()))
+            else:
+                attr_match = _ATTR_SELECTOR_RE.fullmatch(part)
+                if attr_match is not None:
+                    tag, name, raw_value = attr_match.groups()
+                    nodes = self.by_attr.get((name, _css_unescape(raw_value)), ())
+                    return sum(1 for node in nodes if node.tag == tag)
+        return sum(1 for node in self.nodes if _match_chain(node, selector))
+
+    def unique_selector(self, node: _Node) -> tuple[Optional[str], str]:
+        """Best selector for ``node``: ``#id``, then a stable attribute, then
+        structure — the same strategies and verification as the module-level
+        :func:`unique_selector`, but counting through this index."""
+        node_id = node.attrs.get("id")
+        if node_id:
+            selector = f"#{_escape_css(node_id)}"
+            if self.count_matches(selector) == 1:
+                return selector, "id"
+        for attr in STABLE_SELECTOR_ATTRIBUTES:
+            value = node.attrs.get(attr)
+            if not value:
+                continue
+            selector = f'{node.tag}[{attr}="{value.replace(chr(34), chr(92) + chr(34))}"]'
+            if self.count_matches(selector) == 1:
+                return selector, "attribute"
+        path = _structural_path(node, self)
+        if path:
+            return path, "structural"
+        return None, "structural"
+
+
+def _structural_path(node: _Node, index: _PlanIndex) -> str:
     """Positional path. A unique id anywhere on the chain anchors and shortens
     it; a *duplicate* id is omitted in favour of ``:nth-of-type`` so the path
     can still disambiguate (rule: never emit an ambiguous selector).
     ``:nth-of-type`` applies at every level including children of the synthetic
     ``#root`` — brief 01d feeds fragments with several top-level controls."""
-    root = _tree_root(node)
     parts: list[str] = []
     current: Optional[_Node] = node
     while current is not None and current.tag not in ("#root", "html"):
         part = current.tag
         node_id = current.attrs.get("id")
-        if node_id and sum(1 for n in iter_elements(root) if n.attrs.get("id") == node_id) == 1:
+        if node_id and len(index.by_id.get(node_id, ())) == 1:
             parts.insert(0, f"{part}#{_escape_css(node_id)}")
             break
         parent = current.parent
@@ -412,25 +481,9 @@ def unique_selector(node: _Node) -> tuple[Optional[str], str]:
 
     Returns ``(selector, strategy)`` with strategy one of ``id`` / ``attribute`` /
     ``structural``. The ``structural`` fallback is not guaranteed unique on its
-    own — callers verify with :func:`_is_unique` and drop ambiguous candidates.
+    own — callers verify with :func:`_count_matches` and drop ambiguous candidates.
     """
-    root = _tree_root(node)
-    node_id = node.attrs.get("id")
-    if node_id:
-        selector = f"#{_escape_css(node_id)}"
-        if _count_matches(root, selector) == 1:
-            return selector, "id"
-    for attr in STABLE_SELECTOR_ATTRIBUTES:
-        value = node.attrs.get(attr)
-        if not value:
-            continue
-        selector = f'{node.tag}[{attr}="{value.replace(chr(34), chr(92) + chr(34))}"]'
-        if _count_matches(root, selector) == 1:
-            return selector, "attribute"
-    path = _structural_path(node)
-    if path:
-        return path, "structural"
-    return None, "structural"
+    return _PlanIndex(_tree_root(node)).unique_selector(node)
 
 
 # ---------------------------------------------------------------------------
@@ -736,7 +789,7 @@ _PRIORITY_BY_KIND = {
 }
 
 
-def _target_summary(root: _Node, node: _Node) -> tuple[str, Optional[bool]]:
+def _target_summary(index: _PlanIndex, node: _Node) -> tuple[str, Optional[bool]]:
     controls = next(
         (
             value
@@ -753,10 +806,9 @@ def _target_summary(root: _Node, node: _Node) -> tuple[str, Optional[bool]]:
     )
     if not controls or not controls.startswith("#"):
         return controls, None
-    wanted = controls[1:]
-    for candidate in iter_elements(root):
-        if candidate.attrs.get("id") == wanted:
-            return controls, _is_visible(candidate)
+    matches = index.by_id.get(controls[1:])
+    if matches:
+        return controls, _is_visible(matches[0])
     return controls, None
 
 
@@ -774,6 +826,10 @@ def plan_candidates(root: _Node, base_url: Optional[str] = None, max_states: int
     size, including zero) and ``"too-large"`` (the document exceeds the walk
     ceilings: more than 10 000 elements or deeper than 256 levels). There is no
     live-versus-rested reason code here; that distinction is brief 01d's.
+
+    ``limits["discovered"]`` counts validated candidates; when the cap
+    truncates the plan, validation short-circuits at ``cap + 1`` (D7) so the
+    work is bounded by the cap while the ``truncated`` flag stays exact.
     """
     cap = max(0, max_states)
     limits: dict = {
@@ -790,7 +846,8 @@ def plan_candidates(root: _Node, base_url: Optional[str] = None, max_states: int
         limits["too_large"] = True
         return CapturePlan(candidates=[], reason="too-large", limits=limits)
 
-    nodes = list(iter_elements(root))
+    index = _PlanIndex(root)
+    nodes = index.nodes
     tabs = [n for n in nodes if n.attrs.get("role") == "tab"]
     summaries = [n for n in nodes if n.tag == "summary"]
     swept = [n for n in nodes if n.attrs.get("role") != "tab" and n.tag != "summary" and _in_control_sweep(n)]
@@ -801,19 +858,30 @@ def plan_candidates(root: _Node, base_url: Optional[str] = None, max_states: int
     navigation_excluded = 0
     dropped_action_labels = 0
 
-    def add(node: _Node, kind: ControlKind, reason: str, priority: int) -> None:
-        nonlocal dropped_ambiguous, navigation_excluded
+    def add(node: _Node, kind: ControlKind, reason: str, priority: int) -> bool:
+        """Validate and append one candidate.
+
+        Returns False once the plan holds more than ``cap`` candidates (D7):
+        the caller's remaining iterations then skip validation cheaply, while
+        the navigation and action-label counters keep running to completion —
+        the operator's counts stay exact while the work stays bounded. The cap
+        is overshot by one so the ``truncated`` flag stays exact: a document
+        with exactly ``cap`` valid candidates is not reported as truncated.
+        """
+        nonlocal dropped_ambiguous
+        if len(candidates) > cap:
+            return False
         if not _is_visible(node) or _is_disabled(node):
-            return
-        selector, strategy = unique_selector(node)
-        if selector is None or not _is_unique(root, selector):
+            return True
+        selector, strategy = index.unique_selector(node)
+        if selector is None or index.count_matches(selector) != 1:
             dropped_ambiguous += 1
-            return
+            return True
         label = _text_of(node) or node.attrs.get("aria-controls") or node.attrs.get("href") or kind.value
-        target, target_visible = _target_summary(root, node)
+        target, target_visible = _target_summary(index, node)
         key = f"{kind.value}|{selector}"
         if key in seen:
-            return
+            return True
         seen.add(key)
         candidates.append(
             Candidate(
@@ -829,6 +897,7 @@ def plan_candidates(root: _Node, base_url: Optional[str] = None, max_states: int
                 target_visible=target_visible,
             )
         )
+        return True
 
     for index_no, node in enumerate(tabs):
         # Uniform navigation exclusion (D2): every discovery loop skips nodes
