@@ -16,7 +16,6 @@ RUN pip install --no-cache-dir "/srv/engine[voice]" \
 
 # 2) this service
 COPY app /srv/app
-COPY web /srv/web
 COPY render_worker.py rig /srv/
 COPY requirements.txt /srv/
 RUN pip install --no-cache-dir -r requirements.txt
