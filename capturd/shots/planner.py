@@ -274,12 +274,16 @@ def _is_unique(root: _Node, selector: str) -> bool:
 
 
 def _structural_path(node: _Node) -> str:
+    """Positional path. A unique id anywhere on the chain anchors and shortens
+    it; a *duplicate* id is omitted in favour of ``:nth-of-type`` so the path
+    can still disambiguate (rule: never emit an ambiguous selector)."""
+    root = _tree_root(node)
     parts: list[str] = []
     current: Optional[_Node] = node
     while current is not None and current.tag not in ("#root", "html"):
         part = current.tag
         node_id = current.attrs.get("id")
-        if node_id:
+        if node_id and sum(1 for n in iter_elements(root) if n.attrs.get("id") == node_id) == 1:
             parts.insert(0, f"{part}#{_escape_css(node_id)}")
             break
         parent = current.parent
@@ -397,11 +401,13 @@ class ControlKind(enum.Enum):
 
 
 #: Containers whose links are navigation, not interaction states (planner.js
-#: ``element.closest("nav, aside, header, [role='navigation'], .sidebar, ...")``).
+#: ``element.closest("nav, aside, header, [role='navigation'], .sidebar, ...")``;
+#: brief 01b adds ``footer`` — site-footer links are navigation too).
 NAVIGATION_SELECTOR_HINTS: tuple[str, ...] = (
     "nav",
     "aside",
     "header",
+    "footer",
     "[role='navigation']",
     ".sidebar",
     ".side-bar",
