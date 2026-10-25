@@ -459,6 +459,27 @@ def test_reason_taxonomy_is_exactly_four_codes():
     }
 
 
+def test_large_document_planning_is_bounded_by_max_states():
+    # D7: the id/attribute index is built once, and add() short-circuits once
+    # the plan holds one candidate more than the cap (so the truncated flag
+    # stays exact). Discovery stops at cap + 1 validated candidates instead of
+    # verifying all 2 000 links.
+    links = "".join(f'<a href="/p/{index}">Item {index}</a>' for index in range(2_000))
+    root = parse_html(f"<main>{links}</main>")
+    plan = plan_candidates(root, max_states=5)
+
+    assert len(plan.candidates) == 5
+    assert plan.reason == "ok"
+    assert plan.limits["truncated"] is True
+    assert plan.limits["discovered"] == 6
+
+    # Exactly cap candidates in the document is NOT a truncation.
+    exact = plan_candidates(parse_html("<main><button>One</button><button>Two</button></main>"), max_states=2)
+    assert exact.reason == "ok"
+    assert exact.limits["truncated"] is False
+    assert exact.limits["discovered"] == 2
+
+
 # ---------------------------------------------------------------------------
 # One test per control kind (brief 01b), all against inline HTML strings.
 # ---------------------------------------------------------------------------
