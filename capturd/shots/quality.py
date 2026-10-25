@@ -173,21 +173,31 @@ def classify_result(result: Any) -> tuple[str, list[str]]:
     return quality.verdict, quality.reason_codes
 
 
+def _named(files: list[str]) -> str:
+    """Render file names for the error text, ``""`` fallback included."""
+    return ", ".join(f'"{name}"' for name in files)
+
+
 def build_quality_error(quality: CaptureQuality) -> str:
-    """Human sentence naming the counts, then stating the run is not a pass."""
+    """One sentence per failing reason, prefixed with its own reason code
+    (D4), naming the files behind it; never a bare "failed"."""
     parts: list[str] = []
     baseline_count = len(quality.baseline_only_files)
     if baseline_count:
         plural = "" if baseline_count == 1 else "s"
         parts.append(
-            f"{baseline_count} file{plural} only produced a baseline screenshot."
+            f"[{BASELINE_ONLY}] {baseline_count} file{plural} only produced a "
+            f"baseline screenshot: {_named(quality.baseline_only_files)}."
         )
     empty_count = len(quality.empty_files)
     if empty_count:
         plural = "" if empty_count == 1 else "s"
         parts.append(
-            f"{empty_count} file{plural} produced no successful screenshots."
+            f"[{NO_SUCCESSFUL_CAPTURE}] {empty_count} file{plural} produced no "
+            f"successful screenshots: {_named(quality.empty_files)}."
         )
+    if quality.no_captures:
+        parts.append(f"[{NO_CAPTURES}] The run produced no capture files at all.")
     parts.append("Captur'd did not capture meaningful UI states, so this run is not a pass.")
     return " ".join(parts)
 
