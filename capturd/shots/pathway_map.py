@@ -459,22 +459,36 @@ def _status_from_unwired_column(cell: str) -> str:
     return "UNCLEAR"
 
 
+_CANONICAL_STATUSES = ("WIRED", "MOCKED", "UNWIRED", "INCOMPLETE", "UNCLEAR")
+
+
 def _normalize_status(status: str) -> str:
-    """One spelling per status: everything funnels through here."""
-    text = (status or "").upper()
-    if "WIRED" in text and "UN" not in text:
-        return "WIRED"
-    if "MOCK" in text:
-        return "MOCKED"
-    if "UNWIRE" in text or "UNWIRED" in text:
-        return "UNWIRED"
-    if "INCOMPLETE" in text:
+    """One spelling per status, matched on whole canonical tokens — never a
+    substring scan. Anything carrying NOT, PARTIAL, a hyphen or a parenthesis
+    (or any word beyond the canonical token) is UNCLEAR — INCOMPLETE for
+    PARTIAL — and never WIRED; text outside the closed label set is UNCLEAR
+    with the raw cell kept in rawStatus, and UNKNOWN is only for a missing
+    cell."""
+    text = " ".join(str(status or "").split())
+    if not text:
+        return "UNKNOWN"
+    upper = text.upper()
+    if "PARTIAL" in upper:
         return "INCOMPLETE"
-    if "UNCLEAR" in text:
+    if re.search(r"\bNOT\b", upper) or any(ch in upper for ch in "-()"):
         return "UNCLEAR"
-    if text in {"YES", "TRUE", "⚠ YES", "⚠YES"} or "⚠" in text:
+    # Whole tokens only: a bare ⚠ rides along (it means unwired on its own);
+    # the neutral word FLAG — the `unwired flag` column's own name, echoed
+    # back as a status — is dropped.
+    words = [w for w in upper.replace("⚠", " ⚠ ").split() if w != "FLAG"]
+    letters = [w for w in words if re.search(r"[A-Z]", w)]
+    if len(set(letters)) == 1 and letters[0] in _CANONICAL_STATUSES:
+        return letters[0]
+    if letters and set(letters) <= {"YES", "TRUE"}:
         return "UNWIRED"
-    return text or "UNKNOWN"
+    if not letters and "⚠" in upper:
+        return "UNWIRED"
+    return "UNCLEAR"
 
 
 def _extract_routes(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
