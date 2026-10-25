@@ -20,7 +20,9 @@ document order and explicit sorts — never from set iteration.
 
 from __future__ import annotations
 
+import enum
 import re
+from dataclasses import dataclass, field, replace
 from html.parser import HTMLParser
 from typing import Iterator, Optional
 
@@ -314,3 +316,381 @@ def unique_selector(node: _Node) -> tuple[Optional[str], str]:
     if path:
         return path, "structural"
     return None, "structural"
+
+
+# ---------------------------------------------------------------------------
+# Static visibility / disabled approximation (planner.js isVisible / isDisabled)
+# ---------------------------------------------------------------------------
+
+
+def _style_declares(node: _Node, prop: str, value: str) -> bool:
+    style = node.attrs.get("style", "")
+    for declaration in style.split(";"):
+        if ":" not in declaration:
+            continue
+        name, _, val = declaration.partition(":")
+        if name.strip().lower() == prop:
+            val = val.strip().lower()
+            if prop == "opacity":
+                try:
+                    return float(val) == 0.0
+                except ValueError:
+                    return False
+            return val == value
+    return False
+
+
+def _is_visible(node: _Node) -> bool:
+    """Attribute-level approximation of computed-style visibility.
+
+    Static HTML carries no computed styles or layout boxes, so this checks the
+    node and its ancestors for ``hidden``, ``aria-hidden="true"`` and inline
+    ``display:none`` / ``visibility:hidden`` / ``opacity:0``. Rect-size checks
+    from planner.js are impossible without a browser and are intentionally
+    omitted; the live-clicking layer re-checks visibility on the real DOM.
+    """
+    current: Optional[_Node] = node
+    while current is not None and current.tag != "#root":
+        if "hidden" in current.attrs:
+            return False
+        if current.attrs.get("aria-hidden") == "true":
+            return False
+        if _style_declares(current, "display", "none"):
+            return False
+        if _style_declares(current, "visibility", "hidden"):
+            return False
+        if _style_declares(current, "opacity", "0"):
+            return False
+        current = current.parent
+    return True
+
+
+def _is_disabled(node: _Node) -> bool:
+    if node.tag in ("button", "input", "select", "textarea", "optgroup", "option", "fieldset"):
+        if "disabled" in node.attrs:
+            return True
+    if node.attrs.get("aria-disabled") == "true":
+        return True
+    if "disabled" in _classes(node):
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Control classification (planner.js lines 160-215)
+# ---------------------------------------------------------------------------
+
+
+class ControlKind(enum.Enum):
+    """Kinds of interaction targets the planner classifies. Never fabricated:
+    every kind comes from a rule that matched the DOM."""
+
+    TAB = "tab"
+    PAGE = "page"
+    MODAL = "modal"
+    MENU = "menu"
+    ACCORDION = "accordion"
+    HASH_LINK = "hash-link"
+    CAROUSEL = "carousel"
+    CONTROL = "control"
+    NONE = "none"
+
+
+#: Containers whose links are navigation, not interaction states (planner.js
+#: ``element.closest("nav, aside, header, [role='navigation'], .sidebar, ...")``).
+NAVIGATION_SELECTOR_HINTS: tuple[str, ...] = (
+    "nav",
+    "aside",
+    "header",
+    "[role='navigation']",
+    ".sidebar",
+    ".side-bar",
+    ".nav",
+    ".navbar",
+    ".topbar",
+    ".top-bar",
+    ".menu",
+)
+
+_TAB_RE = re.compile(r"\b(tab|tabs|pill)\b")
+_NAV_RE = re.compile(r"\b(nav|sidebar|route|page|view|screen)\b")
+_MODAL_RE = re.compile(r"\b(modal|dialog|popup)\b")
+_MENU_RE = re.compile(r"\b(menu|dropdown|popover|drawer)\b")
+_ACCORDION_RE = re.compile(r"\b(accordion|collapse|disclosure|details|faq|expand|toggle)\b")
+_CAROUSEL_RE = re.compile(r"\b(next|previous|prev|slide|carousel)\b")
+_ACTION_RE = re.compile(r"\b(close|cancel|delete|remove|clear|reset|submit|save|download|print)\b")
+
+
+def _hint_match(node: _Node, hint: str) -> bool:
+    if hint.startswith("."):
+        return hint[1:] in _classes(node)
+    if hint.startswith("[") and hint.endswith("]"):
+        inner = hint[1:-1]
+        name, _, value = inner.partition("=")
+        value = value.strip().strip("'\"")
+        return node.attrs.get(name.strip()) == value
+    return node.tag == hint
+
+
+def _in_navigation(node: _Node) -> bool:
+    current: Optional[_Node] = node
+    while current is not None and current.tag != "#root":
+        for hint in NAVIGATION_SELECTOR_HINTS:
+            if _hint_match(current, hint):
+                return True
+        current = current.parent
+    return False
+
+
+def _in_control_sweep(node: _Node) -> bool:
+    """The generic control sweep from planner.js, as a predicate."""
+    tag = node.tag
+    attrs = node.attrs
+    if tag == "button":
+        return True
+    if tag == "input" and attrs.get("type") in ("button", "submit"):
+        return True
+    if tag == "a" and "href" in attrs:
+        return True
+    if tag in ("a", "button") and any(
+        _hint_match(ancestor, container)
+        for ancestor in _ancestors_inclusive(node)
+        for container in ("nav", "aside", "header")
+    ):
+        return True
+    if attrs.get("role") in ("button", "link"):
+        return True
+    for attr in (
+        "aria-controls", "aria-expanded", "aria-current", "aria-haspopup",
+        "data-tab", "data-page", "data-view", "data-section", "data-target",
+        "data-bs-target", "data-toggle", "data-bs-toggle",
+        "data-micromodal-trigger",
+    ):
+        if attr in attrs:
+            return True
+    classes = set(_classes(node))
+    if classes & {"tab", "dropdown-toggle", "carousel-control-next", "carousel-control-prev"}:
+        return True
+    return False
+
+
+def _ancestors_inclusive(node: _Node) -> Iterator[_Node]:
+    current: Optional[_Node] = node
+    while current is not None and current.tag != "#root":
+        yield current
+        current = current.parent
+
+
+def _classify_sweep(node: _Node) -> Optional[ControlKind]:
+    """Priority-ordered classification chain; first match wins (planner.js)."""
+    attrs = node.attrs
+    tag = node.tag
+    role = attrs.get("role", "")
+    aria_expanded = attrs.get("aria-expanded")
+    aria_current = attrs.get("aria-current")
+    aria_has_popup = attrs.get("aria-haspopup")
+    data_toggle = (attrs.get("data-bs-toggle") or attrs.get("data-toggle") or "").lower()
+    target = (
+        attrs.get("data-bs-target") or attrs.get("data-target") or attrs.get("href") or ""
+    ).lower()
+    class_text = attrs.get("class", "").lower()
+    label = _text_of(node).lower()
+    combined = f"{role} {data_toggle} {target} {class_text} {label}"
+    navigation = _in_navigation(node)
+
+    if role == "tab" or "data-tab" in attrs or _TAB_RE.search(combined):
+        return ControlKind.TAB
+    if (
+        navigation
+        or aria_current is not None
+        or "data-page" in attrs
+        or "data-view" in attrs
+        or "data-section" in attrs
+        or _NAV_RE.search(combined)
+    ):
+        return ControlKind.PAGE
+    if (
+        "modal" in data_toggle
+        or "modal" in target
+        or "data-micromodal-trigger" in attrs
+        or _MODAL_RE.search(combined)
+    ):
+        return ControlKind.MODAL
+    if aria_has_popup is not None or "dropdown" in data_toggle or _MENU_RE.search(combined):
+        return ControlKind.MENU
+    if aria_expanded is not None or _ACCORDION_RE.search(combined):
+        return ControlKind.ACCORDION
+    if tag == "a" and target.startswith("#") and len(target) > 1:
+        return ControlKind.HASH_LINK
+    if _CAROUSEL_RE.search(combined):
+        return ControlKind.CAROUSEL
+    if len(label) >= 2 and not _ACTION_RE.search(combined):
+        return ControlKind.CONTROL
+    return None
+
+
+def classify_control(node: Optional[_Node]) -> tuple[ControlKind, bool]:
+    """Classify one node: ``(kind, is_navigation)``. ``NONE`` for non-controls."""
+    if node is None or node.tag == "#root":
+        return ControlKind.NONE, False
+    if node.attrs.get("role") == "tab":
+        return ControlKind.TAB, _in_navigation(node)
+    if node.tag == "summary":
+        return ControlKind.ACCORDION, _in_navigation(node)
+    if not _in_control_sweep(node):
+        return ControlKind.NONE, _in_navigation(node)
+    kind = _classify_sweep(node)
+    return (kind or ControlKind.NONE), _in_navigation(node)
+
+
+# ---------------------------------------------------------------------------
+# Planning (planner.js buildCapturePlan)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Candidate:
+    """One candidate interaction target, ready for capture to click."""
+
+    id: str
+    selector: str
+    selector_strategy: str
+    kind: str
+    label: str
+    priority: int
+    is_navigation: bool
+    reason: str
+    target: str = ""
+    target_visible: Optional[bool] = None
+
+
+@dataclass
+class CapturePlan:
+    """The planned capture states. ``candidates == []`` with a reason code is a
+    *failure of the plan* — the planner never fabricates states it did not
+    classify from the DOM."""
+
+    candidates: list[Candidate] = field(default_factory=list)
+    reason: str = "ok"
+    limits: dict = field(default_factory=dict)
+
+
+_PRIORITY_BY_KIND = {
+    ControlKind.TAB: 12,
+    ControlKind.PAGE: 20,
+    ControlKind.MODAL: 30,
+    ControlKind.MENU: 35,
+    ControlKind.ACCORDION: 40,
+    ControlKind.HASH_LINK: 50,
+    ControlKind.CAROUSEL: 60,
+    ControlKind.CONTROL: 80,
+}
+
+
+def _target_summary(root: _Node, node: _Node) -> tuple[str, Optional[bool]]:
+    controls = next(
+        (
+            value
+            for value in (
+                node.attrs.get("aria-controls"),
+                node.attrs.get("data-controls"),
+                node.attrs.get("data-target"),
+                node.attrs.get("data-bs-target"),
+                node.attrs.get("href"),
+            )
+            if value
+        ),
+        "",
+    )
+    if not controls or not controls.startswith("#"):
+        return controls, None
+    wanted = controls[1:]
+    for candidate in iter_elements(root):
+        if candidate.attrs.get("id") == wanted:
+            return controls, _is_visible(candidate)
+    return controls, None
+
+
+def plan_candidates(root: _Node, base_url: Optional[str] = None, max_states: int = 24) -> CapturePlan:
+    """Turn a parsed document into an ordered, deduped candidate list.
+
+    Deterministic: document order drives discovery, the final order is
+    ``(priority, label)``, ties keep insertion order, and everything is sorted —
+    never set iteration. ``base_url`` is accepted for the live-clicking layer
+    (brief 01d) and does not affect the pure plan.
+    """
+    nodes = list(iter_elements(root))
+    tabs = [n for n in nodes if n.attrs.get("role") == "tab"]
+    summaries = [n for n in nodes if n.tag == "summary"]
+    swept = [n for n in nodes if n.attrs.get("role") != "tab" and n.tag != "summary" and _in_control_sweep(n)]
+
+    candidates: list[Candidate] = []
+    seen: set[str] = set()
+    dropped_ambiguous = 0
+    navigation_excluded = 0
+
+    def add(node: _Node, kind: ControlKind, reason: str, priority: int) -> None:
+        nonlocal dropped_ambiguous, navigation_excluded
+        if not _is_visible(node) or _is_disabled(node):
+            return
+        selector, strategy = unique_selector(node)
+        if selector is None or not _is_unique(root, selector):
+            dropped_ambiguous += 1
+            return
+        label = _text_of(node) or node.attrs.get("aria-controls") or node.attrs.get("href") or kind.value
+        target, target_visible = _target_summary(root, node)
+        key = f"{kind.value}|{selector}"
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(
+            Candidate(
+                id="",
+                selector=selector,
+                selector_strategy=strategy,
+                kind=kind.value,
+                label=label,
+                priority=priority,
+                is_navigation=_in_navigation(node),
+                reason=reason,
+                target=target,
+                target_visible=target_visible,
+            )
+        )
+
+    for index, node in enumerate(tabs):
+        add(node, ControlKind.TAB, f"role tab {index + 1}", 10)
+    for index, node in enumerate(summaries):
+        add(node, ControlKind.ACCORDION, f"summary disclosure {index + 1}", 25)
+    for index, node in enumerate(swept):
+        if _in_navigation(node):
+            navigation_excluded += 1
+            continue
+        kind = _classify_sweep(node)
+        if kind is None:
+            continue
+        add(node, kind, f"{kind.value} control {index + 1}", _PRIORITY_BY_KIND[kind])
+
+    candidates.sort(key=lambda c: (c.priority, c.label))
+    cap = max(0, max_states)
+    truncated = len(candidates) > cap
+    final = [
+        replace(candidate, id=f"{index + 1:02d}-{candidate.kind}")
+        for index, candidate in enumerate(candidates[:cap])
+    ]
+
+    if final:
+        reason = "ok"
+    else:
+        reason = "no-candidates"
+    return CapturePlan(
+        candidates=final,
+        reason=reason,
+        limits={
+            "max_states": cap,
+            "discovered": len(candidates),
+            "truncated": truncated,
+            "dropped_ambiguous": dropped_ambiguous,
+            "navigation_excluded": navigation_excluded,
+        },
+    )
