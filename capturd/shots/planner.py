@@ -828,6 +828,11 @@ _PRIORITY_BY_KIND = {
     ControlKind.CONTROL: 80,
 }
 
+# A native <summary> disclosure is ordered before a swept accordion control
+# (40): its toggle and its label are one native element, not an accordion
+# inferred from aria-expanded or wording.
+PRIORITY_SUMMARY_DISCLOSURE = 25
+
 
 def _target_summary(index: _PlanIndex, node: _Node) -> tuple[str, Optional[bool]]:
     controls = next(
@@ -964,7 +969,7 @@ def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int 
         if _in_navigation(node):
             navigation_excluded += 1
             continue
-        add(node, ControlKind.ACCORDION, f"summary disclosure {index_no + 1}", 25)
+        add(node, ControlKind.ACCORDION, f"summary disclosure {index_no + 1}", PRIORITY_SUMMARY_DISCLOSURE)
     for index_no, node in enumerate(swept):
         if len(candidates) > cap:
             scan_stopped_at_cap = True
