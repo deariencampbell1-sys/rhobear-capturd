@@ -97,8 +97,8 @@ def test_mixed_two_files_names_both_counts_with_pluralisation() -> None:
 
     message = build_quality_error(quality)
     assert message == (
-        "1 file only produced a baseline screenshot. "
-        "1 file produced no successful screenshots. "
+        '[BASELINE_ONLY] 1 file only produced a baseline screenshot: "only-rested.png". '
+        '[NO_SUCCESSFUL_CAPTURE] 1 file produced no successful screenshots: "nothing.png". '
         "Captur'd did not capture meaningful UI states, so this run is not a pass."
     )
 
@@ -111,8 +111,91 @@ def test_mixed_two_files_names_both_counts_with_pluralisation() -> None:
         )
     )
     plural_message = build_quality_error(plural)
-    assert "2 files only produced a baseline screenshot." in plural_message
-    assert "2 files produced no successful screenshots." in plural_message
+    assert (
+        '[BASELINE_ONLY] 2 files only produced a baseline screenshot: '
+        '"a.png", "b.png".' in plural_message
+    )
+    assert (
+        '[NO_SUCCESSFUL_CAPTURE] 2 files produced no successful screenshots: '
+        '"c.png", "d.png".' in plural_message
+    )
+
+
+def test_error_carries_the_reason_code() -> None:
+    # D4: each reason sentence is prefixed with its own reason code.
+    baseline = build_quality_error(
+        summarize_capture_quality(
+            _result(_file("rested.png", [_capture("baseline", True)]))
+        )
+    )
+    assert baseline.startswith("[BASELINE_ONLY] ")
+    assert "[BASELINE_ONLY] 1 file only produced a baseline screenshot" in baseline
+
+    empty = build_quality_error(
+        summarize_capture_quality(_result(_file("dead.png", [])))
+    )
+    assert empty.startswith("[NO_SUCCESSFUL_CAPTURE] ")
+    assert "[NO_SUCCESSFUL_CAPTURE] 1 file produced no successful screenshots" in empty
+
+    none = build_quality_error(summarize_capture_quality({}))
+    assert none.startswith("[NO_CAPTURES] ")
+    assert "[NO_CAPTURES]" in none
+    assert "not a pass" in none
+
+
+def test_non_mapping_result_is_tolerated() -> None:
+    # A non-mapping result cannot be read: no crash, and never a silent
+    # pass — it is the no-captures failure (D5).
+    for result in (None, "results", 7, []):
+        quality = summarize_capture_quality(result)  # type: ignore[arg-type]
+        assert quality.verdict == NO_CAPTURES
+        assert is_passing(result) is False  # type: ignore[arg-type]
+        message = build_quality_error(quality)
+        assert message.startswith("[NO_CAPTURES] ")
+
+
+def test_non_mapping_capture_entry_is_tolerated() -> None:
+    # A captures entry that is not a mapping cannot be read: never a
+    # success, never a crash (D5).
+    junk_only = {
+        "results": [
+            {"file": "junk.png", "manifest": {"captures": [42, None, "ok"]}}
+        ]
+    }
+    quality = summarize_capture_quality(junk_only)
+    assert quality.empty_files == ["junk.png"]
+    assert quality.baseline_only_files == []
+    assert quality.verdict == "FAIL"
+    assert is_passing(junk_only) is False
+
+    junk_plus_real = {
+        "results": [
+            {
+                "file": "mixed.png",
+                "manifest": {
+                    "captures": [42, {"kind": "modal", "success": True}]
+                },
+            }
+        ]
+    }
+    assert summarize_capture_quality(junk_plus_real).verdict == PASS
+    assert is_passing(junk_plus_real) is True
+
+
+def test_empty_filename_fallback_is_visible() -> None:
+    # An entry with no ``file`` key is reported as "" rather than crashing,
+    # and the "" fallback is visible in the error text (D5).
+    result = {
+        "results": [
+            {"manifest": {"captures": [{"kind": "modal", "success": False}]}}
+        ]
+    }
+    quality = summarize_capture_quality(result)
+    assert quality.empty_files == [""]
+    message = build_quality_error(quality)
+    assert message.startswith("[NO_SUCCESSFUL_CAPTURE] ")
+    assert '""' in message
+    assert is_passing(result) is False
 
 
 def test_empty_results_is_not_a_pass() -> None:
