@@ -569,6 +569,26 @@ def test_role_tab_priority_uses_the_shared_table():
     ]
 
 
+def test_summary_disclosure_uses_the_named_priority():
+    # D5 (round 2): the <summary> priority is the named constant
+    # PRIORITY_SUMMARY_DISCLOSURE, not a bare literal, and a native disclosure
+    # is ordered ahead of a swept accordion control (40).
+    import capturd.shots.planner as planner_module
+
+    root = parse_html(
+        "<main>"
+        "<summary>Contents</summary>"
+        '<button aria-expanded="false">More details</button>'
+        "</main>"
+    )
+    plan = plan_candidates(root)
+
+    by_label = {c.label: c for c in plan.candidates}
+    assert by_label["Contents"].priority == planner_module.PRIORITY_SUMMARY_DISCLOSURE
+    assert by_label["Contents"].priority < by_label["More details"].priority
+    assert [c.label for c in plan.candidates] == ["Contents", "More details"]
+
+
 def test_public_surface_exports_node_and_iter_elements():
     # D13: brief 01d consumes parsed trees; it must not have to import a
     # private name or an un-exported walker.
