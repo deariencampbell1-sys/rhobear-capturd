@@ -370,6 +370,33 @@ def test_attribute_value_quote_round_trips():
     assert plan.limits["dropped_ambiguous"] == 0
 
 
+def test_attribute_value_with_a_newline_round_trips():
+    # D5: control characters in attribute values become CSS hex escapes — a
+    # raw newline inside [attr="..."] is unparseable CSS. aria-label="a\nb"
+    # must emit one escaped selector that verifies and matches exactly one
+    # node (hex escape '\\a ' unescapes back to the newline).
+    root = parse_html('<main><button aria-label="a\nb">Tap</button></main>')
+    plan = plan_candidates(root)
+
+    (candidate,) = plan.candidates
+    assert candidate.selector_strategy == "attribute"
+    assert candidate.selector == 'button[aria-label="a\\a b"]'
+    assert plan.limits["dropped_ambiguous"] == 0
+
+
+def test_id_with_a_newline_round_trips():
+    # D5: the same hex escaping for ids — backslash + newline is a CSS line
+    # continuation that deletes the newline, so '#a\\<newline>b' would select
+    # the wrong node in a browser. '#a\\a b' round-trips exactly.
+    root = parse_html('<main><button id="a\nb" aria-expanded="false">Open</button></main>')
+    plan = plan_candidates(root)
+
+    (candidate,) = plan.candidates
+    assert candidate.selector_strategy == "id"
+    assert candidate.selector == "#a\\a b"
+    assert plan.limits["dropped_ambiguous"] == 0
+
+
 def test_attribute_value_with_gt_does_not_break_the_chain():
     # The chain matcher splits on " > "; an attribute value containing ">"
     # used to split its own selector and the candidate was silently dropped.
