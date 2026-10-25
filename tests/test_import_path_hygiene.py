@@ -93,11 +93,18 @@ def _top_level_importable_names() -> set[str]:
 
 
 def _pythonpath_dir_module_names() -> set[str]:
-    """Names of the modules placed directly inside the pythonpath ini dirs."""
+    """Names the pythonpath ini dirs put on sys.path's front: every module
+    directly inside them AND every immediate subdirectory name — a plain
+    (namespace) subpackage shadows just the same as a single-file module,
+    which is how the first version of this scan missed them."""
     names: set[str] = set()
     for d in ("scripts", "director-rig"):
-        for py in sorted((REPO / d).glob("*.py")):
+        base = REPO / d
+        for py in sorted(base.glob("*.py")):
             names.add(py.stem)
+        for child in sorted(base.iterdir()):
+            if child.is_dir() and not child.name.startswith((".", "_")):
+                names.add(child.name)
     return names
 
 
