@@ -356,7 +356,9 @@ def _is_unique(root: _Node, selector: str) -> bool:
 def _structural_path(node: _Node) -> str:
     """Positional path. A unique id anywhere on the chain anchors and shortens
     it; a *duplicate* id is omitted in favour of ``:nth-of-type`` so the path
-    can still disambiguate (rule: never emit an ambiguous selector)."""
+    can still disambiguate (rule: never emit an ambiguous selector).
+    ``:nth-of-type`` applies at every level including children of the synthetic
+    ``#root`` — brief 01d feeds fragments with several top-level controls."""
     root = _tree_root(node)
     parts: list[str] = []
     current: Optional[_Node] = node
@@ -367,7 +369,7 @@ def _structural_path(node: _Node) -> str:
             parts.insert(0, f"{part}#{_escape_css(node_id)}")
             break
         parent = current.parent
-        if parent is not None and parent.tag != "#root":
+        if parent is not None:
             same_tag = [child for child in parent.children if child.tag == current.tag]
             if len(same_tag) > 1:
                 part += f"{_NTH_PREFIX}{same_tag.index(current) + 1})"
@@ -747,18 +749,26 @@ def plan_candidates(root: _Node, base_url: Optional[str] = None, max_states: int
             )
         )
 
-    for index, node in enumerate(tabs):
-        add(node, ControlKind.TAB, f"role tab {index + 1}", 10)
-    for index, node in enumerate(summaries):
-        add(node, ControlKind.ACCORDION, f"summary disclosure {index + 1}", 25)
-    for index, node in enumerate(swept):
+    for index_no, node in enumerate(tabs):
+        # Uniform navigation exclusion (D2): every discovery loop skips nodes
+        # inside navigation chrome and counts the skip.
+        if _in_navigation(node):
+            navigation_excluded += 1
+            continue
+        add(node, ControlKind.TAB, f"role tab {index_no + 1}", 10)
+    for index_no, node in enumerate(summaries):
+        if _in_navigation(node):
+            navigation_excluded += 1
+            continue
+        add(node, ControlKind.ACCORDION, f"summary disclosure {index_no + 1}", 25)
+    for index_no, node in enumerate(swept):
         if _in_navigation(node):
             navigation_excluded += 1
             continue
         kind = _classify_sweep(node)
         if kind is None:
             continue
-        add(node, kind, f"{kind.value} control {index + 1}", _PRIORITY_BY_KIND[kind])
+        add(node, kind, f"{kind.value} control {index_no + 1}", _PRIORITY_BY_KIND[kind])
 
     candidates.sort(key=lambda c: (c.priority, c.label))
     cap = max(0, max_states)

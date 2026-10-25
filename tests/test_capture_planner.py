@@ -85,12 +85,14 @@ def test_fixture_b_structural_fallback_repairs_duplicate_ids():
 
 
 def test_unrepairable_ambiguous_candidates_are_dropped():
-    # Two identical top-level subtrees: no unique id, no positional repair
-    # (the duplicated id cannot anchor and top-level siblings share a path),
-    # so both buttons are dropped with a reason instead of being emitted.
+    # Deliberate update (review round 1, D10): top-level siblings are now
+    # repaired with :nth-of-type, so unrepairable ambiguity needs a shape no
+    # strategy can split: identical subtrees under two <html> elements, where
+    # the structural path refuses to cross <html> and the duplicated id cannot
+    # anchor. Both buttons are dropped with a reason, never emitted ambiguous.
     html = (
-        "<main><button id='x' aria-expanded='false'>Go</button></main>"
-        "<main><button id='x' aria-expanded='false'>Go</button></main>"
+        "<html><body><button id='x' aria-expanded='false'>Go</button></body></html>"
+        "<html><body><button id='x' aria-expanded='false'>Go</button></body></html>"
     )
     root = parse_html(html)
     plan = plan_candidates(root)
@@ -452,8 +454,10 @@ def test_nav_header_footer_links_are_excluded():
 
 
 def test_duplicate_candidates_are_deduped():
-    # Two identical top-level subtrees would emit the same selector twice; the
-    # planner drops them as ambiguous instead of repeating a selector.
+    # Deliberate update (review round 1, D10): the two identical top-level
+    # subtrees no longer collapse into one ambiguous selector — each button
+    # plans as its own control via a positional structural selector. Dedupe
+    # still holds: every emitted (kind, selector) pair is unique.
     root = parse_html(
         "<main><button id=\"dup\" data-testid=\"dup\">Pick me</button></main>"
         "<main><button id=\"dup\" data-testid=\"dup\">Pick me</button></main>"
@@ -464,8 +468,10 @@ def test_duplicate_candidates_are_deduped():
     selectors = [c.selector for c in plan.candidates]
     assert len(selectors) == len(set(selectors))
     assert len({(c.kind, c.selector) for c in plan.candidates}) == len(plan.candidates)
-    assert plan.limits["dropped_ambiguous"] == 2
-    assert [c.label for c in plan.candidates] == ["Only one"]
+    assert plan.limits["dropped_ambiguous"] == 0
+    assert sorted(c.label for c in plan.candidates) == ["Only one", "Pick me", "Pick me"]
+    for candidate in plan.candidates:
+        assert _count_matches(root, candidate.selector) == 1
 
     # One node discoverable as two kinds emits one candidate per kind: the
     # dedupe key is (kind, selector), matching planner.js.
