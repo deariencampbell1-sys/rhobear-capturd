@@ -141,6 +141,42 @@ def test_summary_counts_come_from_cells_not_prose():
     assert sample["summary"]["pluginsCount"] == 0
 
 
+def test_summary_ignores_pathway_rows():
+    # D1: counts come from the summary section's cells only — a pathway row
+    # shaped `| p1 | WIRED | 3 |` lives in a pathways table and must never
+    # set summary["wired"] = 3. And with no summary-named section at all,
+    # every count stays None.
+    text = "\n".join([
+        "# Pathway Manifest — row shape",
+        "",
+        "## Summary Counts",
+        "",
+        "| Category | Count |",
+        "|---|---|",
+        "| **WIRED** | 2 |",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status | wired |",
+        "|---|---|---|",
+        "| p1 | WIRED | 3 |",
+    ])
+    parsed = parse_manifest_text(text)
+    assert parsed["summary"]["wired"] == 2
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+    no_summary = "\n".join([
+        "# Pathway Manifest — no summary section",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+    ])
+    bare = parse_manifest_text(no_summary)
+    assert all(v is None for v in bare["summary"].values())
+
+
 def test_both_flavours_return_the_same_key_set():
     # One shape for both flavours: identical top-level keys, with `flavour`
     # saying which produced it; summary and metadata carry the same keys too.
