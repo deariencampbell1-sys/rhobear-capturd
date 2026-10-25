@@ -431,6 +431,29 @@ def test_structural_path_is_root_scoped():
     assert by_label["B"].selector == "main > div > button"
 
 
+# ---------------------------------------------------------------------------
+# Document-order text: label text interleaves children and own text.
+# ---------------------------------------------------------------------------
+
+
+def test_text_after_an_inline_child_keeps_document_order():
+    # D2: _full_text interleaves children and text in document order.
+    # <button><b>Save</b> now</button> yields "Save now", not "nowSave" —
+    # so the action-word rule sees "save" and counts the drop; and the
+    # neutral sibling's label is "Retry now", not "nowRetry".
+    root = parse_html(
+        "<main>"
+        "<button><b>Save</b> now</button>"
+        "<button><b>Retry</b> now</button>"
+        "</main>"
+    )
+    plan = plan_candidates(root)
+
+    assert plan.limits["dropped_action_labels"] == 1
+    (candidate,) = plan.candidates
+    assert candidate.label == "Retry now"
+
+
 def test_summary_in_navigation_is_excluded_and_counted():
     # A <summary> inside navigation chrome is excluded like any other control:
     # the summary loop must apply the same navigation skip and count it.
