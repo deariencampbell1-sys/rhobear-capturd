@@ -393,6 +393,8 @@ def _match_chain(node: _Node, selector: str) -> bool:
     documents), so matching anchors there too — the topmost matched element
     must sit directly under that boundary. ``div > button`` therefore never
     matches a button under an unrelated ``div`` deeper in the document.
+    D1 invariant (see :func:`_structural_path`): a path the generator emits
+    always verifies against the same node — one shared boundary anchor.
     """
     parts = _split_chain(selector)
     if not parts or not _match_simple(node, parts[-1]):
@@ -492,24 +494,32 @@ def _structural_path(node: _Node, index: _PlanIndex) -> str:
     synthetic ``#root`` (or at ``html`` for full documents): its first segment
     is a boundary child, emitted with ``:nth-of-type`` whenever its tag is not
     unique among the boundary's children — so ``div > button`` never collapses
-    two wrappers at different depths. A unique id anywhere on the chain anchors
-    and shortens it; a *duplicate* id is omitted in favour of ``:nth-of-type``
-    so the path can still disambiguate (rule: never emit an ambiguous selector)."""
+    two wrappers at different depths. A unique id anywhere on the chain decorates
+    its segment; a *duplicate* id is omitted in favour of ``:nth-of-type``
+    so the path can still disambiguate (rule: never emit an ambiguous selector).
+
+    D1 invariant: a path the generator emits always verifies against the same
+    node. The walk therefore never stops early at a unique-id ancestor — the
+    chain always runs to the boundary, the one anchor shared with the verifier
+    (:func:`_match_chain`), so generation and verification can never disagree.
+    """
     parts: list[str] = []
     current: Optional[_Node] = node
     while current is not None and current.tag not in ("#root", "html"):
         part = current.tag
         node_id = current.attrs.get("id")
         if node_id and len(index.by_id.get(node_id, ())) == 1:
+            # The unique id alone disambiguates this segment; the walk still
+            # continues to the boundary (D1) instead of shortening the chain.
             parts.insert(0, f"{part}#{_escape_css(node_id)}")
-            break
-        parent = current.parent
-        if parent is not None:
-            same_tag = [child for child in parent.children if child.tag == current.tag]
-            if len(same_tag) > 1:
-                part += f"{_NTH_PREFIX}{same_tag.index(current) + 1})"
-        parts.insert(0, part)
-        current = parent
+        else:
+            parent = current.parent
+            if parent is not None:
+                same_tag = [child for child in parent.children if child.tag == current.tag]
+                if len(same_tag) > 1:
+                    part += f"{_NTH_PREFIX}{same_tag.index(current) + 1})"
+            parts.insert(0, part)
+        current = current.parent
     return " > ".join(parts)
 
 
