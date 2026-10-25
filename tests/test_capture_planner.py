@@ -324,6 +324,20 @@ def test_leading_digit_id_is_css_escaped():
     assert candidate.selector_strategy == "id"
 
 
+def test_lone_hyphen_id_is_escaped():
+    # D6: a leading '-' is only an identifier start before an identifier-start
+    # character (or '-' or an escape). A lone '-' is not a CSS identifier at
+    # all — '#-' is unparseable — so the hyphen is hex-escaped: '#\\2d '
+    # unescapes back to the id '-'.
+    root = parse_html("<main><button id='-' aria-expanded='false'>Open</button></main>")
+    plan = plan_candidates(root)
+
+    (candidate,) = plan.candidates
+    assert candidate.selector_strategy == "id"
+    assert candidate.selector == "#\\2d "
+    assert plan.limits["dropped_ambiguous"] == 0
+
+
 def test_leading_dash_digit_id_is_css_escaped():
     # An identifier may start with '-' but not with '-' followed by a digit.
     root = parse_html("<main><button id='-1foo' aria-expanded='false'>Open</button></main>")
