@@ -362,12 +362,25 @@ def _extract_pathways(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     or row_map.get("pathway")
                     or ""
                 ).strip().strip("`")
-                status_raw = (
-                    row_map.get("status")
-                    or row_map.get("wired")
-                    or row_map.get("unwired flag")
-                    or ""
-                ).upper().strip()
+                status_cell = row_map.get("status")
+                wired_cell = row_map.get("wired")
+                flag_cell = row_map.get("unwired flag")
+                unwired_cell = row_map.get("unwired")
+                flag_value = _first_set(flag_cell, unwired_cell)
+                # Polarity comes from the column, not from the word: each
+                # status-bearing column is read with its own polarity, in the
+                # priority status > wired > unwired flag/unwired.
+                if status_cell is not None and status_cell.strip():
+                    status_raw = status_cell.strip()
+                    status = _normalize_status(status_raw)
+                elif wired_cell is not None and wired_cell.strip():
+                    status_raw = wired_cell.strip()
+                    status = _status_from_wired_column(status_raw)
+                elif flag_value is not None:
+                    status_raw = flag_value.strip()
+                    status = _status_from_unwired_column(status_raw)
+                else:
+                    status_raw, status = "", "UNKNOWN"
                 location = (
                     row_map.get("location")
                     or row_map.get("file:line")
@@ -405,13 +418,45 @@ def _extract_pathways(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         or ""
                     ).strip(),
                     "evidence": (row_map.get("evidence") or "").strip(),
-                    "status": _normalize_status(status_raw),
+                    "status": status,
                     "rawStatus": status_raw,
-                    # A bare ⚠ is non-word on both sides, so \b never borders it — match it
-                    # unanchored instead.
-                    "unwiredFlag": bool(re.search(r"(?:\by(?:es)?\b|\btrue\b|⚠)", row_map.get("unwired flag", ""), re.I)),
+                    # The flag lives in the `unwired flag` / `unwired` column
+                    # and is set by that column's polarity (yes/true/⚠).
+                    "unwiredFlag": flag_value is not None
+                    and _status_from_unwired_column(flag_value) == "UNWIRED",
                 })
     return pathways
+
+
+def _first_set(*cells: str | None) -> str | None:
+    """The first cell that exists and is not empty — one column at a time, so
+    an empty cell falls through to the next status-bearing column."""
+    for cell in cells:
+        if cell is not None and cell.strip():
+            return cell
+    return None
+
+
+def _status_from_wired_column(cell: str) -> str:
+    """A `wired` column carries its own polarity: yes|true|✔|wired → WIRED,
+    no|false|✗|unwired → UNWIRED, anything else → UNCLEAR."""
+    token = " ".join(cell.split()).lower()
+    if token in {"yes", "true", "✔", "wired"}:
+        return "WIRED"
+    if token in {"no", "false", "✗", "unwired"}:
+        return "UNWIRED"
+    return "UNCLEAR"
+
+
+def _status_from_unwired_column(cell: str) -> str:
+    """An `unwired flag` / `unwired` column carries the inverted polarity:
+    yes|true|⚠ → UNWIRED, no|false → WIRED, anything else → UNCLEAR."""
+    token = " ".join(cell.split()).lower()
+    if token in {"yes", "true", "⚠"}:
+        return "UNWIRED"
+    if token in {"no", "false"}:
+        return "WIRED"
+    return "UNCLEAR"
 
 
 def _normalize_status(status: str) -> str:
