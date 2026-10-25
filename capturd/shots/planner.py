@@ -127,10 +127,17 @@ def _tree_root(node: _Node) -> _Node:
 
 
 def iter_elements(root: _Node) -> Iterator[_Node]:
-    """Pre-order (document order) walk over element nodes, excluding the root."""
-    for child in root.children:
-        yield child
-        yield from iter_elements(child)
+    """Pre-order (document order) walk over element nodes, excluding the root.
+
+    Iterative (explicit stack), never recursion: a deeply nested document must
+    not be able to raise RecursionError out of a walk.
+    """
+    stack: list[_Node] = list(reversed(root.children))
+    while stack:
+        node = stack.pop()
+        yield node
+        if node.children:
+            stack.extend(reversed(node.children))
 
 
 # ---------------------------------------------------------------------------
@@ -139,9 +146,23 @@ def iter_elements(root: _Node) -> Iterator[_Node]:
 
 
 def _full_text(node: _Node) -> str:
-    parts = list(node.text_chunks)
-    for child in node.children:
-        parts.append(_full_text(child))
+    """Text of a subtree in the same order the recursive fold produced:
+    the node's own chunks, then each child's text in document order.
+    Iterative (explicit stack), never recursion."""
+    parts: list[str] = []
+    stack: list[object] = [node]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, str):
+            parts.append(current)
+            continue
+        # Children go down first, then the node's own chunks on top of the
+        # stack, so the pop order is: own chunks, then each child's subtree —
+        # exactly the order the recursive fold produced.
+        for child in reversed(current.children):
+            stack.append(child)
+        for chunk in reversed(current.text_chunks):
+            stack.append(chunk)
     return "".join(parts)
 
 
@@ -650,6 +671,32 @@ def classify_control(node: Optional[_Node]) -> tuple[ControlKind, bool]:
 # ---------------------------------------------------------------------------
 
 
+#: Walk ceilings (review round 1, D6): a hostile or machine-generated document
+#: fails the plan with reason="too-large" and a limits counter — never a raised
+#: RecursionError, and never unbounded work.
+_MAX_NODES = 10_000
+_MAX_DEPTH = 256
+
+
+class _DocumentTooLarge(Exception):
+    """Internal: the document exceeds the planner's walk ceilings."""
+
+
+def _check_size(root: _Node) -> None:
+    """Raise :class:`_DocumentTooLarge` when the tree exceeds the ceilings."""
+    count = 0
+    stack: list[tuple[_Node, int]] = [(child, 1) for child in reversed(root.children)]
+    while stack:
+        node, depth = stack.pop()
+        count += 1
+        if count > _MAX_NODES:
+            raise _DocumentTooLarge(f"more than {_MAX_NODES} elements")
+        if depth > _MAX_DEPTH:
+            raise _DocumentTooLarge(f"deeper than {_MAX_DEPTH} levels")
+        for child in reversed(node.children):
+            stack.append((child, depth + 1))
+
+
 @dataclass(frozen=True)
 class Candidate:
     """One candidate interaction target, ready for capture to click."""
@@ -720,7 +767,29 @@ def plan_candidates(root: _Node, base_url: Optional[str] = None, max_states: int
     ``(priority, label)``, ties keep insertion order, and everything is sorted —
     never set iteration. ``base_url`` is accepted for the live-clicking layer
     (brief 01d) and does not affect the pure plan.
+
+    The reason is exactly one of ``"ok"`` (candidates planned),
+    ``"no-candidates"`` (the document has nothing to interact with),
+    ``"truncated"`` (a caller-imposed ``max_states`` cap cut the plan — to any
+    size, including zero) and ``"too-large"`` (the document exceeds the walk
+    ceilings: more than 10 000 elements or deeper than 256 levels). There is no
+    live-versus-rested reason code here; that distinction is brief 01d's.
     """
+    cap = max(0, max_states)
+    limits: dict = {
+        "max_states": cap,
+        "discovered": 0,
+        "truncated": False,
+        "dropped_ambiguous": 0,
+        "navigation_excluded": 0,
+        "dropped_action_labels": 0,
+    }
+    try:
+        _check_size(root)
+    except _DocumentTooLarge:
+        limits["too_large"] = True
+        return CapturePlan(candidates=[], reason="too-large", limits=limits)
+
     nodes = list(iter_elements(root))
     tabs = [n for n in nodes if n.attrs.get("role") == "tab"]
     summaries = [n for n in nodes if n.tag == "summary"]
@@ -786,7 +855,6 @@ def plan_candidates(root: _Node, base_url: Optional[str] = None, max_states: int
         add(node, kind, f"{kind.value} control {index_no + 1}", _PRIORITY_BY_KIND[kind])
 
     candidates.sort(key=lambda c: (c.priority, c.label))
-    cap = max(0, max_states)
     truncated = len(candidates) > cap
     final = [
         replace(candidate, id=f"{index_no + 1:02d}-{candidate.kind}")
