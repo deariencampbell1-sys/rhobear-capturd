@@ -320,6 +320,34 @@ def test_leading_dash_digit_id_is_css_escaped():
     assert _count_matches(root, selector) == 1
 
 
+def test_attribute_value_backslash_round_trips():
+    # D3: one escape helper for both directions — a backslash inside an
+    # attribute value is doubled on generation and unescaped again by the
+    # verifier, so the emitted selector resolves to the same node and the
+    # control is planned, not silently dropped as ambiguous.
+    root = parse_html("<main><button title=\"C:\\backups\">Restore</button></main>")
+    plan = plan_candidates(root)
+
+    (candidate,) = plan.candidates
+    assert candidate.label == "Restore"
+    assert candidate.selector_strategy == "attribute"
+    assert candidate.selector == 'button[title="C:\\\\backups"]'
+    assert plan.limits["dropped_ambiguous"] == 0
+
+
+def test_attribute_value_quote_round_trips():
+    # D3: the same helper escapes the quote, so [attr="..."] survives a value
+    # containing double quotes and round-trips through the verifier exactly.
+    root = parse_html("<main><button aria-label='Say \"hi\"'>Greet</button></main>")
+    plan = plan_candidates(root)
+
+    (candidate,) = plan.candidates
+    assert candidate.label == 'Say "hi"'
+    assert candidate.selector_strategy == "attribute"
+    assert candidate.selector == 'button[aria-label="Say \\\"hi\\\""]'
+    assert plan.limits["dropped_ambiguous"] == 0
+
+
 def test_attribute_value_with_gt_does_not_break_the_chain():
     # The chain matcher splits on " > "; an attribute value containing ">"
     # used to split its own selector and the candidate was silently dropped.
