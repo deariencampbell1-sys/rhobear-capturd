@@ -56,7 +56,7 @@ __all__ = [
 class _Node:
     """One element of the parsed document."""
 
-    __slots__ = ("tag", "attrs", "children", "parent", "text_chunks")
+    __slots__ = ("tag", "attrs", "children", "parent", "text_chunks", "content")
 
     def __init__(self, tag: str, attrs: dict[str, str]) -> None:
         self.tag = tag
@@ -64,6 +64,11 @@ class _Node:
         self.children: list[_Node] = []
         self.parent: Optional[_Node] = None
         self.text_chunks: list[str] = []
+        #: Document-order stream of this node's own text chunks and child
+        #: elements (D2): the builder fills it as the parser saw them, so
+        #: :func:`_full_text` can interleave inline children with text.
+        #: ``children`` and ``text_chunks`` stay as the element/text views.
+        self.content: list[object] = []
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return f"<_Node {self.tag} attrs={sorted(self.attrs.items())!r} children={len(self.children)}>"
@@ -97,6 +102,7 @@ class _NodeBuilder(HTMLParser):
         top = self._stack[-1]
         node.parent = top
         top.children.append(node)
+        top.content.append(node)
         return node
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -117,6 +123,7 @@ class _NodeBuilder(HTMLParser):
     def handle_data(self, data: str) -> None:
         if data:
             self._stack[-1].text_chunks.append(data)
+            self._stack[-1].content.append(data)
 
 
 def parse_html(html: str) -> Node:
@@ -153,9 +160,13 @@ def iter_elements(root: Node) -> Iterator[Node]:
 
 
 def _full_text(node: _Node) -> str:
-    """Text of a subtree in the same order the recursive fold produced:
-    the node's own chunks, then each child's text in document order.
-    Iterative (explicit stack), never recursion."""
+    """Text of a subtree in document order (D2): the node's own text chunks
+    interleave with its children as the parser saw them —
+    ``<button><b>Save</b> now</button>`` yields ``"Save now"``, never
+    ``"nowSave"``. The builder records that order in ``content``; a hand-built
+    node without ``content`` falls back to the old fold (own chunks, then each
+    child's text in document order). Iterative (explicit stack), never
+    recursion."""
     parts: list[str] = []
     stack: list[object] = [node]
     while stack:
@@ -163,13 +174,8 @@ def _full_text(node: _Node) -> str:
         if isinstance(current, str):
             parts.append(current)
             continue
-        # Children go down first, then the node's own chunks on top of the
-        # stack, so the pop order is: own chunks, then each child's subtree —
-        # exactly the order the recursive fold produced.
-        for child in reversed(current.children):
-            stack.append(child)
-        for chunk in reversed(current.text_chunks):
-            stack.append(chunk)
+        items = current.content or [*current.text_chunks, *current.children]
+        stack.extend(reversed(items))
     return "".join(parts)
 
 
