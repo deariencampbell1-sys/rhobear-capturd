@@ -161,7 +161,17 @@ def parse_verifier_json_text(text: str, source: str = "<pasted map>") -> dict[st
     for check_name, check in (checks or {}).items():
         if not isinstance(check, dict):
             continue
-        for finding in check.get("findings") or []:
+        findings = check.get("findings")
+        if findings is None:
+            continue
+        if not isinstance(findings, list):
+            # A dict yields its keys and a string its characters; everything
+            # would be skipped below and the parse would "succeed" with zero
+            # pathways. Refuse instead.
+            raise PathwayMapError(
+                f"verifier check '{check_name}' findings must be a list"
+            )
+        for finding in findings:
             if not isinstance(finding, dict):
                 continue
             fid = str(finding.get("id") or f"{check_name}-{len(pathways)}")
@@ -199,13 +209,23 @@ def parse_verifier_json_text(text: str, source: str = "<pasted map>") -> dict[st
                     "raw": finding,
                 })
 
+    # Key presence decides, not truthiness: a present-but-empty
+    # manifest_summary must not be swapped for a differently-shaped summary.
+    manifest_summary = data.get("manifest_summary")
+    if isinstance(manifest_summary, dict):
+        summary: dict[str, Any] = manifest_summary
+    elif isinstance(data.get("summary"), dict):
+        summary = data["summary"]
+    else:
+        summary = {}
+
     return {
         # Markdown parsing keeps the source text in ``raw``; JSON does too.
         "raw": text,
         "hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
         # Basename only: the parsed map must not carry host paths.
         "file": Path(source).name,
-        "summary": data.get("manifest_summary") or data.get("summary") or {},
+        "summary": summary,
         "pathways": pathways,
         "routes": routes,
         "plugins": [],
