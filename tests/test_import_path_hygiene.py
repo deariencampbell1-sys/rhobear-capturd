@@ -129,7 +129,7 @@ def _subprocess_syspath_env() -> dict[str, str]:
 
 
 @pytest.mark.parametrize("mod", RIG_MODULES)
-def test_rig_modules_import_without_the_default_repo_path(mod):
+def test_rig_modules_import_cleanly_without_the_default_repo_path(mod):
     """director-rig/{film,scout,revoice,paid_boot}.py do no import-time
     filesystem work against ``/opt/sunsponge-capture``.
 
@@ -140,11 +140,12 @@ def test_rig_modules_import_without_the_default_repo_path(mod):
     these modules — inserting a nonexistent path is a no-op for imports, so a
     clean import proves nothing at import time NEEDS that tree.
 
-    Fallback contract (documented, not edited-around): if a rig module ever
-    genuinely cannot import without the default path, its failure must be a
-    clean ``SystemExit``/``ImportError`` whose output names the
-    ``CAPTURD_REPO`` override — never a half-broken state. The rig modules are
-    intentionally not edited to make this test pass.
+    The success branch is MANDATORY: ``returncode == 0`` AND the IMPORT_OK
+    marker. An earlier version of this test accepted a clean
+    SystemExit/ImportError naming the ``CAPTURD_REPO`` override — which made
+    it pass on exactly the failure it exists to catch. If a rig module ever
+    genuinely needs the default path, that dependency must be split into a
+    second, separately-named test that documents it — never folded in here.
     """
     if Path("/opt/sunsponge-capture").exists():
         pytest.skip(
@@ -162,15 +163,13 @@ def test_rig_modules_import_without_the_default_repo_path(mod):
         [sys.executable, "-c", code],
         capture_output=True, text=True, timeout=120,
         env=_subprocess_syspath_env(), cwd=tempfile.gettempdir())
-    if proc.returncode == 0 and "IMPORT_OK" in proc.stdout:
-        return  # success branch: no import-time work against the default path
     combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
-    assert "SystemExit" in combined or "ImportError" in combined, (
-        f"{mod} cannot be imported without /opt/sunsponge-capture and the "
-        f"failure is not a clean SystemExit/ImportError:\n{combined}")
-    assert "CAPTURD_REPO" in combined, (
-        f"{mod} cannot be imported without /opt/sunsponge-capture but its "
-        f"failure does not name the CAPTURD_REPO override:\n{combined}")
+    assert proc.returncode == 0 and "IMPORT_OK" in proc.stdout, (
+        f"{mod} must import CLEANLY without /opt/sunsponge-capture and with "
+        f"CAPTURD_REPO unset — a clean SystemExit/ImportError naming the "
+        f"override is no longer accepted (that would be a real dependency on "
+        f"the default path and needs its own, separately-named test):\n"
+        f"rc={proc.returncode}\n{combined}")
 
 
 # ---------------------------------------------------------------------------
