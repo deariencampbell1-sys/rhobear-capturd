@@ -267,7 +267,7 @@ def _extract_summary(sections: list[dict[str, Any]]) -> dict[str, Any]:
     for sec in sections:
         text = "\n".join(sec["body"])
         for match in re.finditer(
-            r"\|\s*(WIRED|MOCKED|UNWIRED|INCOMPLETE|UNCLEAR|Wired|Mocked|Unwired|Incomplete|Unclear|Total pathways|TODO|FIXME)\s*\|?\s*(\d+)\s*\|",
+            r"\|\s*\*{0,2}(WIRED|MOCKED|UNWIRED|INCOMPLETE|UNCLEAR|Wired|Mocked|Unwired|Incomplete|Unclear|Total pathways|TODO|FIXME)\*{0,2}\s*\|?\s*(\d+)\s*\|",
             text,
             re.IGNORECASE,
         ):
