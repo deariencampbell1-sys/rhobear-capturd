@@ -21,7 +21,8 @@ Result shape accepted (the shape that exists today)::
     }
 
 Tolerances (each documented here, per the lane rule):
-- a result without ``results`` (or a non-mapping result) means no files;
+- a result without ``results`` (or a non-mapping result) means no files:
+  that is ``NO_CAPTURES``, a failure, never a pass;
 - an entry without ``manifest`` has no captures, so it is empty;
 - a ``manifest`` without ``captures`` (or with a non-list ``captures``)
   has no captures, so it is empty;
@@ -31,7 +32,10 @@ Tolerances (each documented here, per the lane rule):
 - a captures entry that is not a mapping cannot be read, so it is not a
   successful capture;
 - an entry without a usable ``file`` string is still counted, recorded as
-  ``""`` rather than given an invented name.
+  ``""`` rather than given an invented name;
+- file names are deduplicated in first-seen order, so one file with two
+  failing entries is reported once — a deliberate improvement over
+  upstream, which reports per entry.
 
 Verdicts: ``PASS`` when meaningful states landed, ``FAIL`` when files
 failed, ``NO_CAPTURES`` when nothing landed at all. An empty or absent
@@ -81,7 +85,9 @@ class CaptureQuality:
     ``baseline_only_files``: files whose successful captures are all
     rested-baseline screenshots. ``empty_files``: files with no successful
     capture at all. ``no_captures``: the run landed no readable files at
-    all. A run passes only when none of the three is populated.
+    all. A run passes only when none of the three is populated. File
+    names are deduplicated across the summary, first-seen order kept
+    (D6).
     """
 
     baseline_only_files: list[str] = field(default_factory=list)
@@ -121,7 +127,9 @@ def _file_name(item: Mapping[str, Any]) -> str:
 def summarize_capture_quality(result: Any) -> CaptureQuality:
     """Split a capture result's files into baseline-only and empty lists.
 
-    A file whose manifest has no successful capture is empty; a file whose
+    A capture counts as successful only when ``success is True`` — a
+    truthy string is not a success (D7). A file whose manifest has no
+    successful capture is empty; a file whose
     successful captures are all ``kind == "baseline"`` is baseline-only;
     a result whose ``results`` is absent, empty or not a list reports
     ``no_captures`` (``NO_CAPTURES``). Read-only: nothing here mutates
@@ -137,11 +145,16 @@ def summarize_capture_quality(result: Any) -> CaptureQuality:
 
     baseline_only: list[str] = []
     empty: list[str] = []
+    seen_failures: set[str] = set()
     read_any = False
     for item in results:
         if not isinstance(item, Mapping):
             continue
         read_any = True
+        name = _file_name(item)
+        if name in seen_failures:
+            # D6: one file, reported once, first-seen order preserved.
+            continue
         manifest = item.get("manifest")
         captures: list[Any] = []
         if isinstance(manifest, Mapping) and isinstance(manifest.get("captures"), list):
@@ -149,7 +162,7 @@ def summarize_capture_quality(result: Any) -> CaptureQuality:
         successful = [
             capture
             for capture in captures
-            if isinstance(capture, Mapping) and capture.get("success")
+            if isinstance(capture, Mapping) and capture.get("success") is True
         ]
         useful = [
             capture
@@ -157,9 +170,11 @@ def summarize_capture_quality(result: Any) -> CaptureQuality:
             if capture.get("kind") != BASELINE_KIND
         ]
         if not successful:
-            empty.append(_file_name(item))
+            seen_failures.add(name)
+            empty.append(name)
         elif not useful:
-            baseline_only.append(_file_name(item))
+            seen_failures.add(name)
+            baseline_only.append(name)
 
     if not read_any:
         # A results list of unreadable entries means nothing landed.
@@ -180,7 +195,11 @@ def _named(files: list[str]) -> str:
 
 def build_quality_error(quality: CaptureQuality) -> str:
     """One sentence per failing reason, prefixed with its own reason code
-    (D4), naming the files behind it; never a bare "failed"."""
+    (D4), naming the files behind it; never a bare "failed". Returns ``""``
+    when the summary is passing, so no caller can print a false "this run
+    is not a pass" (D9)."""
+    if quality.verdict == PASS:
+        return ""
     parts: list[str] = []
     baseline_count = len(quality.baseline_only_files)
     if baseline_count:
