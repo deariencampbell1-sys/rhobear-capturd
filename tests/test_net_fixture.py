@@ -280,18 +280,9 @@ def test_wrapper_module_import_does_not_import_the_e2e_driver():
     assert "CLEAN" in proc.stdout
 
 
-def test_e2e_dev_license_code_is_the_documented_fixture_constant():
-    """The dev license code lives in one documented TEST-ONLY constant, not as
-    a bare string in the driver (review: hardcoded code, undeclared)."""
-    from _e2e_fixture_wrapper import E2E_DEV_LICENSE_CODE
-
-    assert E2E_DEV_LICENSE_CODE == "capturd-e2e-dev-code"
-    driver = (REPO / "scripts" / "e2e_live_drive.py").read_text(encoding="utf-8")
-    assert 'env["CAPTURD_PRO_CODES"] = E2E_DEV_LICENSE_CODE' in driver
-    assert 'env["RHOBEAR_CAPTURD_LICENSE"] = E2E_DEV_LICENSE_CODE' in driver
-    assert '"capturd-e2e-dev-code"' not in driver  # no bare literal left behind
-
-
+# (The r1-era "documented fixture licence constant" test was removed with the
+# constant itself: the harness no longer provisions any licence — the tripwire
+# in tests/test_import_path_hygiene.py enforces that for the whole tree.)
 class _LiveFixtureHandler(http.server.BaseHTTPRequestHandler):
     """One tiny always-200 origin, so the wrapper test proves a LIVE allow."""
 

@@ -17,10 +17,15 @@ Sections:
 3. ``director-rig/{film,scout,revoice,paid_boot}.py`` must do no import-time
    filesystem work against the ``/opt/sunsponge-capture`` default (real rigs
    override it via ``CAPTURD_REPO``).
+4. No tracked file writes a Pro-gate environment name: the gate compares a
+   caller-supplied value against a caller-supplied allow-list, so any in-tree
+   provisioning is a working licence bypass (issue #44 owns the gate design;
+   this repo must ship no working example of it).
 """
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -166,3 +171,105 @@ def test_rig_modules_import_without_the_default_repo_path(mod):
     assert "CAPTURD_REPO" in combined, (
         f"{mod} cannot be imported without /opt/sunsponge-capture but its "
         f"failure does not name the CAPTURD_REPO override:\n{combined}")
+
+
+# ---------------------------------------------------------------------------
+# 4. No committed licence provisioning. The Pro gate (capturd/pro.py, issue
+#    #44) reads its allow-list and licence from the caller-controlled
+#    environment, so ANY tracked file that writes one of the two Pro-gate env
+#    names is a working licence bypass checked into the repo. The scanner
+#    below trips on (a) an assignment of a string literal to either name in
+#    .py/.sh/.md, (b) any env-write call naming either name (setenv/setdefault/
+#    putenv), and (c) any ``env[...] =`` / ``os.environ[...] =`` assignment into
+#    either key with ANY right-hand side — pass-through to a child process must
+#    happen by inheriting the operator's environment, never by writing the key.
+#    The only allowed references are capturd/pro.py's own reads (a read never
+#    matches the assignment patterns) and tests/test_pro_env_config.py's
+#    monkeypatch-scoped licence fixtures.
+# ---------------------------------------------------------------------------
+
+# The two Pro-gate env names, assembled from fragments so this scanner file is
+# not itself a text hit for `grep -rn CAPTURD_PRO_CODES` (the guard must be
+# able to name what it forbids without ever spelling a provisioning line).
+_LICENCE_ENV_VARS = ("CAPTURD_" "PRO_CODES", "RHOBEAR_" "CAPTURD_LICENSE")
+_Q = "['\"]"  # either quote style, kept out of the raw f-strings below
+
+
+def _tracked_licence_scan_files() -> list[Path]:
+    """Every git-tracked .py/.sh/.md file (untracked dirs like .venv excluded
+    automatically — git ls-files only knows committed paths)."""
+    out = subprocess.run(
+        ["git", "ls-files", "*.py", "*.sh", "*.md"],
+        cwd=REPO, capture_output=True, text=True, check=True)
+    return [REPO / line for line in out.stdout.splitlines() if line.strip()]
+
+
+def _licence_assignment_violations(paths) -> list[str]:
+    """Report each line in *paths* that writes a Pro-gate env name.
+
+    A text scan is deliberately crude — that is what CI can enforce. It is a
+    tripwire: it catches the literal-name leak (and the provisioning-by-alias
+    shape r1 shipped), not every conceivable obfuscation.
+    """
+    var = "|".join(re.escape(v) for v in _LICENCE_ENV_VARS)
+    # (a) an assignment whose right-hand side is a string literal:
+    #     VAR = "..." / export VAR='...' / env["VAR"] = f"..."
+    #     (unquoted shell right-hand sides are outside this tripwire's net —
+    #     it catches the literal leak, it is not a proof)
+    literal_assign = re.compile(
+        rf"\b(?:export\s+)?(?:{var})\s*=\s*[fFrRbB]{{0,2}}{_Q}")
+    # (b) env-write calls naming either key: .setenv(..) / .setdefault(..) /
+    #     .putenv(..) — plus keyword-argument provisioning VAR="..." (caught by
+    #     (a) anywhere in the line).
+    env_write_call = re.compile(
+        rf"(?:setenv|setdefault|putenv)\s*\(\s*{_Q}(?:{var}){_Q}")
+    # (c) any assignment INTO either env key with any right-hand side — the
+    #     harness must never write the gate's inputs, only inherit them.
+    env_key_assign = re.compile(
+        rf"(?:env|os\.environ)\s*\[\s*{_Q}(?:{var}){_Q}\s*\]\s*=")
+    offenders: list[str] = []
+    for p in paths:
+        rel = (p.relative_to(REPO).as_posix()
+               if p.is_relative_to(REPO) else str(p))
+        if rel == "tests/test_pro_env_config.py":
+            continue  # monkeypatch-scoped licence fixtures — test-only by design
+        text = p.read_text(encoding="utf-8", errors="replace")
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if (literal_assign.search(line) or env_write_call.search(line)
+                    or env_key_assign.search(line)):
+                offenders.append(f"{rel}:{lineno}: {line.strip()}")
+    return offenders
+
+
+def test_no_committed_literal_licence_assignment():
+    """No tracked .py/.sh/.md may assign to CAPTURD_PRO_CODES or
+    RHOBEAR_CAPTURD_LICENSE. The Pro gate compares a caller-supplied value
+    against a caller-supplied allow-list, so in-tree provisioning is a working
+    licence bypass — the exact hole this PR exists to close (issue #44 owns the
+    gate design itself)."""
+    offenders = _licence_assignment_violations(_tracked_licence_scan_files())
+    assert not offenders, (
+        "a tracked file writes a Pro-gate env name — that is a working licence "
+        "bypass checked into the repo (take the licence from the operator's "
+        "environment or skip loudly; never provision one):\n  "
+        + "\n  ".join(offenders))
+
+
+@pytest.mark.parametrize("kind, body", [
+    # planted, out-of-tree violations — the tripwire must fire on the shapes a
+    # leak actually takes (here: a .py module and a .sh script).
+    ("py", 'import os\n{VAR}="x"\n'),
+    ("sh", '#!/bin/sh\nexport {VAR}="y"\n'),
+    ("md", '```sh\n{VAR}="z"  # documented provisioning is still provisioning\n```\n'),
+])
+def test_licence_tripwire_fires_on_planted_violations(tmp_path, kind, body):
+    """Plant a literal assignment in a temp file (out of the tracked tree) and
+    prove the scanner reports it — the tree-scan test above must never be able
+    to go quietly vacuous."""
+    planted = tmp_path / f"planted.{kind}"
+    # The name is interpolated so this test's own source never contains a
+    # literal assignment line for the scanner to trip over.
+    planted.write_text(body.format(VAR=_LICENCE_ENV_VARS[0]), encoding="utf-8")
+    offenders = _licence_assignment_violations([planted])
+    assert len(offenders) == 1, offenders
+    assert f"planted.{kind}:2" in offenders[0], offenders
