@@ -167,6 +167,85 @@ def test_hidden_and_disabled_controls_are_skipped():
 
 
 # ---------------------------------------------------------------------------
+# The inline-style visibility branches and both non-attribute disabled
+# branches: the module's "never plan an unclickable control" guarantee.
+# ---------------------------------------------------------------------------
+
+
+def test_inline_display_none_is_skipped():
+    root = parse_html(
+        "<main>"
+        '<button style="display:none" id="gone">Ghost</button>'
+        '<button id="live" aria-expanded="false">Live</button>'
+        "</main>"
+    )
+    plan = plan_candidates(root)
+    assert [c.label for c in plan.candidates] == ["Live"]
+
+
+def test_inline_visibility_hidden_is_skipped():
+    root = parse_html(
+        "<main>"
+        '<button style="visibility:hidden" id="veiled">Veiled</button>'
+        '<button id="live" aria-expanded="false">Live</button>'
+        "</main>"
+    )
+    plan = plan_candidates(root)
+    assert [c.label for c in plan.candidates] == ["Live"]
+
+
+def test_inline_opacity_zero_is_skipped():
+    root = parse_html(
+        "<main>"
+        '<button style="opacity:0" id="faint">Faint</button>'
+        '<button id="live" aria-expanded="false">Live</button>'
+        "</main>"
+    )
+    plan = plan_candidates(root)
+    assert [c.label for c in plan.candidates] == ["Live"]
+
+
+def test_inline_opacity_half_stays_planned():
+    # Only opacity 0 hides; 0.5 is a dimmed but visible, clickable control.
+    root = parse_html('<main><button style="opacity:0.5" id="dim">Dimmed</button></main>')
+    plan = plan_candidates(root)
+    assert [c.label for c in plan.candidates] == ["Dimmed"]
+
+
+def test_inline_display_none_important_is_skipped():
+    root = parse_html(
+        "<main>"
+        '<button style="display: none !important" id="gone">Ghost</button>'
+        '<button id="live" aria-expanded="false">Live</button>'
+        "</main>"
+    )
+    plan = plan_candidates(root)
+    assert [c.label for c in plan.candidates] == ["Live"]
+
+
+def test_aria_disabled_true_is_skipped():
+    root = parse_html(
+        "<main>"
+        '<button aria-disabled="true" id="stuck">Stuck</button>'
+        '<button id="live" aria-expanded="false">Live</button>'
+        "</main>"
+    )
+    plan = plan_candidates(root)
+    assert [c.label for c in plan.candidates] == ["Live"]
+
+
+def test_disabled_class_is_skipped():
+    root = parse_html(
+        "<main>"
+        '<button class="btn disabled" id="stuck">Stuck</button>'
+        '<button id="live" aria-expanded="false">Live</button>'
+        "</main>"
+    )
+    plan = plan_candidates(root)
+    assert [c.label for c in plan.candidates] == ["Live"]
+
+
+# ---------------------------------------------------------------------------
 # One test per control kind (brief 01b), all against inline HTML strings.
 # ---------------------------------------------------------------------------
 
