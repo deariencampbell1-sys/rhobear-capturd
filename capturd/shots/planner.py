@@ -881,12 +881,16 @@ def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int 
     never set iteration. ``base_url`` is accepted for the live-clicking layer
     (brief 01d) and does not affect the pure plan.
 
-    The reason is exactly one of ``"ok"`` (candidates planned),
-    ``"no-candidates"`` (the document has nothing to interact with),
-    ``"truncated"`` (a caller-imposed ``max_states`` cap cut the plan — to any
-    size, including zero) and ``"too-large"`` (the document exceeds the walk
-    ceilings: more than 10 000 elements or deeper than 256 levels). There is no
-    live-versus-rested reason code here; that distinction is brief 01d's.
+    The reason is exactly one of ``"ok"`` (an untruncated plan with
+    candidates), ``"no-candidates"`` (the document has nothing to interact
+    with), ``"truncated"`` (``limits["truncated"]`` is true — a caller-imposed
+    ``max_states`` cap cut the plan, to any size, including zero and including
+    a plan that still holds candidates) and ``"too-large"`` (the document
+    exceeds the walk ceilings: more than 10 000 elements or deeper than 256
+    levels). D3 invariant: ``reason == "truncated"`` whenever
+    ``limits["truncated"]`` is true; ``"ok"`` is only for an untruncated plan.
+    There is no live-versus-rested reason code here; that distinction is
+    brief 01d's.
 
     ``limits["discovered"]`` counts the candidates actually validated into
     the plan. The cap really bounds the scan (round 2, D4): discovery stops
@@ -1017,12 +1021,13 @@ def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int 
         for index_no, candidate in enumerate(candidates[:cap])
     ]
 
-    if final:
-        reason = "ok"
-    elif truncated:
-        # D4: a cap that truncates the plan — to any size, including zero — is
-        # "truncated", never "no-candidates".
+    if truncated:
+        # D3: a cap that truncates the plan — to any size, including zero,
+        # and including a plan that still holds candidates — is "truncated",
+        # never "ok", never "no-candidates".
         reason = "truncated"
+    elif final:
+        reason = "ok"
     else:
         reason = "no-candidates"
     return CapturePlan(
