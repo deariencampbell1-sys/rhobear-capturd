@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from capturd.shots.quality import (
     BASELINE_ONLY,
+    NO_CAPTURES,
     NO_SUCCESSFUL_CAPTURE,
     PASS,
     build_quality_error,
@@ -112,6 +113,40 @@ def test_mixed_two_files_names_both_counts_with_pluralisation() -> None:
     plural_message = build_quality_error(plural)
     assert "2 files only produced a baseline screenshot." in plural_message
     assert "2 files produced no successful screenshots." in plural_message
+
+
+def test_empty_results_is_not_a_pass() -> None:
+    # A run whose results collection is empty landed nothing: that is a
+    # failure with its own reason code, never a pass (D1).
+    quality = summarize_capture_quality({})
+    assert quality.verdict == NO_CAPTURES
+    assert quality.reason_codes == [NO_CAPTURES]
+    assert is_passing({}) is False
+
+    empty_list = summarize_capture_quality({"results": []})
+    assert empty_list.verdict == NO_CAPTURES
+    assert is_passing({"results": []}) is False
+
+
+def test_results_key_absent_is_not_a_pass() -> None:
+    # {} — a result with no ``results`` key at all: NO_CAPTURES (D1).
+    quality = summarize_capture_quality({})
+    assert quality.no_captures is True
+    assert quality.baseline_only_files == []
+    assert quality.empty_files == []
+    assert classify_result({}) == (NO_CAPTURES, [NO_CAPTURES])
+    assert is_passing({}) is False
+
+
+def test_results_that_is_not_a_list_is_not_a_pass() -> None:
+    # A truthy non-list ``results`` (string, dict, number) is treated as
+    # no captures — same NO_CAPTURES failure, never a silent pass (D3).
+    for value in ("ab", {"file": "page-01.png"}, 7, True, None, ""):
+        result = {"results": value}
+        quality = summarize_capture_quality(result)  # type: ignore[arg-type]
+        assert quality.verdict == NO_CAPTURES
+        assert quality.reason_codes == [NO_CAPTURES]
+        assert is_passing(result) is False  # type: ignore[arg-type]
 
 
 def test_missing_manifest_is_empty() -> None:
