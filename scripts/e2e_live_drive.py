@@ -47,7 +47,7 @@ FIXTURES = REPO / "tests" / "fixtures"
 # TEST-ONLY server wrapper from the shared harness-constants module (kept
 # separate so tests can import it without pulling in this driver).
 sys.path.insert(0, str(REPO / "scripts"))
-from _e2e_fixture_wrapper import SERVER_FIXTURE_WRAPPER  # noqa: E402
+from _e2e_fixture_wrapper import E2E_DEV_LICENSE_CODE, SERVER_FIXTURE_WRAPPER  # noqa: E402
 from e2e_mcp_stdio import McpStdioClient, StubGateway  # noqa: E402
 
 
@@ -101,11 +101,13 @@ def main() -> int:
 
     # The demo.* surface is the paid Pro tier; the E2E harness provisions its
     # own dev license code for the SPAWNED SERVER PROCESS ONLY (code-match via
-    # CAPTURD_PRO_CODES). This unlocks the paywall in this test pair alone —
-    # it is process-local configuration by the test harness, not a change to
-    # capturd.pro or any licensing behaviour, and it is visible right here.
-    env["CAPTURD_PRO_CODES"] = "capturd-e2e-dev-code"
-    env["RHOBEAR_CAPTURD_LICENSE"] = "capturd-e2e-dev-code"
+    # CAPTURD_PRO_CODES). The code is the documented test-fixture constant in
+    # scripts/_e2e_fixture_wrapper.py (E2E_DEV_LICENSE_CODE) — test-only, not a
+    # credential, not a valid production code. This unlocks the paywall in
+    # this test pair alone — it is process-local configuration by the test
+    # harness, not a change to capturd.pro or any licensing behaviour.
+    env["CAPTURD_PRO_CODES"] = E2E_DEV_LICENSE_CODE
+    env["RHOBEAR_CAPTURD_LICENSE"] = E2E_DEV_LICENSE_CODE
     print("[live] TEST FIXTURE: dev license provisioned for the spawned server "
           "process only (CAPTURD_PRO_CODES/RHOBEAR_CAPTURD_LICENSE)")
 

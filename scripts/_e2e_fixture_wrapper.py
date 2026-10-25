@@ -14,6 +14,9 @@ exactly that one origin is allowed. Every other URL — metadata, RFC1918, other
 loopback ports — still hits the real fail-closed guard. Production never runs
 this wrapper; production processes (``python -m capturd.mcp.server``, the
 hosted service) never register anything and stay fail-closed.
+
+``E2E_DEV_LICENSE_CODE`` is the documented TEST-ONLY license constant the
+harness provisions into the spawned server process (see below).
 """
 
 SERVER_FIXTURE_WRAPPER = """\
@@ -29,3 +32,10 @@ from capturd.mcp.server import main  # noqa: E402
 
 sys.exit(main())
 """
+
+# TEST-ONLY, unlocks the Pro paywall for the E2E harness; not a credential and
+# not a valid production code. e2e_live_drive.py sets CAPTURD_PRO_CODES and
+# RHOBEAR_CAPTURD_LICENSE from this constant for the SPAWNED SERVER PROCESS
+# ONLY — process-local configuration by the test harness, not a change to
+# capturd.pro or any licensing behaviour.
+E2E_DEV_LICENSE_CODE = "capturd-e2e-dev-code"
