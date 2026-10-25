@@ -19,8 +19,18 @@ the brief demands:
 """
 from __future__ import annotations
 
+import http.server
+import json
 import logging
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
 import textwrap
+import threading
+from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 
@@ -33,6 +43,8 @@ from capturd._net import (
     registered_test_fixture_origin,
     register_test_fixture_origin,
 )
+
+REPO = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(autouse=True)
@@ -186,12 +198,15 @@ def test_wrapped_guard_with_no_registration_delegates_everything():
 
 
 # ---------------------------------------------------------------------------
-# The live-drive E2E wrapper stays wired to this seam (compile + tripwire).
+# The live-drive E2E wrapper stays wired to this seam (compile + tripwire),
+# and the rebind it performs is proven BEHAVIOURALLY below.
 # ---------------------------------------------------------------------------
 
 def test_e2e_wrapper_uses_the_canonical_seam():
     """The e2e server wrapper must compile and route through capturd._net."""
-    from e2e_live_drive import SERVER_FIXTURE_WRAPPER
+    # Import ONLY the small constants module — never the e2e_live_drive driver
+    # (which drags in the MCP stdio client and, transitively, playwright).
+    from _e2e_fixture_wrapper import SERVER_FIXTURE_WRAPPER
 
     compile(textwrap.dedent(SERVER_FIXTURE_WRAPPER), "<server-fixture-wrapper>", "exec")
     assert "register_test_fixture_origin" in SERVER_FIXTURE_WRAPPER
@@ -200,3 +215,134 @@ def test_e2e_wrapper_uses_the_canonical_seam():
     # The production entry point (`python -m capturd.mcp.server`) stays untouched;
     # the wrapper exists only for the explicitly-launched test server process.
     assert net.registered_test_fixture_origin() is None
+
+
+def test_wrapper_module_import_does_not_import_the_e2e_driver():
+    """Importing _e2e_fixture_wrapper must stay cheap: no e2e_live_drive (and
+    no playwright) may land in sys.modules. Runs in a fresh subprocess so the
+    assertion cannot be skewed by other tests importing the driver earlier."""
+    code = (
+        "import sys, _e2e_fixture_wrapper\n"
+        "assert 'e2e_live_drive' not in sys.modules, 'e2e_live_drive got imported'\n"
+        "assert 'playwright' not in sys.modules, 'playwright got imported'\n"
+        "print('CLEAN')\n"
+    )
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(REPO / "scripts")
+    proc = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True,
+        env=env, timeout=30, cwd=tempfile.gettempdir())
+    assert proc.returncode == 0, proc.stderr
+    assert "CLEAN" in proc.stdout
+
+
+class _LiveFixtureHandler(http.server.BaseHTTPRequestHandler):
+    """One tiny always-200 origin, so the wrapper test proves a LIVE allow."""
+
+    def do_GET(self):
+        body = b"captured-e2e-fixture-ok\n"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):  # keep test output clean
+        pass
+
+
+def _run_wrapper_against_fake_server(origin: str) -> dict:
+    """Run the REAL SERVER_FIXTURE_WRAPPER body in a fresh subprocess against a
+    fake ``capturd.mcp.server`` and return its verdict dict.
+
+    The fake package on sys.path ships a byte-for-byte copy of the real
+    ``capturd/_net.py`` (copied at test time, so the wrapper runs the real seam
+    logic); only ``capturd.mcp.server`` is faked, with a fail-closed
+    ``_reject_private_url`` that rejects EVERYTHING — so any ALLOWED result can
+    only come from the wrapper's registration + rebind actually taking effect.
+    """
+    from _e2e_fixture_wrapper import SERVER_FIXTURE_WRAPPER
+
+    with tempfile.TemporaryDirectory(prefix="wrapper-check-") as tmpname:
+        tmp = Path(tmpname)
+        pkg = tmp / "capturd" / "mcp"
+        pkg.mkdir(parents=True)
+        (tmp / "capturd" / "__init__.py").write_text("", encoding="utf-8")
+        (pkg / "__init__.py").write_text("", encoding="utf-8")
+        shutil.copyfile(REPO / "capturd" / "_net.py", tmp / "capturd" / "_net.py")
+        port = urlparse(origin).port
+        server_py = textwrap.dedent(f"""\
+            import json
+            import urllib.request
+
+            REGISTERED = {origin!r}
+            UNMET_PORT = "http://127.0.0.1:{port + 1}/x"
+            METADATA = "http://169.254.169.254/latest/meta-data/"
+            RFC1918 = "http://10.1.2.3/x"
+
+            def _reject_private_url(url):
+                # Stand-in for the production fail-closed guard: rejects
+                # EVERYTHING, so any ALLOWED result below can only come from
+                # the wrapper's rebind.
+                raise ValueError("fail-closed stand-in rejected: " + url)
+
+            def main():
+                results = {{}}
+                # (a) the registered loopback origin must be allowed by the
+                # wrapped guard AND actually served by the live http.server.
+                try:
+                    _reject_private_url(REGISTERED)
+                    with urllib.request.urlopen(REGISTERED, timeout=5) as resp:
+                        body = resp.read()
+                    results["registered"] = "ALLOWED %d" % len(body)
+                except Exception as exc:
+                    results["registered"] = "FAILED %r" % (exc,)
+                # (b)-(d) everything else must still hit the fail-closed stand-in.
+                for name, url in (("unmet_port", UNMET_PORT),
+                                  ("metadata", METADATA), ("rfc1918", RFC1918)):
+                    try:
+                        _reject_private_url(url)
+                        results[name] = "ALLOWED (BAD)"
+                    except ValueError:
+                        results[name] = "REJECTED"
+                print("WRAPPER_CHECK " + json.dumps(results))
+                return 0
+            """)
+        (pkg / "server.py").write_text(server_py, encoding="utf-8")
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(tmp)  # fake capturd wins; real one must not load
+        proc = subprocess.run(
+            [sys.executable, "-c", SERVER_FIXTURE_WRAPPER, origin],
+            capture_output=True, text=True, timeout=60, env=env, cwd=tmp)
+    assert proc.returncode == 0, (
+        f"wrapper subprocess failed rc={proc.returncode}\n"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}")
+    lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("WRAPPER_CHECK ")]
+    assert len(lines) == 1, (
+        f"expected exactly one WRAPPER_CHECK line, got {lines}\nstderr:\n{proc.stderr}")
+    return json.loads(lines[0].split(" ", 1)[1])
+
+
+def test_wrapper_rebind_allows_only_the_registered_live_origin():
+    """Behavioural proof of the E2E wrapper's rebind (the old test only
+    compile-checked the source string). Runs the real wrapper body in a fresh
+    subprocess against a fake server module and a REAL http.server on
+    127.0.0.1 with an ephemeral port, asserting:
+      (a) the registered loopback origin is allowed (and actually served),
+      (b) an unmet loopback port is rejected,
+      (c) a cloud-metadata URL is rejected,
+      (d) an RFC1918 URL is rejected.
+    """
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _LiveFixtureHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        port = srv.server_address[1]
+        origin = f"http://127.0.0.1:{port}/signup-flow.html"
+        results = _run_wrapper_against_fake_server(origin)
+        assert results["registered"].startswith("ALLOWED "), results
+        assert results["unmet_port"] == "REJECTED", results
+        assert results["metadata"] == "REJECTED", results
+        assert results["rfc1918"] == "REJECTED", results
+    finally:
+        srv.shutdown()
+        srv.server_close()
