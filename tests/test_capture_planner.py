@@ -350,6 +350,22 @@ def test_role_tab_in_navigation_is_excluded_and_counted():
     assert plan.limits["navigation_excluded"] == 1
 
 
+def test_bootstrap_nav_tabs_are_excluded_as_chrome():
+    # Architect decision D1 (review round 1): ".nav" stays in
+    # NAVIGATION_SELECTOR_HINTS for upstream parity. Accepted consequence,
+    # locked here: a Bootstrap ul.nav.nav-tabs > a[data-toggle=tab] link tab is
+    # chrome and is excluded, where upstream planned it as a page control.
+    assert ".nav" in NAVIGATION_SELECTOR_HINTS
+    root = parse_html(
+        "<ul class='nav nav-tabs'><li><a data-toggle='tab' href='#a'>A</a></li></ul>"
+    )
+    plan = plan_candidates(root)
+
+    assert plan.candidates == []
+    assert plan.reason == "no-candidates"
+    assert plan.limits["navigation_excluded"] == 1
+
+
 # ---------------------------------------------------------------------------
 # One test per control kind (brief 01b), all against inline HTML strings.
 # ---------------------------------------------------------------------------

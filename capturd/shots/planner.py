@@ -13,6 +13,14 @@ document. The planner therefore plans from the *rested* document; the
 live-clicking layer (brief 01d, ``capturd.shots.capture``) reuses this same pure
 code against the live DOM rather than keeping a second implementation.
 
+Navigation chrome and ``.nav``: ``NAVIGATION_SELECTOR_HINTS`` includes ``.nav``
+for upstream parity (scout-src ``planner.js`` plans from the same hint list).
+Accepted, on the record: a Bootstrap-style ``ul.nav.nav-tabs >
+a[data-toggle="tab"]`` is chrome and is excluded from the plan, where upstream
+planned such link tabs as ``page`` controls. Captur'd excludes chrome where
+upstream planned it; a framework that hangs its tabs off ``.nav`` is captured
+only if it also marks them up some other way outside navigation containers.
+
 Everything here is deterministic: identical HTML in produces an identical
 ``CapturePlan`` out, byte for byte under ``repr``. All ordering comes from
 document order and explicit sorts — never from set iteration.
