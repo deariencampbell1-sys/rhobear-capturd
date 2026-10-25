@@ -404,6 +404,62 @@ def test_bootstrap_nav_tabs_are_excluded_as_chrome():
 
 
 # ---------------------------------------------------------------------------
+# Hostile input: the walk ceilings fail the plan with a reason, never a crash.
+# ---------------------------------------------------------------------------
+
+
+def test_deep_document_fails_with_a_reason_not_a_crash():
+    # 400 nested levels: the recursive walks used to raise RecursionError out
+    # of plan_candidates; the plan must fail with reason="too-large" instead.
+    html = "<div>" * 400 + "<button>Bottom</button>" + "</div>" * 400
+    plan = plan_candidates(parse_html(html))
+
+    assert plan.candidates == []
+    assert plan.reason == "too-large"
+    assert plan.limits["too_large"] is True
+
+
+def test_oversized_document_fails_with_a_reason_not_a_crash():
+    # More than 10 000 elements exceeds the node ceiling -> too-large.
+    html = "<span></span>" * 10_001
+    plan = plan_candidates(parse_html(html))
+
+    assert plan.candidates == []
+    assert plan.reason == "too-large"
+    assert plan.limits["too_large"] is True
+
+
+def test_documents_within_the_ceilings_still_plan():
+    # Boundary: 256 levels are allowed - the button sits at depth 256.
+    html = "<div>" * 255 + "<button>Bottom</button>" + "</div>" * 255
+    plan = plan_candidates(parse_html(html))
+
+    assert plan.reason == "ok"
+    assert [c.label for c in plan.candidates] == ["Bottom"]
+
+
+def test_reason_taxonomy_is_exactly_four_codes():
+    # D3/D4: the reason is exactly one of ok / no-candidates / truncated /
+    # too-large. There is no "base-only" code in this module: live versus
+    # rested is brief 01d's business, not the planner's.
+    ok = plan_candidates(parse_html("<main><button>Go</button></main>"))
+    nothing = plan_candidates(parse_html(""))
+    capped = plan_candidates(parse_html("<main><button>Go</button></main>"), max_states=0)
+    deep = plan_candidates(parse_html("<div>" * 300 + "<button>Go</button>" + "</div>" * 300))
+
+    assert ok.reason == "ok"
+    assert nothing.reason == "no-candidates"
+    assert capped.reason == "truncated"
+    assert deep.reason == "too-large"
+    assert {ok.reason, nothing.reason, capped.reason, deep.reason} == {
+        "ok",
+        "no-candidates",
+        "truncated",
+        "too-large",
+    }
+
+
+# ---------------------------------------------------------------------------
 # One test per control kind (brief 01b), all against inline HTML strings.
 # ---------------------------------------------------------------------------
 
