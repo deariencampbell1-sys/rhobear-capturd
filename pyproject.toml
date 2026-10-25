@@ -35,8 +35,38 @@ dependencies = [
 # faster-whisper is CT2-backed (~5x openai-whisper) and offline-capable.
 # Pull only when you actually want voice mode; ~500MB of native deps.
 voice = ["faster-whisper>=1.0", "sounddevice>=0.4", "miniaudio>=1.60"]
-dev = ["pytest>=7", "pytest-asyncio>=0.21"]
-all = ["faster-whisper>=1.0", "sounddevice>=0.4", "miniaudio>=1.60", "pytest>=7", "pytest-asyncio>=0.21"]
+# Development / test dependencies. Everything the collected test suite needs
+# is declared here so a fresh clone reproduces the green run from committed
+# setup alone (no hand-set PYTHONPATH, no undeclared installs):
+#
+#   python -m pip install -e ".[dev]"
+#   python -m playwright install chromium
+#   python -m playwright install chrome
+#   # plus ffmpeg/ffprobe on PATH (apt install ffmpeg / choco install ffmpeg)
+#
+# `playwright install chrome` is required for the full suite: three
+# tests/test_recorder_agent.py content-mode tests launch channel="chrome".
+# Expected skips in a clean Linux run: the gateway-key LLM test, the Postgres
+# integration test, and the voice-loop fixture test (miniaudio — installed
+# only via the `voice` extra above), plus the two Windows-only finisher path
+# tests (they run on Windows, where the two POSIX ones skip instead).
+#
+# fastapi/uvicorn: the hosted service surfaces under test (tests/
+# test_service_billing_caps.py, tests/test_sqlite_migrate_tool.py) import the
+# FastAPI app. numpy: imported unguarded by tests/test_voice_loop.py and
+# tests/test_workflow_mode.py. cryptography: the Ed25519 license-verification
+# tests in tests/test_pro_env_config.py exercise real key material.
+# miniaudio/faster-whisper/sounddevice are deliberately NOT here — installing
+# them changes the expected skip count (they belong to `voice`).
+dev = [
+    "pytest>=7",
+    "pytest-asyncio>=0.21",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.23",
+    "numpy>=1.26",
+    "cryptography>=42",
+]
+all = ["faster-whisper>=1.0", "sounddevice>=0.4", "miniaudio>=1.60", "pytest>=7", "pytest-asyncio>=0.21", "fastapi>=0.110", "uvicorn[standard]>=0.23", "numpy>=1.26", "cryptography>=42"]
 
 [project.scripts]
 # New top-level dispatcher: `capturd shots ...` | `capturd walk ...` | `capturd serve`
@@ -59,6 +89,12 @@ packages = ["capturd", "capturd.shots", "capturd.walk", "capturd.mcp"]
 # e2e tests need network + browser + a configured AI gateway; run them
 # explicitly with `pytest -m e2e`.
 addopts = "-m 'not e2e'"
+# Import discovery without hand-set PYTHONPATH: `scripts` holds the e2e
+# harness modules (e2e_mcp_stdio / e2e_walkthrough_proof, imported by tests
+# and by director-rig/film.py), `director-rig` holds the rig modules its own
+# tests import. `python -m pytest -q` then collects and passes with no
+# environment variables set (pytest >= 7 supports the pythonpath ini).
+pythonpath = ["scripts", "director-rig"]
 markers = [
     "slow: marks tests as slow (browser-dependent, skipped by default)",
     "e2e: marks end-to-end proof tests (network + browser + AI pipeline — deselected by default)",

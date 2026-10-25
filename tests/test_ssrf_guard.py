@@ -11,7 +11,11 @@ version.
 """
 import pytest
 
-from capturd._net import is_private_ip
+from capturd._net import (
+    clear_test_fixture_origin,
+    is_private_ip,
+    register_test_fixture_origin,
+)
 
 
 # Every address here MUST be treated as private/internal (BLOCKED). Includes
@@ -52,6 +56,53 @@ def test_is_private_ip_blocks_internal_and_malformed(ip):
 @pytest.mark.parametrize("ip", ["8.8.8.8", "1.1.1.1"])
 def test_is_private_ip_allows_public(ip):
     assert is_private_ip(ip) is False
+
+
+# ---------------------------------------------------------------------------
+# Direct public-call regression: the production MCP ``demo.record`` guard must
+# keep failing on loopback/metadata/private literals even though the live-drive
+# E2E harness (scripts/e2e_live_drive.py) needs a TEST-ONLY loopback allowance.
+# IP-literal hosts resolve via getaddrinfo without any DNS traffic, so these
+# are deterministic and non-destructive.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("url", [
+    "http://127.0.0.1/signup-flow.html",
+    "http://[::1]/signup-flow.html",
+    "http://169.254.169.254/latest/meta-data/",
+    "http://10.0.0.1/",
+    "http://172.16.0.1/",
+    "http://192.168.1.1/",
+    "http://[fe80::1]/",
+    # IPv6-mapped IPv4 metadata/loopback — the headline bypass class.
+    "http://[::ffff:169.254.169.254]/",
+    "http://[::ffff:127.0.0.1]/",
+])
+def test_production_url_guard_rejects_internal_literals(url):
+    from capturd.mcp.server import _reject_private_url
+
+    with pytest.raises(ValueError):
+        _reject_private_url(url)
+
+
+def test_production_url_guard_untouched_by_fixture_registration():
+    """The test-fixture seam must be opt-in per process, never global.
+
+    Registering a loopback fixture origin (as the live-drive E2E wrapper does
+    in its own subprocess) must NOT relax the production
+    ``capturd.mcp.server._reject_private_url`` — the wrapped guard only exists
+    in the explicitly-launched test server process.
+    """
+    from capturd.mcp.server import _reject_private_url
+
+    register_test_fixture_origin("http://127.0.0.1:8123")
+    try:
+        with pytest.raises(ValueError):
+            _reject_private_url("http://127.0.0.1:8123/signup-flow.html")
+        with pytest.raises(ValueError):
+            _reject_private_url("http://127.0.0.1/signup-flow.html")
+    finally:
+        clear_test_fixture_origin()
 
 
 def test_mcp_server_delegates_to_shared_guard():

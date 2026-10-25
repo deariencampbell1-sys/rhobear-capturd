@@ -11,6 +11,15 @@ the export is deterministic in CI. Headless here (visible=False) so it runs
 without a display; the only difference on a real box is visible=True pops
 the window on screen.
 
+TEST-ONLY fixture seam: the production SSRF guard correctly rejects 127.0.0.1,
+so the MCP server is launched through SERVER_FIXTURE_WRAPPER below, which
+registers THIS script's loopback fixture origin (http://127.0.0.1:<ephemeral>)
+via the explicit ``capturd._net.register_test_fixture_origin`` seam and wraps
+the server's URL guard so exactly that one origin is allowed. Every allowance
+hit is logged with a ``[capturd TEST FIXTURE]`` marker. Nothing is enabled by
+environment alone, and production processes (`python -m capturd.mcp.server`,
+the hosted service) never register anything — they stay fail-closed.
+
 Usage:
     python scripts/e2e_live_drive.py [--out-dir DIR] [--keep]
 """
@@ -36,6 +45,28 @@ FIXTURES = REPO / "tests" / "fixtures"
 # Reuse the stub gateway + MCP stdio client from the agent-mode E2E.
 sys.path.insert(0, str(REPO / "scripts"))
 from e2e_mcp_stdio import McpStdioClient, StubGateway  # noqa: E402
+
+
+# The MCP server subprocess is launched through this explicit TEST-ONLY
+# wrapper instead of `python -m capturd.mcp.server`. It registers this
+# script's loopback fixture origin with the canonical seam in capturd._net
+# (which refuses anything that is not a loopback IP literal with an explicit
+# port) and wraps the server's URL guard so exactly that origin passes. Every
+# other URL — metadata, RFC1918, other loopback ports — still hits the real
+# fail-closed guard. Production never runs this wrapper.
+SERVER_FIXTURE_WRAPPER = """\
+import sys
+
+from capturd import _net
+import capturd.mcp.server as _srv
+
+_net.register_test_fixture_origin(sys.argv[1])
+_srv._reject_private_url = _net.guard_with_test_fixture_allowance(_srv._reject_private_url)
+
+from capturd.mcp.server import main  # noqa: E402
+
+sys.exit(main())
+"""
 
 
 def _free_port() -> int:
@@ -81,6 +112,16 @@ def main() -> int:
     env["PYTHONUNBUFFERED"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
 
+    # The demo.* surface is the paid Pro tier; the E2E harness provisions its
+    # own dev license code for the SPAWNED SERVER PROCESS ONLY (code-match via
+    # CAPTURD_PRO_CODES). This unlocks the paywall in this test pair alone —
+    # it is process-local configuration by the test harness, not a change to
+    # capturd.pro or any licensing behaviour, and it is visible right here.
+    env["CAPTURD_PRO_CODES"] = "capturd-e2e-dev-code"
+    env["RHOBEAR_CAPTURD_LICENSE"] = "capturd-e2e-dev-code"
+    print("[live] TEST FIXTURE: dev license provisioned for the spawned server "
+          "process only (CAPTURD_PRO_CODES/RHOBEAR_CAPTURD_LICENSE)")
+
     # stub gateway (enrichment only)
     gw_port = _free_port()
     gw_srv = http.server.ThreadingHTTPServer(("127.0.0.1", gw_port), StubGateway)
@@ -88,7 +129,10 @@ def main() -> int:
     env["RHOBEAR_GW_BASE_URL"] = f"http://127.0.0.1:{gw_port}/v1"
     env["RHOBEAR_GW_API_KEY"] = "e2e-stub-key"
 
-    client = McpStdioClient([sys.executable, "-m", "capturd.mcp.server"], env=env, cwd=REPO)
+    client = McpStdioClient(
+        [sys.executable, "-c", SERVER_FIXTURE_WRAPPER, app_url], env=env, cwd=REPO)
+    print(f"[live] TEST FIXTURE: MCP server launched with explicit loopback "
+          f"allowance for {app_url} — production processes never get this")
     failures: list[str] = []
     frames_dir = work / "stream-frames"
     frames_dir.mkdir(exist_ok=True)
