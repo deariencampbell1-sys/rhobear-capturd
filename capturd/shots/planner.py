@@ -238,6 +238,17 @@ def _escape_css(value: str) -> str:
     return escaped
 
 
+def _escape_attr_value(value: str) -> str:
+    """Escape an attribute value for a ``[attr="..."]`` selector (D3).
+
+    One helper for both directions: this escapes for generation and
+    :func:`_css_unescape` reads it back in the uniqueness verifier, so a round
+    trip is exact. The backslash is doubled first, then the quote — otherwise
+    the escape backslash introduced for the quote would be doubled too.
+    """
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
 _CSS_ESCAPE_RE = re.compile(r"\\([0-9a-fA-F]{1,6})(?:\r\n|[ \t\r\n\f])?|\\(.)", re.DOTALL)
 
 
@@ -468,7 +479,7 @@ class _PlanIndex:
             value = node.attrs.get(attr)
             if not value:
                 continue
-            selector = f'{node.tag}[{attr}="{value.replace(chr(34), chr(92) + chr(34))}"]'
+            selector = f'{node.tag}[{attr}="{_escape_attr_value(value)}"]'
             if self.count_matches(selector) == 1:
                 return selector, "attribute"
         path = _structural_path(node, self)

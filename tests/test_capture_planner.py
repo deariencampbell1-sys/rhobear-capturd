@@ -329,7 +329,9 @@ def test_attribute_value_backslash_round_trips():
     plan = plan_candidates(root)
 
     (candidate,) = plan.candidates
-    assert candidate.label == "Restore"
+    # title is a label source ahead of text, so the round-tripped value is the
+    # label itself — the raw attribute value, backslash intact.
+    assert candidate.label == "C:\\backups"
     assert candidate.selector_strategy == "attribute"
     assert candidate.selector == 'button[title="C:\\\\backups"]'
     assert plan.limits["dropped_ambiguous"] == 0
