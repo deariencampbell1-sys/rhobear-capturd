@@ -623,7 +623,10 @@ def _classify_sweep(node: _Node) -> Optional[ControlKind]:
         return ControlKind.HASH_LINK
     if _CAROUSEL_RE.search(combined):
         return ControlKind.CAROUSEL
-    if len(label) >= 2 and not _ACTION_RE.search(combined):
+    # Action-word denylist (D5): matches the control's label text only — not
+    # role, not class text, not href — same verb list as upstream planner.js.
+    # plan_candidates counts every drop in limits["dropped_action_labels"].
+    if len(label) >= 2 and not _ACTION_RE.search(label):
         return ControlKind.CONTROL
     return None
 
@@ -727,6 +730,7 @@ def plan_candidates(root: _Node, base_url: Optional[str] = None, max_states: int
     seen: set[str] = set()
     dropped_ambiguous = 0
     navigation_excluded = 0
+    dropped_action_labels = 0
 
     def add(node: _Node, kind: ControlKind, reason: str, priority: int) -> None:
         nonlocal dropped_ambiguous, navigation_excluded
@@ -775,6 +779,9 @@ def plan_candidates(root: _Node, base_url: Optional[str] = None, max_states: int
             continue
         kind = _classify_sweep(node)
         if kind is None:
+            # D5: every action-word drop is counted and visible to the operator.
+            if _ACTION_RE.search(_text_of(node).lower()):
+                dropped_action_labels += 1
             continue
         add(node, kind, f"{kind.value} control {index_no + 1}", _PRIORITY_BY_KIND[kind])
 
@@ -782,12 +789,16 @@ def plan_candidates(root: _Node, base_url: Optional[str] = None, max_states: int
     cap = max(0, max_states)
     truncated = len(candidates) > cap
     final = [
-        replace(candidate, id=f"{index + 1:02d}-{candidate.kind}")
-        for index, candidate in enumerate(candidates[:cap])
+        replace(candidate, id=f"{index_no + 1:02d}-{candidate.kind}")
+        for index_no, candidate in enumerate(candidates[:cap])
     ]
 
     if final:
         reason = "ok"
+    elif truncated:
+        # D4: a cap that truncates the plan — to any size, including zero — is
+        # "truncated", never "no-candidates".
+        reason = "truncated"
     else:
         reason = "no-candidates"
     return CapturePlan(
@@ -799,5 +810,6 @@ def plan_candidates(root: _Node, base_url: Optional[str] = None, max_states: int
             "truncated": truncated,
             "dropped_ambiguous": dropped_ambiguous,
             "navigation_excluded": navigation_excluded,
+            "dropped_action_labels": dropped_action_labels,
         },
     )
