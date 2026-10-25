@@ -7,6 +7,8 @@
 | **Total pathways** | 3 |
 | **WIRED** | 2 |
 | **UNWIRED** | 1 |
+| Routes | 2 |
+| Plugins | 0 |
 
 ## 1. Pathways Table
 

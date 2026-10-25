@@ -109,6 +109,38 @@ def test_unknown_status_text_is_unclear_and_kept_raw():
     assert rows["p2"]["rawStatus"] == ""
 
 
+def test_short_table_row_is_refused_with_the_line():
+    # A row shorter than its header is refused, not dropped: a half-filled
+    # map is exactly the failure this module exists to prevent. The refusal
+    # names the row's line number and its first cell.
+    text = "\n".join([
+        "# Pathway Manifest — short row",          # line 1
+        "",                                        # line 2
+        "## 1. Pathways Table",                    # line 3
+        "",                                        # line 4
+        "| id | trigger | status |",               # line 5
+        "|---|---|---|",                           # line 6
+        "| `ok-pathway` | `onClick` | WIRED |",    # line 7
+        "| `short-row` | `onClick` |",             # line 8 — one cell short
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(text)
+    message = str(excinfo.value)
+    assert "line 8" in message
+    assert "short-row" in message
+
+
+def test_summary_counts_come_from_cells_not_prose():
+    # routesCount/pluginsCount come from the summary CELLS (| Routes | 1 |)
+    # only — never from prose, so a pathway row saying "2 routes" cannot
+    # set the count.
+    parsed = parse_manifest_md(FIXTURES / "pathway-manifest-boolean-columns.md")
+    assert parsed["summary"]["routesCount"] == 1
+    sample = parse_manifest_md(FIXTURES / "pathway-manifest-sample.md")
+    assert sample["summary"]["routesCount"] == 2
+    assert sample["summary"]["pluginsCount"] == 0
+
+
 def test_pasted_markdown_manifest_matches_file():
     p = FIXTURES / "pathway-manifest-sample.md"
     from_file = load_pathway_map(manifest_path=p)
