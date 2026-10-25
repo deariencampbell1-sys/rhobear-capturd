@@ -226,9 +226,9 @@ def _status_from_finding(check_name: str, finding: dict[str, Any]) -> str:
     severity = str(finding.get("severity") or "").lower()
     if severity in {"critical", "high"}:
         return "INCOMPLETE"
-    if severity == "medium":
-        return "UNCLEAR"
-    return "WIRED"
+    # A finding exists — it must never read as the strongest "nothing wrong
+    # here" label: medium/low/info/absent severity all stay UNCLEAR.
+    return "UNCLEAR"
 
 
 def _split_sections(raw: str) -> list[dict[str, Any]]:
@@ -364,7 +364,9 @@ def _extract_pathways(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "evidence": (row_map.get("evidence") or "").strip(),
                     "status": _normalize_status(status_raw),
                     "rawStatus": status_raw,
-                    "unwiredFlag": bool(re.search(r"\b(y|yes|⚠|true|⚠\s*yes)\b", row_map.get("unwired flag", ""), re.I)),
+                    # A bare ⚠ is non-word on both sides, so \b never borders it — match it
+                    # unanchored instead.
+                    "unwiredFlag": bool(re.search(r"(?:\by(?:es)?\b|\btrue\b|⚠)", row_map.get("unwired flag", ""), re.I)),
                 })
     return pathways
 
@@ -382,7 +384,7 @@ def _normalize_status(status: str) -> str:
         return "INCOMPLETE"
     if "UNCLEAR" in text:
         return "UNCLEAR"
-    if text in {"YES", "TRUE", "⚠ YES", "⚠YES"}:
+    if text in {"YES", "TRUE", "⚠ YES", "⚠YES"} or "⚠" in text:
         return "UNWIRED"
     return text or "UNKNOWN"
 
