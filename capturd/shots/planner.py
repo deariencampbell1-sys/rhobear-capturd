@@ -907,6 +907,9 @@ def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int 
     navigation_excluded = 0
     dropped_action_labels = 0
     scan_stopped_at_cap = False
+    # D6: a node discoverable by two loops (a <summary role="tab">) is one
+    # skipped node, so navigation_excluded counts it once across all loops.
+    counted: set[_Node] = set()
 
     def add(node: _Node, kind: ControlKind, reason: str, priority: int) -> bool:
         """Validate and append one candidate.
@@ -955,9 +958,11 @@ def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int 
             scan_stopped_at_cap = True  # D4: the cap bounds the scan mid-document.
             break
         # Uniform navigation exclusion (D2): every discovery loop skips nodes
-        # inside navigation chrome and counts the skip.
+        # inside navigation chrome and counts the skip — once per node (D6).
         if _in_navigation(node):
-            navigation_excluded += 1
+            if node not in counted:
+                counted.add(node)
+                navigation_excluded += 1
             continue
         # D12: one source of truth for priorities - the tab loop uses the same
         # table as the swept classification.
@@ -967,7 +972,9 @@ def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int 
             scan_stopped_at_cap = True
             break
         if _in_navigation(node):
-            navigation_excluded += 1
+            if node not in counted:
+                counted.add(node)
+                navigation_excluded += 1
             continue
         add(node, ControlKind.ACCORDION, f"summary disclosure {index_no + 1}", PRIORITY_SUMMARY_DISCLOSURE)
     for index_no, node in enumerate(swept):
@@ -975,7 +982,9 @@ def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int 
             scan_stopped_at_cap = True
             break
         if _in_navigation(node):
-            navigation_excluded += 1
+            if node not in counted:
+                counted.add(node)
+                navigation_excluded += 1
             continue
         kind = _classify_sweep(node)
         if kind is None:
