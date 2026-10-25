@@ -305,6 +305,27 @@ def test_decimal_count_reads_the_integer_part():
     assert parsed["antiPatterns"][0]["count"] == 3
 
 
+def test_unbalanced_backtick_is_refused():
+    # D5: a cell with an opening backtick and no closer must REFUSE — an
+    # unterminated code span would otherwise swallow the rest of the row's
+    # pipes, silently shifting or dropping every later column. The refusal
+    # names the line and the cell.
+    text = "\n".join([
+        "# Pathway Manifest — unbalanced backtick",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | trigger | status |",
+        "|---|---|---|",
+        "| p1 | `onClick | WIRED |",
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(text)
+    message = str(excinfo.value)
+    assert "line 7" in message
+    assert "onClick" in message
+
+
 def test_verifier_with_no_checks_is_refused():
     # Zero pathways AND zero routes is refused, exactly like the manifest
     # flavour — an empty verifier map must not parse to a success.

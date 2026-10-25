@@ -660,7 +660,7 @@ def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, list[str]]
         if "|" not in header_line:
             i += 1
             continue
-        cells = _split_row(header_line)
+        cells = _split_row(header_line, first_line + i)
         if len(cells) < 2:
             i += 1
             continue
@@ -674,7 +674,7 @@ def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, list[str]]
         # after a table ends the table there — it is neither injected as a
         # phantom row nor refused as a short row.
         while j < len(lines) and re.match(r"^\s*\|", lines[j]):
-            row = _split_row(lines[j])
+            row = _split_row(lines[j], first_line + j)
             if len(row) < len(cells):
                 raise PathwayMapError(
                     f"table row at line {first_line + j} has {len(row)} cells but its "
@@ -687,10 +687,12 @@ def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, list[str]]
     return tables
 
 
-def _split_row(line: str) -> list[str]:
+def _split_row(line: str, lineno: int) -> list[str]:
     """Split a table row into cells. A ``|`` inside a backtick code span and
     an escaped ``\\|`` never split — otherwise a cell like `` `a || b` ``
-    shifts every later column or gets the row silently dropped."""
+    shifts every later column or gets the row silently dropped. A cell with
+    an ODD backtick count is REFUSED, not swallowed: an unterminated code
+    span would otherwise eat the rest of the row's pipes."""
     text = line.strip()
     if text.startswith("|"):
         text = text[1:]
@@ -699,6 +701,16 @@ def _split_row(line: str) -> list[str]:
     cells: list[str] = []
     buf: list[str] = []
     in_code = False
+
+    def cell_done() -> str:
+        cell = "".join(buf).strip()
+        if cell.count("`") % 2 == 1:
+            raise PathwayMapError(
+                f"table line {lineno} has an unbalanced backtick in cell "
+                f"'{cell}' — refusing"
+            )
+        return cell
+
     i = 0
     while i < len(text):
         ch = text[i]
@@ -710,11 +722,11 @@ def _split_row(line: str) -> list[str]:
             buf.append("|")
             i += 2
         elif ch == "|" and not in_code:
-            cells.append("".join(buf).strip())
+            cells.append(cell_done())
             buf = []
             i += 1
         else:
             buf.append(ch)
             i += 1
-    cells.append("".join(buf).strip())
+    cells.append(cell_done())
     return cells
