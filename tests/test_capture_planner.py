@@ -362,6 +362,23 @@ def test_root_siblings_are_disambiguated():
         assert _count_matches(root, candidate.selector) == 1
 
 
+def test_structural_path_is_root_scoped():
+    # D2 (round 2, Apollo): every structural path starts at #root, and the
+    # verifier anchors the chain there — "div > button" must never match a
+    # button under an unrelated div, so the top div's button and the nested
+    # div inside <main> both plan, none dropped as ambiguous.
+    root = parse_html(
+        "<div><button>A</button></div><main><div><button>B</button></div></main>"
+    )
+    plan = plan_candidates(root)
+
+    assert [c.label for c in plan.candidates] == ["A", "B"]
+    assert plan.limits["dropped_ambiguous"] == 0
+    by_label = {c.label: c for c in plan.candidates}
+    assert by_label["A"].selector == "div > button"
+    assert by_label["B"].selector == "main > div > button"
+
+
 def test_summary_in_navigation_is_excluded_and_counted():
     # A <summary> inside navigation chrome is excluded like any other control:
     # the summary loop must apply the same navigation skip and count it.
