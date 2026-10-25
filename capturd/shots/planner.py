@@ -335,6 +335,9 @@ def _style_declares(node: _Node, prop: str, value: str) -> bool:
         name, _, val = declaration.partition(":")
         if name.strip().lower() == prop:
             val = val.strip().lower()
+            # A trailing "!important" is cascade priority, not a value: strip it
+            # before comparing so "display: none !important" hides like "none".
+            val = re.sub(r"!\s*important$", "", val).strip()
             if prop == "opacity":
                 try:
                     return float(val) == 0.0
