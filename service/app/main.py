@@ -13,8 +13,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, JSONResponse
 
 APP_DIR = Path(__file__).resolve().parent
 SERVICE_DIR = APP_DIR.parent
@@ -37,7 +36,6 @@ try:
 except Exception:
     build_shot = None
 
-WEB = SERVICE_DIR / "web"
 
 # template -> camera style (the look; AI-scout tightens the shot later)
 TEMPLATE_STYLE = {
@@ -268,45 +266,6 @@ async def job_video(job_id: str, request: Request):
     if not p.is_file():
         raise HTTPException(status_code=410, detail="video no longer available")
     return FileResponse(str(p), media_type="video/mp4", filename=f"{job_id}.mp4")
-
-
-@app.get("/", response_class=HTMLResponse)
-async def index():
-    idx = WEB / "index.html"
-    if idx.is_file():
-        return HTMLResponse(idx.read_text(encoding="utf-8"))
-    return HTMLResponse("<h1>Captur'd</h1><p>frontend missing</p>")
-
-
-@app.get("/m", response_class=HTMLResponse)
-async def mobile_studio():
-    """The explicit PHONE studio (reach-detection on / sends phones here)."""
-    page = WEB / "m.html"
-    if page.is_file():
-        return HTMLResponse(page.read_text(encoding="utf-8"))
-    return HTMLResponse("<h1>Captur'd</h1><p>mobile studio missing</p>")
-
-
-@app.get("/manifest.webmanifest")
-async def manifest():
-    p = WEB / "manifest.webmanifest"
-    if p.is_file():
-        return FileResponse(str(p), media_type="application/manifest+json")
-    return JSONResponse({"error": "no manifest"}, status_code=404)
-
-
-@app.get("/sw.js")
-async def service_worker():
-    """PWA service worker — served at root with root scope so it controls the whole app."""
-    p = WEB / "sw.js"
-    if p.is_file():
-        return FileResponse(str(p), media_type="application/javascript",
-                            headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"})
-    return JSONResponse({"error": "no sw"}, status_code=404)
-
-
-if (WEB / "assets").is_dir():
-    app.mount("/assets", StaticFiles(directory=str(WEB / "assets")), name="assets")
 
 
 # ---- MCP harness -------------------------------------------------------------
