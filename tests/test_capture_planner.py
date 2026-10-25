@@ -538,17 +538,34 @@ def test_summary_in_navigation_is_excluded_and_counted():
     assert plan.limits["navigation_excluded"] == 1
 
 
+def test_summary_tab_yields_one_candidate():
+    # D8: a <summary role="tab"> is discoverable by both the tab loop and the
+    # summary loop, but it is one node — dedupe is by selector, so it yields
+    # one candidate, and the second kind stays visible in its reason text.
+    root = parse_html("<main><summary role='tab' id='both'>Overview</summary></main>")
+    plan = plan_candidates(root)
+
+    (candidate,) = plan.candidates
+    assert candidate.kind == "tab"
+    assert "role tab" in candidate.reason
+    assert "accordion" in candidate.reason
+    assert "summary disclosure" in candidate.reason
+    assert plan.limits["dropped_ambiguous"] == 0
+
+
 def test_dual_role_navigation_node_is_counted_once():
     # D6 (round 2): <summary role="tab"> is discovered by both the tab loop
     # and the summary loop; inside navigation it must be excluded — and
-    # counted — exactly once, not once per discovery loop.
+    # counted — exactly once, not once per discovery loop. Deliberate update
+    # (review round 3, D8): outside navigation the same dual-role node yields
+    # ONE candidate (dedupe by selector), not one per loop.
     root = parse_html(
         "<header class='navbar'><details><summary role='tab'>Menu</summary></details></header>"
         "<main><summary role='tab'>Content</summary></main>"
     )
     plan = plan_candidates(root)
 
-    assert sorted(c.label for c in plan.candidates) == ["Content", "Content"]
+    assert [c.label for c in plan.candidates] == ["Content"]
     assert all(c.is_navigation is False for c in plan.candidates)
     assert plan.limits["navigation_excluded"] == 1
 
@@ -892,12 +909,15 @@ def test_duplicate_candidates_are_deduped():
     assert plan.limits["dropped_ambiguous"] == 0
     assert sorted(c.label for c in plan.candidates) == ["Only one", "Pick me", "Pick me"]
 
-    # One node discoverable as two kinds emits one candidate per kind: the
-    # dedupe key is (kind, selector), matching planner.js.
+    # Deliberate update (review round 3, D8): one node discoverable as two
+    # kinds emits ONE candidate — the dedupe key is the selector — and the
+    # second kind stays visible in its reason text, never as a second row.
     plan2 = plan_candidates(parse_html('<summary role="tab" id="both">Overview</summary>'))
-    assert sorted(c.kind for c in plan2.candidates) == ["accordion", "tab"]
-    keys2 = [(c.kind, c.selector) for c in plan2.candidates]
-    assert len(keys2) == len(set(keys2)) == 2
+    (only,) = plan2.candidates
+    assert only.selector == "#both"
+    assert "accordion" in only.reason
+    selectors2 = [c.selector for c in plan2.candidates]
+    assert len(selectors2) == len(set(selectors2)) == 1
 
 
 def test_selector_preference_id_then_stable_attribute_then_structure():
