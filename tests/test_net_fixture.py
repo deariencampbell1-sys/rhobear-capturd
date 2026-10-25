@@ -19,6 +19,7 @@ the brief demands:
 """
 from __future__ import annotations
 
+import asyncio
 import http.server
 import json
 import logging
@@ -436,3 +437,47 @@ def test_wrapper_rebind_allows_only_the_registered_live_origin():
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+# ---------------------------------------------------------------------------
+# The rebind against the REAL server: the wrapper replaces the MODULE
+# attribute capturd.mcp.server._reject_private_url, which only works because
+# the tool body resolves the guard at CALL time (module-global lookup). Pin
+# that with the real module — the fake-server proof above could hide a
+# hard-bound copy. The only caller of the guard is the demo.record tool body
+# (grep -n "_reject_private_url" capturd/mcp/server.py → definition + one call
+# in demo_record, before any browser/network work), so driving it with a
+# sentinel exercises the exact rebind point without a browser or network.
+# ---------------------------------------------------------------------------
+
+def test_real_server_guard_resolves_module_attribute_at_call_time():
+    """Replace capturd.mcp.server._reject_private_url with a sentinel and drive
+    the demo.record tool body: the SENTINEL must run (the guard is looked up
+    on the module at call time — exactly the attribute the E2E wrapper
+    rebinds), and the original must be restored. No browser, no network: the
+    sentinel raises before any other work happens."""
+    import capturd.mcp.server as mcp_server
+
+    sentinel_hits: list[str] = []
+
+    class SentinelRejection(RuntimeError):
+        pass
+
+    def _sentinel(url: str) -> None:
+        sentinel_hits.append(url)
+        raise SentinelRejection(f"sentinel guard ran for {url}")
+
+    original = mcp_server._reject_private_url
+    mcp_server._reject_private_url = _sentinel
+    try:
+        mcp = mcp_server._build_server()
+        tool = asyncio.run(mcp.get_tool("demo.record"))
+        with pytest.raises(SentinelRejection):
+            asyncio.run(tool.fn(url="http://127.0.0.1:9/live-drive-e2e", name="t"))
+    finally:
+        mcp_server._reject_private_url = original
+
+    # the sentinel really was the guard invoked by the tool body:
+    assert sentinel_hits == ["http://127.0.0.1:9/live-drive-e2e"], sentinel_hits
+    # and the module attribute was restored for every other test:
+    assert mcp_server._reject_private_url is original
