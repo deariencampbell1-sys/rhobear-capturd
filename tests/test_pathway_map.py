@@ -7,6 +7,7 @@ output. No network, no Playwright — this module is pure parsing.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -86,6 +87,33 @@ def test_parse_is_deterministic():
     second = parse_manifest_text(raw)
     assert first == second
     assert "parsedAt" not in first and "parsedAt" not in first["metadata"]
+
+
+def test_verifier_route_method_comes_from_the_code():
+    text = json.dumps({
+        "summary": {},
+        "checks": {
+            "api-wiring": {
+                "findings": [
+                    {"id": "p1", "code": 'post("/api/jobs")', "path": "/api/jobs"},
+                    {"id": "p2", "code": 'get("/api/state")', "path": "/api/state"},
+                    {"id": "p3", "code": 'submit("/api/form")', "path": "/api/form"},
+                ],
+            },
+        },
+    })
+    parsed = parse_verifier_json_text(text)
+    methods = {r["path"]: r["method"] for r in parsed["routes"]}
+    assert methods["/api/jobs"] == "POST"
+    assert methods["/api/state"] == "GET"
+    assert methods["/api/form"] == ""
+
+
+def test_verifier_checks_must_be_an_object():
+    with pytest.raises(PathwayMapError, match="checks"):
+        parse_verifier_json_text('{"checks": []}')
+    with pytest.raises(PathwayMapError, match="checks"):
+        parse_verifier_json_text('{"checks": "x"}')
 
 
 def test_empty_paste_is_rejected():

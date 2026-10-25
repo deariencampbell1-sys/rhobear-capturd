@@ -169,7 +169,10 @@ def parse_verifier_json_text(text: str, source: str = "<pasted map>") -> dict[st
     routes: list[dict[str, Any]] = []
     seen_route_paths: set[str] = set()
 
-    for check_name, check in (data.get("checks") or {}).items():
+    checks = data.get("checks")
+    if checks is not None and not isinstance(checks, dict):
+        raise PathwayMapError("verifier map 'checks' must be an object")
+    for check_name, check in (checks or {}).items():
         if not isinstance(check, dict):
             continue
         for finding in check.get("findings") or []:
@@ -196,8 +199,15 @@ def parse_verifier_json_text(text: str, source: str = "<pasted map>") -> dict[st
             })
             if route_path and route_path not in seen_route_paths:
                 seen_route_paths.add(route_path)
+                # The verb comes from the finding's code — ``post("/api/x")`` or
+                # ``POST /api/x`` — with call punctuation stripped so the one
+                # _ROUTE_METHOD_RE matches both shapes; "" when undeterminable.
+                probe = str(finding.get("code") or "")
+                for punct in "()\"'`":
+                    probe = probe.replace(punct, " ")
+                method_match = _ROUTE_METHOD_RE.search(probe)
                 routes.append({
-                    "method": "GET",
+                    "method": method_match.group(1).upper() if method_match else "",
                     "path": route_path,
                     "handler": location,
                     "raw": finding,
@@ -476,7 +486,7 @@ def _extract_anti_patterns(sections: list[dict[str, Any]]) -> list[dict[str, Any
                     continue
                 patterns.append({
                     "category": cat,
-                    "count": int(entry.get("count") or "0") or None,
+                    "count": int(re.sub(r"\D", "", str(entry.get("count") or "")) or 0) or None,
                     "file": entry.get("file") or "",
                     "line": entry.get("line") or "",
                     "quote": entry.get("quote") or entry.get("snippet") or entry.get("code") or "",
