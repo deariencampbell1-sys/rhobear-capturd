@@ -128,3 +128,11 @@ pytest
 Take it off; it's yours.
 
 <p align="center"><sub>Made by SunSponge LLC · a thank-you to the open source we all build on.</sub></p>
+
+## UX reference
+
+The only UX reference for Captur'd is the North Star in rhobear-north-star. The old landing page (`web/`), the studio
+web app (`service/web/`), its board renders and the pack rebuild doc were removed on 2026-10-24 (L0); the service is the
+engine (API, jobs, MCP). Fonts follow the font contract (`docs/north-star/FONTS.md` there): Adobe kit `sbv5bcv`,
+"RHOBEAR" in Rokkitt, the word "Captur'd" in **Birch**, body in Lato, mono in Droid Sans Mono. Nacelle is banned.
+The app icons are the current Captur'd mark.
