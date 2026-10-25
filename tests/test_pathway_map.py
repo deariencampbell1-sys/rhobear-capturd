@@ -257,6 +257,54 @@ def test_overlong_pathway_id_is_refused():
     assert long_id[:40] in message
 
 
+def test_zero_count_is_kept():
+    # D4: a count cell of "0" is 0 — not None. An empty count cell stays
+    # None; a real zero is a real count.
+    text = "\n".join([
+        "# Pathway Manifest — zero count",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+        "",
+        "## 2. Anti-patterns",
+        "",
+        "| Category | Count | File | Line | Quote |",
+        "|---|---|---|---|---|",
+        "| zero-hits | 0 | hub.ts | 88 | `export const unusedHelper` |",
+        "| no-count |  | hub.ts | 89 | `export const otherHelper` |",
+    ])
+    parsed = parse_manifest_text(text)
+    counts = {a["category"]: a["count"] for a in parsed["antiPatterns"]}
+    assert counts["zero-hits"] == 0
+    # A missing/empty count stays None.
+    assert counts["no-count"] is None
+
+
+def test_decimal_count_reads_the_integer_part():
+    # D4: "3.5" reads as 3 — the first integer run, not a digit-strip that
+    # would glue "3" and "5" into 35.
+    text = "\n".join([
+        "# Pathway Manifest — decimal count",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+        "",
+        "## 2. Anti-patterns",
+        "",
+        "| Category | Count | File | Line | Quote |",
+        "|---|---|---|---|---|",
+        "| decimal-hits | 3.5 | hub.ts | 88 | `export const unusedHelper` |",
+    ])
+    parsed = parse_manifest_text(text)
+    assert parsed["antiPatterns"][0]["count"] == 3
+
+
 def test_verifier_with_no_checks_is_refused():
     # Zero pathways AND zero routes is refused, exactly like the manifest
     # flavour — an empty verifier map must not parse to a success.

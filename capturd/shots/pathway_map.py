@@ -632,9 +632,14 @@ def _extract_anti_patterns(sections: list[dict[str, Any]]) -> list[dict[str, Any
                 ).strip()
                 if not cat:
                     continue
+                # The first integer run only: "0" stays 0 (not None),
+                # "3.5" reads 3 (not 35), and a missing/empty cell stays
+                # None. The old digit-strip glued "3.5" into 35 and then
+                # swallowed a real zero into `or None`.
+                count_match = re.search(r"\d+", str(entry.get("count") or ""))
                 patterns.append({
                     "category": cat,
-                    "count": int(re.sub(r"\D", "", str(entry.get("count") or "")) or 0) or None,
+                    "count": int(count_match.group(0)) if count_match else None,
                     "file": entry.get("file") or "",
                     "line": entry.get("line") or "",
                     "quote": entry.get("quote") or entry.get("snippet") or entry.get("code") or "",
