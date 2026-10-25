@@ -509,6 +509,23 @@ def test_reason_taxonomy_is_exactly_four_codes():
     }
 
 
+def test_discovery_stops_at_the_cap():
+    # D4 (round 2): the cap really bounds the scan — discovery stops as soon
+    # as the plan holds more than max_states validated candidates, and
+    # limits["scan_stopped_at_cap"] says so. discovered reports what was
+    # actually validated (cap + 1, the truncation sentinel), never a
+    # full-document count.
+    links = "".join(f'<a href="/p/{index}">Item {index}</a>' for index in range(2_000))
+    root = parse_html(f"<main>{links}</main>")
+    plan = plan_candidates(root, max_states=5)
+
+    assert len(plan.candidates) == 5
+    assert plan.reason == "ok"
+    assert plan.limits["truncated"] is True
+    assert plan.limits["scan_stopped_at_cap"] is True
+    assert plan.limits["discovered"] == 6
+
+
 def test_large_document_planning_is_bounded_by_max_states():
     # D7: the id/attribute index is built once, and add() short-circuits once
     # the plan holds one candidate more than the cap (so the truncated flag
