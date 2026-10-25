@@ -233,27 +233,57 @@ STABLE_SELECTOR_ATTRIBUTES: tuple[str, ...] = (
 )
 
 
+def _is_css_control(char: str) -> bool:
+    """C0 controls and DEL (D5): raw inside a selector they are unparseable —
+    backslash + newline is even a line continuation that deletes the newline —
+    so escaping and unescaping treat them as hex escapes."""
+    code = ord(char)
+    return code < 0x20 or code == 0x7F
+
+
+def _hex_escape(char: str) -> str:
+    """CSS hex escape plus the one whitespace terminator the grammar allows
+    (D5), so a following hex digit can never be swallowed into the escape."""
+    return f"\\{format(ord(char), 'x')} "
+
+
 def _escape_css(value: str) -> str:
-    escaped = re.sub(r"[^a-zA-Z0-9_-]", lambda m: "\\" + m.group(0), value)
+    def escape_one(match: re.Match) -> str:
+        char = match.group(0)
+        return _hex_escape(char) if _is_css_control(char) else "\\" + char
+
+    escaped = re.sub(r"[^a-zA-Z0-9_-]", escape_one, value)
     # CSSOM: an identifier cannot start with a digit, nor with '-' followed by
     # a digit; such a digit is escaped as a hex code point plus a terminating
     # space, e.g. "1foo" -> "\\31 foo", so querySelectorAll accepts the selector.
     match = _LEADING_DIGIT_RE.match(escaped)
     if match:
         dash, digit = match.group(1), match.group(2)
-        escaped = f"{dash}\\{format(ord(digit), 'x')} {escaped[match.end():]}"
+        escaped = f"{dash}{_hex_escape(digit)}{escaped[match.end():]}"
     return escaped
 
 
 def _escape_attr_value(value: str) -> str:
-    """Escape an attribute value for a ``[attr="..."]`` selector (D3).
+    """Escape an attribute value for a ``[attr="..."]`` selector (D3, D5).
 
     One helper for both directions: this escapes for generation and
     :func:`_css_unescape` reads it back in the uniqueness verifier, so a round
-    trip is exact. The backslash is doubled first, then the quote — otherwise
-    the escape backslash introduced for the quote would be doubled too.
+    trip is exact. A backslash is doubled and a quote is backslash-escaped —
+    per character, so no ordering subtlety — and C0 controls and DEL become
+    CSS hex escapes (D5): a raw newline inside the string is not valid CSS at
+    all, and ``\\`` + newline would delete the newline instead of matching it.
     """
-    return value.replace("\\", "\\\\").replace('"', '\\"')
+    out: list[str] = []
+    for char in value:
+        if char == "\\":
+            out.append("\\\\")
+        elif char == '"':
+            out.append('\\"')
+        elif _is_css_control(char):
+            out.append(_hex_escape(char))
+        else:
+            out.append(char)
+    return "".join(out)
 
 
 _CSS_ESCAPE_RE = re.compile(r"\\([0-9a-fA-F]{1,6})(?:\r\n|[ \t\r\n\f])?|\\(.)", re.DOTALL)
