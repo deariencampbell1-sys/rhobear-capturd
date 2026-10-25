@@ -152,13 +152,75 @@ def test_malformed_verifier_json_raises():
 
 
 def test_missing_file_names_input_not_path():
-    with pytest.raises(ValueError, match="manifest_path"):
+    with pytest.raises(ValueError, match="manifest_path") as exc:
         load_pathway_map(manifest_path="/nonexistent/manifest.md")
-    with pytest.raises(ValueError, match="map_path"):
+    # The refusal names the offending INPUT; it never echoes the host path.
+    assert "/nonexistent" not in str(exc.value)
+    with pytest.raises(ValueError, match="map_path") as exc:
         load_pathway_map(map_path="/nonexistent/map.json")
+    assert "/nonexistent" not in str(exc.value)
 
 
 def test_single_pathway_manifest():
     parsed = parse_manifest_md(FIXTURES / "single-pathway-manifest.md")
     assert [p["id"] for p in parsed["pathways"]] == ["home"]
     assert parsed["pathways"][0]["status"] == "WIRED"
+
+
+def test_full_manifest_extracts_plugins_suspicious_and_anti_patterns():
+    parsed = parse_manifest_md(FIXTURES / "pathway-manifest-full.md")
+    assert parsed["plugins"] == [
+        {
+            "name": "rested-capture",
+            "raw": {"name": "rested-capture", "kind": "core plugin", "notes": "wires the capture surface"},
+        },
+        {
+            "name": "vault-sync",
+            "raw": {"name": "vault-sync", "kind": "skill", "notes": "syncs vault state"},
+        },
+    ]
+    assert parsed["suspicious"] == [
+        {
+            "call": "`eval(`",
+            "location": "RestedCaptureView.jsx:101",
+            "why it is risky": "dynamic code execution",
+        },
+        {
+            "call": '`fetch(BASE + "/catalog")`',
+            "location": "CatalogView.jsx:243",
+            "why it is risky": "URL built from input",
+        },
+    ]
+    # Exact dicts, counts included: "3+" → 3, "~12" → 12, "n/a" → None.
+    assert parsed["antiPatterns"] == [
+        {"category": "duplicate-fetch", "count": 3, "file": "CatalogView.jsx", "line": "243", "quote": '`fetch(BASE + "/catalog")`'},
+        {"category": "console-log-noise", "count": 12, "file": "RestedCaptureView.jsx", "line": "57", "quote": "`console.log(state)`"},
+        {"category": "dead-export", "count": None, "file": "hub.ts", "line": "88", "quote": "`export const unusedHelper`"},
+    ]
+
+
+def test_verifier_raw_keeps_the_source_text():
+    text = '{"summary": {}, "checks": {}}'
+    parsed = parse_verifier_json_text(text)
+    assert parsed["raw"] == text
+
+
+def test_file_field_is_basename_never_a_host_path(tmp_path):
+    text = (FIXTURES / "pathway-manifest-full.md").read_text(encoding="utf-8")
+    left = tmp_path / "left-dir"
+    right = tmp_path / "right-dir"
+    left.mkdir()
+    right.mkdir()
+    left_manifest = left / "pathway-manifest-full.md"
+    right_manifest = right / "pathway-manifest-full.md"
+    left_manifest.write_text(text, encoding="utf-8")
+    right_manifest.write_text(text, encoding="utf-8")
+    from_left = parse_manifest_md(left_manifest)
+    from_right = parse_manifest_md(right_manifest)
+    # Same bytes in two different host directories → same dict.
+    assert from_left == from_right
+    assert from_left["file"] == "pathway-manifest-full.md"
+    assert from_left["metadata"]["file"] == "pathway-manifest-full.md"
+    dumped = json.dumps(from_left)
+    assert str(left) not in dumped
+    assert str(right) not in dumped
