@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from capturd.shots.quality import (
     BASELINE_ONLY,
+    CaptureQuality,
     NO_CAPTURES,
     NO_SUCCESSFUL_CAPTURE,
     PASS,
@@ -230,6 +231,106 @@ def test_results_that_is_not_a_list_is_not_a_pass() -> None:
         assert quality.verdict == NO_CAPTURES
         assert quality.reason_codes == [NO_CAPTURES]
         assert is_passing(result) is False  # type: ignore[arg-type]
+
+
+def test_duplicate_filenames_are_reported_once() -> None:
+    # D6: file names are deduplicated, first-seen order preserved — one
+    # file with two failing entries is reported once (deliberate
+    # improvement over upstream, which keys on entries).
+    twice_baseline = _result(
+        _file("same.png", [_capture("baseline", True)]),
+        _file("other.png", [_capture("baseline", True)]),
+        _file("same.png", [_capture("baseline", True)]),
+    )
+    quality = summarize_capture_quality(twice_baseline)
+    assert quality.baseline_only_files == ["same.png", "other.png"]
+    assert quality.reason_codes == [BASELINE_ONLY]
+    message = build_quality_error(quality)
+    assert (
+        '[BASELINE_ONLY] 2 files only produced a baseline screenshot: '
+        '"same.png", "other.png".' in message
+    )
+
+    twice_empty = _result(_file("dead.png", []), _file("dead.png", []))
+    q2 = summarize_capture_quality(twice_empty)
+    assert q2.empty_files == ["dead.png"]
+    assert build_quality_error(q2).startswith(
+        '[NO_SUCCESSFUL_CAPTURE] 1 file produced no successful screenshots: '
+        '"dead.png".'
+    )
+
+    # Same file, one baseline-only entry and one empty entry: reported
+    # once, in first-seen order.
+    mixed_dup = _result(
+        _file("dup.png", [_capture("baseline", True)]),
+        _file("dup.png", []),
+    )
+    q3 = summarize_capture_quality(mixed_dup)
+    assert q3.baseline_only_files == ["dup.png"]
+    assert q3.empty_files == []
+
+
+def test_string_success_is_not_a_success() -> None:
+    # D7: capture.get("success") is True — a truthy string is not a
+    # success (edge case: {"success": "false"}).
+    result = {
+        "results": [
+            {
+                "file": "lying.png",
+                "manifest": {"captures": [{"kind": "modal", "success": "false"}]},
+            }
+        ]
+    }
+    quality = summarize_capture_quality(result)
+    assert quality.empty_files == ["lying.png"]
+    assert quality.baseline_only_files == []
+    assert quality.reason_codes == [NO_SUCCESSFUL_CAPTURE]
+    assert is_passing(result) is False
+    assert classify_result(result) == ("FAIL", [NO_SUCCESSFUL_CAPTURE])
+
+
+def test_is_passing_reads_the_verdict() -> None:
+    # D8: is_passing consults quality.verdict == PASS — one source of
+    # truth, never a second recomputation of the lists.
+    import capturd.shots.quality as quality_module
+
+    cases = [
+        {},
+        {"results": []},
+        _result(_file("rested.png", [_capture("baseline", True)])),
+        _result(_file("dead.png", [_capture("modal", False)])),
+        _result(_file("page.png", [_capture("baseline", True), _capture("modal", True)])),
+    ]
+    for result in cases:
+        quality = summarize_capture_quality(result)
+        assert is_passing(result) is (quality.verdict == PASS)
+
+    # A verdict that does not match the lists still decides the predicate.
+    sentinel = CaptureQuality(no_captures=True)
+    monkeypatched = lambda result: sentinel
+    original = quality_module.summarize_capture_quality
+    quality_module.summarize_capture_quality = monkeypatched  # type: ignore[assignment]
+    try:
+        assert sentinel.verdict == NO_CAPTURES
+        assert sentinel.baseline_only_files == [] and sentinel.empty_files == []
+        assert is_passing({}) is False
+        passing = CaptureQuality()
+        quality_module.summarize_capture_quality = lambda result: passing  # type: ignore[assignment]
+        assert is_passing({}) is True
+    finally:
+        quality_module.summarize_capture_quality = original  # type: ignore[assignment]
+
+
+def test_passing_summary_has_no_error_text() -> None:
+    # D9: a passing summary produces "", so no caller can print a false
+    # "this run is not a pass".
+    passing_result = _result(
+        _file("page.png", [_capture("baseline", True), _capture("modal", True)])
+    )
+    quality = summarize_capture_quality(passing_result)
+    assert quality.verdict == PASS
+    assert build_quality_error(quality) == ""
+    assert is_passing(passing_result) is True
 
 
 def test_missing_manifest_is_empty() -> None:
