@@ -232,16 +232,32 @@ def _status_from_finding(check_name: str, finding: dict[str, Any]) -> str:
 
 
 def _split_sections(raw: str) -> list[dict[str, Any]]:
+    """Split into heading sections. Heading matches inside a fenced code
+    block (``` or ~~~) are ignored — a ``# comment`` in a fence must not
+    carve out a phantom section and gut the table above it."""
     lines = raw.split("\n")
     sections: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
+    open_fence: str | None = None  # the opening marker, e.g. "```" or "~~~"
     for line in lines:
-        match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
-        if match:
-            if current:
-                sections.append(current)
-            current = {"heading": match.group(2).strip(), "level": len(match.group(1)), "body": []}
-        elif current is not None:
+        fence_match = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if open_fence is None:
+            if fence_match:
+                open_fence = fence_match.group(1)
+            else:
+                match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+                if match:
+                    if current:
+                        sections.append(current)
+                    current = {"heading": match.group(2).strip(), "level": len(match.group(1)), "body": []}
+                    continue
+        else:
+            # A closing fence is a bare run of the same marker, at least as
+            # long as the opening one; fenced lines stay in the body.
+            stripped = line.strip()
+            if stripped and set(stripped) == {open_fence[0]} and len(stripped) >= len(open_fence):
+                open_fence = None
+        if current is not None:
             current["body"].append(line)
         else:
             current = {"heading": None, "level": 0, "body": [line]}
@@ -514,9 +530,33 @@ def _extract_tables(text: str) -> list[dict[str, list[str]]]:
 
 
 def _split_row(line: str) -> list[str]:
+    """Split a table row into cells. A ``|`` inside a backtick code span and
+    an escaped ``\\|`` never split — otherwise a cell like `` `a || b` ``
+    shifts every later column or gets the row silently dropped."""
     text = line.strip()
     if text.startswith("|"):
         text = text[1:]
-    if text.endswith("|"):
+    if text.endswith("|") and not text.endswith("\\|"):
         text = text[:-1]
-    return [cell.strip() for cell in text.split("|")]
+    cells: list[str] = []
+    buf: list[str] = []
+    in_code = False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "`":
+            in_code = not in_code
+            buf.append(ch)
+            i += 1
+        elif ch == "\\" and not in_code and i + 1 < len(text) and text[i + 1] == "|":
+            buf.append("|")
+            i += 2
+        elif ch == "|" and not in_code:
+            cells.append("".join(buf).strip())
+            buf = []
+            i += 1
+        else:
+            buf.append(ch)
+            i += 1
+    cells.append("".join(buf).strip())
+    return cells
