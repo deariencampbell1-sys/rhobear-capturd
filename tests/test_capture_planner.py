@@ -246,6 +246,59 @@ def test_disabled_class_is_skipped():
 
 
 # ---------------------------------------------------------------------------
+# Selector robustness: CSSOM escaping and attribute values containing ">".
+# ---------------------------------------------------------------------------
+
+
+def test_leading_digit_id_is_css_escaped():
+    # querySelectorAll('#1foo') throws SyntaxError; the CSSOM escape of the
+    # leading digit is '\31 ', so the emitted selector must be '#\\31 foo'.
+    root = parse_html("<main><button id='1foo' aria-expanded='false'>Open</button></main>")
+    node = root.children[0].children[0]
+
+    selector, strategy = unique_selector(node)
+    assert strategy == "id"
+    assert selector == "#\\31 foo"
+
+    plan = plan_candidates(root)
+    (candidate,) = plan.candidates
+    assert candidate.selector == "#\\31 foo"
+    assert candidate.selector_strategy == "id"
+    assert _count_matches(root, candidate.selector) == 1
+
+
+def test_leading_dash_digit_id_is_css_escaped():
+    # An identifier may start with '-' but not with '-' followed by a digit.
+    root = parse_html("<main><button id='-1foo' aria-expanded='false'>Open</button></main>")
+    node = root.children[0].children[0]
+
+    selector, strategy = unique_selector(node)
+    assert strategy == "id"
+    assert selector == "#-\\31 foo"
+    assert _count_matches(root, selector) == 1
+
+
+def test_attribute_value_with_gt_does_not_break_the_chain():
+    # The chain matcher splits on " > "; an attribute value containing ">"
+    # used to split its own selector and the candidate was silently dropped.
+    html = (
+        "<div id='host'><button aria-label='Home > Docs'>Docs</button></div>"
+        "<div id='host'><button aria-label='Home > Blog'>Blog</button></div>"
+    )
+    root = parse_html(html)
+    plan = plan_candidates(root)
+
+    by_label = {c.label: c for c in plan.candidates}
+    assert set(by_label) == {"Home > Docs", "Home > Blog"}
+    assert by_label["Home > Docs"].selector_strategy == "attribute"
+    assert by_label["Home > Docs"].selector == 'button[aria-label="Home > Docs"]'
+    assert by_label["Home > Blog"].selector == 'button[aria-label="Home > Blog"]'
+    for candidate in plan.candidates:
+        assert _count_matches(root, candidate.selector) == 1
+    assert plan.limits["dropped_ambiguous"] == 0
+
+
+# ---------------------------------------------------------------------------
 # One test per control kind (brief 01b), all against inline HTML strings.
 # ---------------------------------------------------------------------------
 
