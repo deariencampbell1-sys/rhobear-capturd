@@ -326,6 +326,62 @@ def test_unbalanced_backtick_is_refused():
     assert "onClick" in message
 
 
+def test_unknown_wired_token_is_unclear():
+    # D6: the wired column's own polarity — a token outside
+    # yes|true|✔|wired / no|false|✗|unwired is UNCLEAR, with the raw cell
+    # kept in rawStatus.
+    text = "\n".join([
+        "# Pathway Manifest — wired maybe",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | trigger | wired |",
+        "|---|---|---|",
+        "| p1 | onClick | maybe |",
+    ])
+    row = parse_manifest_text(text)["pathways"][0]
+    assert row["status"] == "UNCLEAR"
+    assert row["rawStatus"] == "maybe"
+
+
+def test_unknown_unwired_token_is_unclear():
+    # D6: the unwired column's inverted polarity — a token outside
+    # yes|true|⚠ / no|false is UNCLEAR and does not set the flag.
+    text = "\n".join([
+        "# Pathway Manifest — unwired maybe",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | trigger | unwired |",
+        "|---|---|---|",
+        "| p1 | onClick | maybe |",
+    ])
+    row = parse_manifest_text(text)["pathways"][0]
+    assert row["status"] == "UNCLEAR"
+    assert row["rawStatus"] == "maybe"
+    assert row["unwiredFlag"] is False
+
+
+def test_permission_error_becomes_pathway_map_error(tmp_path, monkeypatch):
+    # D6: an OSError on read (PermissionError) becomes PathwayMapError with
+    # no host path anywhere in the rendered exception chain — the branch
+    # raises `from None`, so the OS error (which names the path) is gone.
+    manifest = tmp_path / "manifest.md"
+    manifest.write_text("# Pathway Manifest\n", encoding="utf-8")
+
+    def deny(self, *args, **kwargs):
+        raise PermissionError(13, "Permission denied", str(self))
+
+    monkeypatch.setattr(Path, "read_text", deny)
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_md(manifest)
+    rendered = "".join(traceback.format_exception(
+        type(excinfo.value), excinfo.value, excinfo.value.__traceback__,
+    ))
+    assert str(tmp_path) not in rendered
+    assert excinfo.value.__cause__ is None
+
+
 def test_verifier_with_no_checks_is_refused():
     # Zero pathways AND zero routes is refused, exactly like the manifest
     # flavour — an empty verifier map must not parse to a success.
