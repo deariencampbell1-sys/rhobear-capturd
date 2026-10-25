@@ -28,6 +28,9 @@ from urllib.parse import urlparse
 
 # ── explicit TEST-ONLY loopback fixture allowance ──────────────────────────
 #
+# Production code must never import these; tests/test_import_path_hygiene.py
+# enforces it (text scan over capturd/**.py, exempting only _net.py itself).
+#
 # The SSRF guard above correctly rejects 127.0.0.1 — which is exactly what the
 # live-drive E2E harness (scripts/e2e_live_drive.py) needs to serve its local
 # signup fixture on. Rather than weakening :func:`is_private_ip` (it stays a
