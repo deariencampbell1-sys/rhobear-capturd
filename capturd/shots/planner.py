@@ -260,6 +260,17 @@ def _escape_css(value: str) -> str:
     if match:
         dash, digit = match.group(1), match.group(2)
         escaped = f"{dash}{_hex_escape(digit)}{escaped[match.end():]}"
+    # D6: a leading '-' is an identifier start only before an identifier-start
+    # character, another '-', or an escape (the digit rule above leaves an
+    # escape behind, so '-1foo' stays '-\31 foo'). Anything else — a lone '-'
+    # above all — hex-escapes the hyphen itself: '#\2d ', never '#-'.
+    if escaped.startswith("-"):
+        after = escaped[1:2]
+        ident_start = bool(after) and (
+            after in "-_" or after == "\\" or after.isalpha() or ord(after) > 0x7F
+        )
+        if not ident_start:
+            escaped = _hex_escape("-") + escaped[1:]
     return escaped
 
 
