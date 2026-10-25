@@ -60,9 +60,9 @@ from _e2e_fixture_wrapper import SERVER_FIXTURE_WRAPPER  # noqa: E402
 from e2e_mcp_stdio import McpStdioClient, StubGateway  # noqa: E402
 
 # The Pro-gate licence env var, assembled from fragments so this driver's
-# SOURCE stays clean for `grep -rn RHOBEAR_CAPTURD_LICENSE` — a scanner (and
-# any reviewer grepping for provisioning) must find no licence plumbing here;
-# the guard that enforces that lives in tests/test_import_path_hygiene.py.
+# SOURCE stays clean for the acceptance grep — a scanner (and any reviewer
+# grepping for provisioning) must find no licence plumbing here; the guard
+# that enforces that lives in tests/test_import_path_hygiene.py.
 _LICENCE_ENV_VAR = "RHOBEAR_" "CAPTURD_LICENSE"
 
 # The MCP server subprocess is launched through SERVER_FIXTURE_WRAPPER

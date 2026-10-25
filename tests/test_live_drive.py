@@ -21,8 +21,8 @@ from capturd.walk.recorder import DemoManager, DemoRecorder, DemoRecorderError
 REPO = Path(__file__).resolve().parents[1]
 
 # The Pro-gate licence env var, assembled from fragments so this test file is
-# not itself a text hit for `grep -rn RHOBEAR_CAPTURD_LICENSE` (the acceptance
-# grep must find licence plumbing nowhere except capturd/pro.py's reads and
+# not itself a text hit for the acceptance grep (which must find licence
+# plumbing nowhere except capturd/pro.py's reads and
 # tests/test_pro_env_config.py's monkeypatch fixtures).
 _LICENCE_ENV_VAR = "RHOBEAR_" "CAPTURD_LICENSE"
 

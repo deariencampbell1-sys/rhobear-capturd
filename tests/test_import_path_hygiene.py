@@ -195,8 +195,8 @@ def test_rig_modules_import_cleanly_without_the_default_repo_path(mod):
 # ---------------------------------------------------------------------------
 
 # The two Pro-gate env names, assembled from fragments so this scanner file is
-# not itself a text hit for `grep -rn CAPTURD_PRO_CODES` (the guard must be
-# able to name what it forbids without ever spelling a provisioning line).
+# not itself a text hit for the acceptance grep (the guard must be able to
+# name what it forbids without ever spelling a provisioning line).
 _LICENCE_ENV_VARS = ("CAPTURD_" "PRO_CODES", "RHOBEAR_" "CAPTURD_LICENSE")
 _Q = "['\"]"  # either quote style, kept out of the raw f-strings below
 
@@ -248,11 +248,11 @@ def _licence_assignment_violations(paths) -> list[str]:
 
 
 def test_no_committed_literal_licence_assignment():
-    """No tracked .py/.sh/.md may assign to CAPTURD_PRO_CODES or
-    RHOBEAR_CAPTURD_LICENSE. The Pro gate compares a caller-supplied value
-    against a caller-supplied allow-list, so in-tree provisioning is a working
-    licence bypass — the exact hole this PR exists to close (issue #44 owns the
-    gate design itself)."""
+    """No tracked .py/.sh/.md may assign to either Pro-gate env name (the
+    allow-list input or the licence input). The Pro gate compares a
+    caller-supplied value against a caller-supplied allow-list, so in-tree
+    provisioning is a working licence bypass — the exact hole this PR exists
+    to close (issue #44 owns the gate design itself)."""
     offenders = _licence_assignment_violations(_tracked_licence_scan_files())
     assert not offenders, (
         "a tracked file writes a Pro-gate env name — that is a working licence "
