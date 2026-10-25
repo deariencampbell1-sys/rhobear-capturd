@@ -174,7 +174,14 @@ def _full_text(node: _Node) -> str:
 
 
 def _text_of(node: _Node) -> str:
-    """aria-label / title / data-title / data-label / textContent, first non-empty."""
+    """aria-label / title / data-title / data-label / textContent / value, first non-empty.
+
+    D1: a ``value`` attribute is a label too — ``<input type="submit"
+    value="Sign up">`` renders "Sign up" as its only label — but only for
+    ``input`` and ``button``, and only after every other source: a control
+    with text keeps its text, and the fallback never rescues a non-control
+    (a hidden input's value is data, not a label — it is not swept anyway).
+    """
     for value in (
         node.attrs.get("aria-label"),
         node.attrs.get("title"),
@@ -182,6 +189,10 @@ def _text_of(node: _Node) -> str:
         node.attrs.get("data-label"),
         _full_text(node),
     ):
+        if value and value.strip():
+            return " ".join(value.split())[:80]
+    if node.tag in ("input", "button"):
+        value = node.attrs.get("value")
         if value and value.strip():
             return " ".join(value.split())[:80]
     return ""
