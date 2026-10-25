@@ -123,6 +123,18 @@ def test_max_states_truncates_deterministically():
     assert [c.id for c in plan.candidates] == ["01-tab", "02-tab"]
 
 
+def test_capped_plan_reports_truncated():
+    # D3: reason == "truncated" whenever limits["truncated"] is true —
+    # including a capped plan that still has candidates. "ok" is only for an
+    # untruncated plan.
+    root = _load("planner_tabs_accordion_modal.html")
+    plan = plan_candidates(root, max_states=2)
+
+    assert plan.reason == "truncated"
+    assert plan.limits["truncated"] is True
+    assert [c.id for c in plan.candidates] == ["01-tab", "02-tab"]
+
+
 def test_max_states_zero_is_a_failed_plan():
     # Deliberate update (review round 1, D4): a cap that truncates the plan to
     # zero is reason="truncated" — the operator must see that their max_states
@@ -580,7 +592,10 @@ def test_discovery_stops_at_the_cap():
     plan = plan_candidates(root, max_states=5)
 
     assert len(plan.candidates) == 5
-    assert plan.reason == "ok"
+    # Deliberate update (review round 3, D3): reason == "truncated" whenever
+    # limits["truncated"] is true, even when the capped plan still has
+    # candidates — "ok" is only for an untruncated plan.
+    assert plan.reason == "truncated"
     assert plan.limits["truncated"] is True
     assert plan.limits["scan_stopped_at_cap"] is True
     assert plan.limits["discovered"] == 6
@@ -596,7 +611,9 @@ def test_large_document_planning_is_bounded_by_max_states():
     plan = plan_candidates(root, max_states=5)
 
     assert len(plan.candidates) == 5
-    assert plan.reason == "ok"
+    # Deliberate update (review round 3, D3): a truncated plan is
+    # reason="truncated", whatever its size — "ok" is untruncated only.
+    assert plan.reason == "truncated"
     assert plan.limits["truncated"] is True
     assert plan.limits["discovered"] == 6
 
