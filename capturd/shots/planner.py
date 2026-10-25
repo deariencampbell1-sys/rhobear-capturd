@@ -180,16 +180,58 @@ STABLE_SELECTOR_ATTRIBUTES: tuple[str, ...] = (
 
 
 def _escape_css(value: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9_-]", lambda m: "\\" + m.group(0), value)
+    escaped = re.sub(r"[^a-zA-Z0-9_-]", lambda m: "\\" + m.group(0), value)
+    # CSSOM: an identifier cannot start with a digit, nor with '-' followed by
+    # a digit; such a digit is escaped as a hex code point plus a terminating
+    # space, e.g. "1foo" -> "\\31 foo", so querySelectorAll accepts the selector.
+    match = _LEADING_DIGIT_RE.match(escaped)
+    if match:
+        dash, digit = match.group(1), match.group(2)
+        escaped = f"{dash}\\{format(ord(digit), 'x')} {escaped[match.end():]}"
+    return escaped
+
+
+_CSS_ESCAPE_RE = re.compile(r"\\([0-9a-fA-F]{1,6})(?:\r\n|[ \t\r\n\f])?|\\(.)", re.DOTALL)
 
 
 def _css_unescape(value: str) -> str:
-    return re.sub(r"\\(.)", r"\1", value)
+    def _replace(match):
+        if match.group(1) is not None:
+            return chr(int(match.group(1), 16))
+        return match.group(2)
+
+    return _CSS_ESCAPE_RE.sub(_replace, value)
+
+
+#: Characters that terminate a bare (unescaped) CSS identifier fragment.
+_CSS_IDENT_END = " [:"
+
+
+def _scan_ident(text: str) -> tuple[str, str]:
+    """Scan one identifier that may contain backslash escapes.
+
+    Returns ``(raw_ident, remainder)`` with the identifier still escaped. A hex
+    escape's terminating whitespace belongs to the escape, so ``\\31 foo`` scans
+    as one identifier for the id ``1foo`` instead of stopping at the space.
+    """
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            match = _CSS_ESCAPE_RE.match(text, index)
+            index = match.end() if match else min(index + 2, len(text))
+            continue
+        if char in _CSS_IDENT_END:
+            break
+        index += 1
+    return text[:index], text[index:]
 
 
 _TAG_RE = re.compile(r"^(\*|[a-zA-Z][a-zA-Z0-9-]*)")
 _ATTR_RE = re.compile(r'^([\w-]+)="(.*)"$', re.DOTALL)
 _NTH_PREFIX = ":nth-of-type("
+_LEADING_DIGIT_RE = re.compile(r"^(-?)([0-9])")
+_LEADING_DIGIT_RE = re.compile(r"^(-?)([0-9])")
 
 
 def _match_simple(node: _Node, part: str) -> bool:
@@ -201,15 +243,8 @@ def _match_simple(node: _Node, part: str) -> bool:
         rest = rest[match.end():]
 
     if rest.startswith("#"):
-        rest = rest[1:]
-        end = len(rest)
-        for index, char in enumerate(rest):
-            if char in " [:":
-                end = index
-                break
-        wanted = _css_unescape(rest[:end])
-        rest = rest[end:]
-        if node.attrs.get("id") != wanted:
+        ident, rest = _scan_ident(rest[1:])
+        if node.attrs.get("id") != _css_unescape(ident):
             return False
 
     while rest.startswith("["):
@@ -249,9 +284,54 @@ def _match_simple(node: _Node, part: str) -> bool:
     return True
 
 
+def _split_chain(selector: str) -> list[str]:
+    """Split a ``a > b > c`` direct-child chain on its unquoted ``>`` separators.
+
+    Quote-aware: an attribute value containing ``>`` — ``aria-label="Home >
+    Docs"`` — stays inside its own part instead of splitting the chain into
+    garbage.
+    """
+    parts: list[str] = []
+    current: list[str] = []
+    in_quotes = False
+    escaped = False
+    index = 0
+    while index < len(selector):
+        char = selector[index]
+        if escaped:
+            current.append(char)
+            escaped = False
+            index += 1
+        elif in_quotes and char == "\\":
+            current.append(char)
+            escaped = True
+            index += 1
+        elif char == '"':
+            in_quotes = not in_quotes
+            current.append(char)
+            index += 1
+        elif (
+            not in_quotes
+            and char == ">"
+            and current
+            and current[-1] == " "
+            and index + 1 < len(selector)
+            and selector[index + 1] == " "
+        ):
+            current.pop()  # the separator space before '>'
+            parts.append("".join(current))
+            current = []
+            index += 2  # skip '>' and the separator space after it
+        else:
+            current.append(char)
+            index += 1
+    parts.append("".join(current))
+    return parts
+
+
 def _match_chain(node: _Node, selector: str) -> bool:
     """Match a ``a > b > c`` direct-child chain; node must match the last part."""
-    parts = selector.split(" > ")
+    parts = _split_chain(selector)
     if not parts or not _match_simple(node, parts[-1]):
         return False
     current = node
