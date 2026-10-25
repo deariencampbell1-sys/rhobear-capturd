@@ -141,6 +141,49 @@ def test_summary_counts_come_from_cells_not_prose():
     assert sample["summary"]["pluginsCount"] == 0
 
 
+def test_both_flavours_return_the_same_key_set():
+    # One shape for both flavours: identical top-level keys, with `flavour`
+    # saying which produced it; summary and metadata carry the same keys too.
+    manifest = parse_manifest_md(FIXTURES / "pathway-manifest-sample.md")
+    verifier = parse_verifier_json(FIXTURES / "sample-verifier-map.json")
+    assert set(manifest) == set(verifier)
+    assert manifest["flavour"] == "manifest"
+    assert verifier["flavour"] == "verifier"
+    counts = {
+        "pathwaysTotal", "wired", "mocked", "unwired",
+        "incomplete", "unclear", "routesCount", "pluginsCount",
+    }
+    assert set(manifest["summary"]) == counts
+    assert set(verifier["summary"]) == counts
+    metadata = {"file", "version", "repo", "manifest_found"}
+    assert set(manifest["metadata"]) == metadata
+    assert set(verifier["metadata"]) == metadata
+    # None where the source does not say.
+    assert manifest["metadata"]["version"] is None
+    assert manifest["metadata"]["repo"] is None
+    assert manifest["metadata"]["manifest_found"] is None
+
+
+def test_verifier_with_no_checks_is_refused():
+    # Zero pathways AND zero routes is refused, exactly like the manifest
+    # flavour — an empty verifier map must not parse to a success.
+    with pytest.raises(PathwayMapError, match="no pathways"):
+        parse_verifier_json_text('{"summary": {}, "checks": {}}')
+    with pytest.raises(PathwayMapError, match="no pathways"):
+        parse_verifier_json_text("{}")
+    with pytest.raises(PathwayMapError, match="no pathways"):
+        load_pathway_map(map_text='{"checks": {}}')
+
+
+def test_empty_path_is_refused_explicitly():
+    # "" is a PROVIDED path: an explicit refusal naming the input, not a
+    # silent fall-through to the "required" complaint.
+    with pytest.raises(PathwayMapError, match="manifest_path is empty"):
+        load_pathway_map(manifest_path="")
+    with pytest.raises(PathwayMapError, match="map_path is empty"):
+        load_pathway_map(map_path="")
+
+
 def test_pasted_markdown_manifest_matches_file():
     p = FIXTURES / "pathway-manifest-sample.md"
     from_file = load_pathway_map(manifest_path=p)
@@ -283,7 +326,9 @@ def test_full_manifest_extracts_plugins_suspicious_and_anti_patterns():
 
 
 def test_verifier_raw_keeps_the_source_text():
-    text = '{"summary": {}, "checks": {}}'
+    # D8 now refuses an empty-checks verifier, so the raw-text property is
+    # codified on the smallest map that still parses (one finding, one route).
+    text = '{"checks": {"api-wiring": {"findings": [{"id": "f1", "path": "/api/x"}]}}}'
     parsed = parse_verifier_json_text(text)
     assert parsed["raw"] == text
 
@@ -424,13 +469,18 @@ def test_empty_manifest_summary_is_not_replaced_by_another_shape():
     text = json.dumps({
         "manifest_summary": {},
         "summary": {"pathwaysTotal": 99},
-        "checks": {},
+        "checks": {"api-wiring": {"findings": [{"id": "f1", "path": "/api/x"}]}},
     })
     parsed = parse_verifier_json_text(text)
     # A present-but-empty manifest_summary wins over a differently-shaped
-    # summary: every count stays unset instead of borrowing foreign fields.
-    assert parsed["summary"] == {}
-    assert parsed["summary"].get("pathwaysTotal") is None
+    # summary — no borrowing of pathwaysTotal — and the summary carries the
+    # same 8 count keys as every other map, None where the source does not
+    # say.
+    assert set(parsed["summary"]) == {
+        "pathwaysTotal", "wired", "mocked", "unwired",
+        "incomplete", "unclear", "routesCount", "pluginsCount",
+    }
+    assert parsed["summary"]["pathwaysTotal"] is None
 
 
 def test_file_field_is_basename_never_a_host_path(tmp_path):
