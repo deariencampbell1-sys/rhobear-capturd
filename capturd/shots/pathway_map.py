@@ -36,23 +36,8 @@ _ROUTE_METHOD_RE = re.compile(
     r"\b(GET|POST|PUT|DELETE|PATCH|WS)\s+(/[^\s`'\"]+)",
     re.IGNORECASE,
 )
-_URL_RE = re.compile(r"https?://[^\s`'\"]+", re.IGNORECASE)
-
-_VIEW_FROM_FILE: dict[str, str] = {
-    "restedcaptureview": "capture",
-    "hubview": "hub",
-    "boardview": "board",
-    "workbenchview": "workbench",
-    "catalogview": "catalog",
-    "skillsview": "skills",
-    "settingsview": "settings",
-    "vaultview": "vault",
-    "cronview": "cron",
-    "worldsview": "worlds",
-    "cliview": "cli",
-    "learnview": "learn",
-    "app.jsx": "hub",
-}
+# The capture-resolution half — URL resolution, target planning, view/route
+# inference — lands in capturd/shots/capture.py (brief 01d).
 
 
 class PathwayMapError(ValueError):
@@ -126,14 +111,15 @@ def parse_manifest_text(raw: str, source: str = "<pasted manifest>") -> dict[str
     parsed = {
         "raw": raw,
         "hash": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
-        "file": source,
+        # Basename only: the parsed map must not carry host paths.
+        "file": Path(source).name,
         "summary": _extract_summary(sections),
         "pathways": _extract_pathways(sections),
         "routes": _extract_routes(sections),
         "plugins": _extract_plugins(sections),
         "suspicious": _extract_suspicious(sections),
         "antiPatterns": _extract_anti_patterns(sections),
-        "metadata": {"file": source},
+        "metadata": {"file": Path(source).name},
     }
     if not parsed["pathways"] and not parsed["routes"]:
         # Refuse instead of returning a half-filled dict: text with none of the
@@ -214,9 +200,11 @@ def parse_verifier_json_text(text: str, source: str = "<pasted map>") -> dict[st
                 })
 
     return {
-        "raw": None,
+        # Markdown parsing keeps the source text in ``raw``; JSON does too.
+        "raw": text,
         "hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-        "file": source,
+        # Basename only: the parsed map must not carry host paths.
+        "file": Path(source).name,
         "summary": data.get("manifest_summary") or data.get("summary") or {},
         "pathways": pathways,
         "routes": routes,
@@ -224,7 +212,7 @@ def parse_verifier_json_text(text: str, source: str = "<pasted map>") -> dict[st
         "suspicious": [],
         "antiPatterns": [],
         "metadata": {
-            "file": source,
+            "file": Path(source).name,
             "version": data.get("version"),
             "repo": data.get("repo"),
             "manifest_found": data.get("manifest_found"),
@@ -530,24 +518,3 @@ def _split_row(line: str) -> list[str]:
     if text.endswith("|"):
         text = text[:-1]
     return [cell.strip() for cell in text.split("|")]
-
-
-def _infer_view_from_location(location: str) -> str | None:
-    file_part = (location or "").split(":")[0].lower().replace("\\", "/")
-    base = file_part.rsplit("/", 1)[-1]
-    compact = base.replace("_", "").replace("-", "")
-    for key, view in _VIEW_FROM_FILE.items():
-        if key.replace(".", "") in compact or key in base:
-            return view
-    return None
-
-
-def _extract_route_path(text: str) -> str | None:
-    for match in _ROUTE_METHOD_RE.finditer(text or ""):
-        return match.group(2).strip()
-    for match in re.finditer(r"(/api/[^\s`'\"]+)", text or ""):
-        return match.group(1).strip()
-    return None
-
-
-# resolve_pathway_url / plan_targets_from_map land in capturd/shots/capture.py (brief 01d)
