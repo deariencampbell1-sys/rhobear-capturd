@@ -71,6 +71,44 @@ def test_normalize_status_has_one_spelling():
     assert status("") == "UNKNOWN"
 
 
+def test_negated_and_qualified_statuses_are_not_wired():
+    # Whole canonical tokens only: NOT, PARTIAL, a hyphen or a parenthesis —
+    # or any word beyond the canonical token — can never read as WIRED.
+    def status(raw_status: str) -> str:
+        text = "\n".join([
+            "# Pathways",
+            "",
+            "| id | status |",
+            "|---|---|",
+            f"| p | {raw_status} |",
+        ])
+        return parse_manifest_text(text)["pathways"][0]["status"]
+
+    assert status("NOT WIRED") == "UNCLEAR"
+    assert status("PARTIALLY WIRED") == "INCOMPLETE"
+    assert status("WIRED (mock)") == "UNCLEAR"
+    assert status("NOT UNWIRED") == "UNCLEAR"
+
+
+def test_unknown_status_text_is_unclear_and_kept_raw():
+    # The label set is closed: text outside it is UNCLEAR with the raw cell
+    # kept in rawStatus — never a seventh label leaking the cell verbatim.
+    text = "\n".join([
+        "# Pathways",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | mostly fine |",
+        "| p2 |  |",
+    ])
+    rows = {p["id"]: p for p in parse_manifest_text(text)["pathways"]}
+    assert rows["p1"]["status"] == "UNCLEAR"
+    assert rows["p1"]["rawStatus"] == "mostly fine"
+    # UNKNOWN only for a missing cell.
+    assert rows["p2"]["status"] == "UNKNOWN"
+    assert rows["p2"]["rawStatus"] == ""
+
+
 def test_pasted_markdown_manifest_matches_file():
     p = FIXTURES / "pathway-manifest-sample.md"
     from_file = load_pathway_map(manifest_path=p)
