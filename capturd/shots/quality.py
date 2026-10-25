@@ -35,12 +35,17 @@ Tolerances (each documented here, per the lane rule):
   ``""`` rather than given an invented name;
 - file names are deduplicated in first-seen order, so one file with two
   failing entries is reported once — a deliberate improvement over
-  upstream, which reports per entry.
+  upstream, which reports per entry;
+- an empty file name is never deduplicated: two nameless failing
+  entries are reported twice, so the count never understates the
+  damage.
 
 Verdicts: ``PASS`` when meaningful states landed, ``FAIL`` when files
 failed, ``NO_CAPTURES`` when nothing landed at all. An empty or absent
 ``results`` collection is ``NO_CAPTURES`` — a deliberate divergence from
 upstream ``isPassingResult``, which has the same hole and passes on it.
+The verdict vocabulary is closed in ``VERDICTS``; only ``PASS`` is a
+pass, ``NO_CAPTURES`` is a failure.
 """
 
 from __future__ import annotations
@@ -56,6 +61,7 @@ __all__ = [
     "NO_CAPTURES",
     "NO_SUCCESSFUL_CAPTURE",
     "PASS",
+    "VERDICTS",
     "CaptureQuality",
     "build_quality_error",
     "classify_result",
@@ -74,6 +80,11 @@ NO_CAPTURES = "NO_CAPTURES"
 # Verdict values returned by classify_result / CaptureQuality.verdict.
 FAIL = "FAIL"
 
+# The closed verdict vocabulary (D2): every verdict a summary can produce
+# is one of these three — only ``PASS`` is a pass; ``NO_CAPTURES`` is a
+# failure. No new names, no renamed codes.
+VERDICTS: tuple[str, ...] = (PASS, FAIL, NO_CAPTURES)
+
 # The manifest kind that marks a rested-baseline screenshot.
 BASELINE_KIND = "baseline"
 
@@ -87,7 +98,9 @@ class CaptureQuality:
     capture at all. ``no_captures``: the run landed no readable files at
     all. A run passes only when none of the three is populated. File
     names are deduplicated across the summary, first-seen order kept
-    (D6).
+    (D6), except that an empty name is never deduplicated (D7). Bucket
+    assignment is first-seen wins: a file first seen as ``empty`` stays
+    in ``empty_files`` even if a later entry would make it baseline-only.
     """
 
     baseline_only_files: list[str] = field(default_factory=list)
@@ -111,7 +124,8 @@ class CaptureQuality:
     @property
     def verdict(self) -> str:
         """``NO_CAPTURES`` when nothing landed, ``PASS`` only when no file
-        is baseline-only and no file is empty, else ``FAIL``."""
+        is baseline-only and no file is empty, else ``FAIL`` — always
+        one of the closed ``VERDICTS`` (D2)."""
         if self.no_captures:
             return NO_CAPTURES
         if not self.baseline_only_files and not self.empty_files:
@@ -152,8 +166,10 @@ def summarize_capture_quality(result: Any) -> CaptureQuality:
             continue
         read_any = True
         name = _file_name(item)
-        if name in seen_failures:
+        if name and name in seen_failures:
             # D6: one file, reported once, first-seen order preserved.
+            # D7: an empty name is never deduplicated — two nameless
+            # failing entries are both reported.
             continue
         manifest = item.get("manifest")
         captures: list[Any] = []
@@ -170,10 +186,12 @@ def summarize_capture_quality(result: Any) -> CaptureQuality:
             if capture.get("kind") != BASELINE_KIND
         ]
         if not successful:
-            seen_failures.add(name)
+            if name:
+                seen_failures.add(name)
             empty.append(name)
         elif not useful:
-            seen_failures.add(name)
+            if name:
+                seen_failures.add(name)
             baseline_only.append(name)
 
     if not read_any:
