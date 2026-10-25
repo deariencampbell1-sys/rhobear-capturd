@@ -393,6 +393,27 @@ def test_root_siblings_are_disambiguated():
     assert plan.limits["dropped_ambiguous"] == 0
 
 
+def test_structural_path_with_a_unique_id_ancestor_is_planned():
+    # D1 (round 3): generation and verification share one anchor. The
+    # generator used to stop the structural chain at a unique-id ancestor
+    # ("div#host > button") while the verifier only accepts chains anchored at
+    # the document boundary — so the emitted path never verified against its
+    # own node and the button was dropped as ambiguous. Invariant (D1): a path
+    # the generator emits always verifies against the same node.
+    root = parse_html("<main><div id='host'><button>Go</button></div></main>")
+    plan = plan_candidates(root)
+
+    assert plan.reason == "ok"
+    (candidate,) = plan.candidates
+    assert candidate.label == "Go"
+    assert candidate.selector_strategy == "structural"
+    assert candidate.selector == "main > div#host > button"
+    assert plan.limits["dropped_ambiguous"] == 0
+    # The generator's own selector is exactly the selector the plan verified.
+    button = root.children[0].children[0].children[0]
+    assert unique_selector(button)[0] == candidate.selector
+
+
 def test_structural_path_is_root_scoped():
     # D2 (round 2, Apollo): every structural path starts at #root, and the
     # verifier anchors the chain there — "div > button" must never match a
