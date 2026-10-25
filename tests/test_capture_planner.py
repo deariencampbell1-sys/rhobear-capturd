@@ -8,6 +8,7 @@ from capturd.shots.planner import (
     ControlKind,
     NAVIGATION_SELECTOR_HINTS,
     STABLE_SELECTOR_ATTRIBUTES,
+    _PRIORITY_BY_KIND,
     _count_matches,
     classify_control,
     iter_elements,
@@ -478,6 +479,40 @@ def test_large_document_planning_is_bounded_by_max_states():
     assert exact.reason == "ok"
     assert exact.limits["truncated"] is False
     assert exact.limits["discovered"] == 2
+
+
+# ---------------------------------------------------------------------------
+# One priority table, and a public surface brief 01d can import.
+# ---------------------------------------------------------------------------
+
+
+def test_role_tab_priority_uses_the_shared_table():
+    # D12: one source of truth for priorities - a role=tab from the tab loop
+    # and a swept class="tab" control carry the same priority.
+    root = parse_html(
+        "<main>"
+        "<button role='tab' id='r'>Role tab</button>"
+        "<button class='tab' id='s'>Swept tab</button>"
+        "</main>"
+    )
+    plan = plan_candidates(root)
+
+    priorities = {c.label: c.priority for c in plan.candidates}
+    assert priorities["Role tab"] == priorities["Swept tab"] == _PRIORITY_BY_KIND[
+        ControlKind.TAB
+    ]
+
+
+def test_public_surface_exports_node_and_iter_elements():
+    # D13: brief 01d consumes parsed trees; it must not have to import a
+    # private name or an un-exported walker.
+    import capturd.shots.planner as planner_module
+
+    assert "Node" in planner_module.__all__
+    assert "iter_elements" in planner_module.__all__
+    root = planner_module.parse_html("<main><button>Go</button></main>")
+    assert isinstance(root, planner_module.Node)
+    assert [node.tag for node in planner_module.iter_elements(root)] == ["main", "button"]
 
 
 # ---------------------------------------------------------------------------
