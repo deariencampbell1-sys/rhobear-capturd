@@ -565,6 +565,43 @@ def test_form_submit_input_is_planned():
     assert candidate.target == ""
 
 
+def test_value_only_submit_input_is_planned():
+    # D1 (round 2): a value attribute is a label. <input type="submit"
+    # value="Sign up"> with no aria-label has no text content, was classified
+    # NONE and silently dropped — a main-path control must never be dropped
+    # for want of a label it renders itself.
+    root = parse_html(
+        '<form action="/signup"><input type="submit" value="Sign up"></form>'
+    )
+    plan = plan_candidates(root)
+
+    (candidate,) = plan.candidates
+    assert candidate.kind == "control"
+    assert candidate.label == "Sign up"
+    assert candidate.is_navigation is False
+    assert classify_control(root.children[0].children[0]) == (ControlKind.CONTROL, False)
+
+
+def test_value_only_button_input_is_planned():
+    # D1: same fallback for <input type="button"> — value labels it.
+    root = parse_html('<form><input type="button" value="Retry"></form>')
+    plan = plan_candidates(root)
+
+    (candidate,) = plan.candidates
+    assert candidate.kind == "control"
+    assert candidate.label == "Retry"
+
+
+def test_value_only_hidden_input_is_not_planned():
+    # D1's boundary: the value fallback applies to input/button labels only —
+    # a hidden input is not a control at all, whatever its value says.
+    root = parse_html('<form><input type="hidden" value="session-token"></form>')
+    plan = plan_candidates(root)
+
+    assert plan.candidates == []
+    assert plan.reason == "no-candidates"
+
+
 def test_input_with_stable_attribute_uses_it_for_the_selector():
     root = parse_html(
         "<form>"
