@@ -3,6 +3,10 @@
 carve-out for the Windows absolute-path failures). No ffmpeg binary required --
 these test pure string/path logic, not subprocess calls.
 Run directly: `python director-rig/tests/test_finish.py`
+Direct runs REQUIRE the pytest package (it is imported at module level and the
+direct runner inspects pytest marks); what the direct run does not need is
+pytest's test COLLECTOR/ENGINE -- the __main__ block below drives the test
+functions itself. Run under pytest for the usual reporting.
 
 Documented rule for `_safe_input_path` (mirrors finish.py's comment):
 
@@ -253,7 +257,9 @@ if __name__ == "__main__":
 
     def _cases(t):
         """Expand single-argument pytest.mark.parametrize marks and honour
-        skipif, so the no-pytest-engine direct runner stays meaningful."""
+        skipif, so the direct runner (no pytest ENGINE -- the module-level
+        `import pytest` and this mark inspection still need the pytest
+        PACKAGE installed) stays meaningful."""
         marks = [m for m in getattr(t, "pytestmark", []) if isinstance(m, _pytest.Mark)]
         if any(m.name == "skipif" and any(m.args) for m in marks):
             return [(f"{t.__name__} (platform)", None, True)]
