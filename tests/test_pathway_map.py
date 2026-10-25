@@ -15,7 +15,6 @@ import pytest
 
 from capturd.shots.pathway_map import (
     PathwayMapError,
-    _normalize_status,
     load_pathway_map,
     parse_manifest_md,
     parse_manifest_text,
@@ -49,15 +48,27 @@ def test_parse_verifier_json_extracts_findings_as_pathways():
 
 
 def test_normalize_status_has_one_spelling():
-    assert _normalize_status("wired") == "WIRED"
-    assert _normalize_status("WIRED") == "WIRED"
-    assert _normalize_status("mocked") == "MOCKED"
-    assert _normalize_status("unwired") == "UNWIRED"
-    assert _normalize_status("UNWIRED FLAG") == "UNWIRED"
-    assert _normalize_status("incomplete") == "INCOMPLETE"
-    assert _normalize_status("UNCLEAR") == "UNCLEAR"
-    assert _normalize_status("yes") == "UNWIRED"
-    assert _normalize_status("") == "UNKNOWN"
+    # Normalisation is exercised through the public parse — no private reach-in.
+    def status(raw_status: str) -> str:
+        text = "\n".join([
+            "# Pathways",
+            "",
+            "| id | status |",
+            "|---|---|",
+            f"| p | {raw_status} |",
+        ])
+        return parse_manifest_text(text)["pathways"][0]["status"]
+
+    assert status("wired") == "WIRED"
+    assert status("WIRED") == "WIRED"
+    assert status("mocked") == "MOCKED"
+    assert status("unwired") == "UNWIRED"
+    assert status("UNWIRED FLAG") == "UNWIRED"
+    assert status("incomplete") == "INCOMPLETE"
+    assert status("UNCLEAR") == "UNCLEAR"
+    assert status("yes") == "UNWIRED"
+    assert status("⚠") == "UNWIRED"
+    assert status("") == "UNKNOWN"
 
 
 def test_pasted_markdown_manifest_matches_file():
@@ -121,20 +132,20 @@ def test_verifier_checks_must_be_an_object():
 def test_empty_paste_is_rejected():
     with pytest.raises(PathwayMapError, match="empty"):
         load_pathway_map(manifest_text="   ")
-    with pytest.raises(ValueError, match="empty"):
+    with pytest.raises(PathwayMapError, match="empty"):
         parse_manifest_text("")
 
 
 def test_zero_inputs_is_rejected():
-    with pytest.raises(ValueError, match="pathway map is required"):
+    with pytest.raises(PathwayMapError, match="pathway map is required"):
         load_pathway_map()
 
 
 def test_two_inputs_at_once_is_rejected():
     p = FIXTURES / "pathway-manifest-sample.md"
-    with pytest.raises(ValueError, match="not both"):
+    with pytest.raises(PathwayMapError, match="not both"):
         load_pathway_map(manifest_path=p, map_path=FIXTURES / "sample-verifier-map.json")
-    with pytest.raises(ValueError, match="not both"):
+    with pytest.raises(PathwayMapError, match="not both"):
         load_pathway_map(manifest_path=p, manifest_text=p.read_text(encoding="utf-8"))
 
 
@@ -142,23 +153,23 @@ def test_malformed_manifest_raises_instead_of_half_filled_dict():
     with pytest.raises(PathwayMapError, match="does not look like a pathway manifest"):
         parse_manifest_text("hello world\nnot a manifest at all\n")
     # Same refusal through the loader.
-    with pytest.raises(ValueError, match="does not look like a pathway manifest"):
+    with pytest.raises(PathwayMapError, match="does not look like a pathway manifest"):
         load_pathway_map(manifest_text="hello world\n")
 
 
 def test_malformed_verifier_json_raises():
-    with pytest.raises(ValueError, match="not valid verifier JSON"):
+    with pytest.raises(PathwayMapError, match="not valid verifier JSON"):
         parse_verifier_json_text("{not json")
-    with pytest.raises(ValueError, match="must be an object"):
+    with pytest.raises(PathwayMapError, match="must be an object"):
         parse_verifier_json_text("[1, 2]")
 
 
 def test_missing_file_names_input_not_path():
-    with pytest.raises(ValueError, match="manifest_path") as exc:
+    with pytest.raises(PathwayMapError, match="manifest_path") as exc:
         load_pathway_map(manifest_path="/nonexistent/manifest.md")
     # The refusal names the offending INPUT; it never echoes the host path.
     assert "/nonexistent" not in str(exc.value)
-    with pytest.raises(ValueError, match="map_path") as exc:
+    with pytest.raises(PathwayMapError, match="map_path") as exc:
         load_pathway_map(map_path="/nonexistent/map.json")
     assert "/nonexistent" not in str(exc.value)
 
