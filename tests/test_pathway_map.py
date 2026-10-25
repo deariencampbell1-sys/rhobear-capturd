@@ -200,6 +200,25 @@ def test_both_flavours_return_the_same_key_set():
     assert manifest["metadata"]["manifest_found"] is None
 
 
+def test_prose_with_pipe_after_a_table_is_not_a_row():
+    # D2: a table row must start with a pipe. A prose line containing a pipe
+    # right after a table is neither injected as a phantom row nor turned
+    # into a false short-row refusal — here a 2-cell prose line follows a
+    # nine-column table, which used to read as a 2-vs-9 short row.
+    text = "\n".join([
+        "# Pathway Manifest — prose after table",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | location | trigger | declared_intent | handler | downstream_call | evidence | status | unwired flag |",
+        "|---|---|---|---|---|---|---|---|---|",
+        "| p1 | A.jsx:1 | onClick | Launch capture | startCapture | POST /api/captures | A.jsx:1 | WIRED |  |",
+        "see a | b above for the wiring notes",
+    ])
+    parsed = parse_manifest_text(text)
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+
+
 def test_verifier_with_no_checks_is_refused():
     # Zero pathways AND zero routes is refused, exactly like the manifest
     # flavour — an empty verifier map must not parse to a success.

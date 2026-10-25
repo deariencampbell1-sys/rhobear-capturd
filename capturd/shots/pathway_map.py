@@ -654,7 +654,10 @@ def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, list[str]]
             continue
         rows: list[list[str]] = []
         j = i + 2
-        while j < len(lines) and "|" in lines[j]:
+        # A row must START with a pipe: a prose line containing a pipe right
+        # after a table ends the table there — it is neither injected as a
+        # phantom row nor refused as a short row.
+        while j < len(lines) and re.match(r"^\s*\|", lines[j]):
             row = _split_row(lines[j])
             if len(row) < len(cells):
                 raise PathwayMapError(
