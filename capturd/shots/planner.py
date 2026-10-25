@@ -39,6 +39,7 @@ __all__ = [
     "Candidate",
     "CapturePlan",
     "Node",
+    "NonDocumentRootError",
     "NAVIGATION_SELECTOR_HINTS",
     "STABLE_SELECTOR_ATTRIBUTES",
     "classify_control",
@@ -873,6 +874,13 @@ def _target_summary(index: _PlanIndex, node: _Node) -> tuple[str, Optional[bool]
     return controls, None
 
 
+class NonDocumentRootError(ValueError):
+    """Raised when :func:`plan_candidates` is handed a subtree instead of the
+    document root (D4). The precondition — ``root.parent is None`` and
+    ``root.tag == "#root"`` — is refused with this named error, so a caller
+    passing a subtree can never mistake the refusal for an empty plan."""
+
+
 def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int = 24) -> CapturePlan:
     """Turn a parsed document into an ordered, deduped candidate list.
 
@@ -898,7 +906,18 @@ def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int 
     not run to the end of the document — and ``limits["scan_stopped_at_cap"]``
     is True exactly when it stopped early. The cap is overshot by one so the
     ``truncated`` flag stays exact.
+
+    Raises :class:`NonDocumentRootError` (D4) unless ``root`` is the document
+    root produced by :func:`parse_html` — ``root.parent is None`` and
+    ``root.tag == "#root"``. A subtree is refused with that named error, never
+    silently planned as an empty plan.
     """
+    if root.parent is not None or root.tag != "#root":
+        raise NonDocumentRootError(
+            "plan_candidates requires the parse_html document root "
+            "(root.parent is None and root.tag == '#root'); got "
+            f"tag={root.tag!r} with parent={root.parent!r}"
+        )
     cap = max(0, max_states)
     limits: dict = {
         "max_states": cap,
