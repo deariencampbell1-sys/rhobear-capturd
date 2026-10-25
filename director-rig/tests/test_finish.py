@@ -212,6 +212,42 @@ def test_unc_and_device_paths_fall_through_to_file_checks():
         assert "not a real file" in str(excinfo.value.code)
 
 
+def _unwrap_param(v):
+    """Unwrap one entry of a parametrize list to (value, label).
+
+    `pytest.param(...)` produces a `_pytest.mark.structures.ParameterSet`, NOT
+    a `_pytest.Mark` -- the old `isinstance(v, _pytest.Mark)` check never
+    matched it, so the direct runner below passed the whole ParameterSet where
+    the test expected a callable and broke on Windows (the platform the
+    drive-letter carve-out exists for). Detect a parameter set by duck-typing
+    (.values / .id) so this stays independent of pytest's private class
+    layout. Multi-arg params fail loudly instead of silently mis-running.
+    """
+    if hasattr(v, "values") and hasattr(v, "id"):
+        if len(v.values) != 1:
+            raise SystemExit(
+                f"direct runner does not support multi-arg pytest.param(...) "
+                f"entries (got {len(v.values)} values, id={v.id!r}) -- use one "
+                "value per param, or extend the runner deliberately")
+        return v.values[0], v.id or repr(v.values[0])
+    return v, repr(v)
+
+
+def test_direct_runner_unwraps_pytest_param_sets():
+    """Pin the direct-runner unwrap (Apollo: pytest.param is a ParameterSet,
+    not a Mark). Runs under pytest AND in the documented direct run
+    (`python director-rig/tests/test_finish.py`), so the runner cannot regress
+    to passing a ParameterSet where a callable is expected."""
+    val, label = _unwrap_param(pytest.param(lambda p: str(p), id="C:\\...\\file.png"))
+    assert callable(val)
+    assert label == "C:\\...\\file.png"  # prefer the param's id in labels
+    val2, label2 = _unwrap_param("plain value")
+    assert val2 == "plain value" and "plain value" in label2
+    with pytest.raises(SystemExit) as excinfo:
+        _unwrap_param(pytest.param(1, 2, id="multi"))
+    assert "multi-arg" in str(excinfo.value)
+
+
 if __name__ == "__main__":
     import pytest as _pytest
 
@@ -226,10 +262,7 @@ if __name__ == "__main__":
             return [(t.__name__, t, False)]
         out = []
         for v in params[0].args[1]:
-            if isinstance(v, _pytest.Mark):  # pytest.param(...) wrapper
-                val, label = v.args[0], v.id or repr(v.args[0])
-            else:
-                val, label = v, repr(v)
+            val, label = _unwrap_param(v)
             out.append((f"{t.__name__}[{label}]", _make(t, val), False))
         return out
 
