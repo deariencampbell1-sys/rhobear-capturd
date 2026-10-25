@@ -8,6 +8,10 @@ arrives in two flavours, both parsed here:
 * a pathway manifest in markdown (headings + pipe tables), or
 * verifier JSON (``{ summary, checks: { <check>: { findings[] } } }``).
 
+Both flavours parse to the same top-level shape — ``flavour`` says which
+produced it — and ``rawStatus`` keeps its per-flavour meaning: the raw status
+cell for a manifest, the ``SEVERITY``/check name for a verifier finding.
+
 Captur'd is a desktop tool: the map usually arrives as PASTED text, so
 ``load_pathway_map`` accepts exactly one of a file path, pasted manifest
 markdown, pasted verifier JSON — and a pasted input parses to the same content
@@ -70,6 +74,12 @@ def load_pathway_map(
             "provide a manifest or a map, not both — got "
             + ", ".join(sorted(provided))
         )
+    # An empty path is a PROVIDED path too: refuse it explicitly by name
+    # instead of letting it fall through to the "required" complaint.
+    if manifest_path is not None and not manifest_path:
+        raise PathwayMapError("manifest_path is empty")
+    if map_path is not None and not map_path:
+        raise PathwayMapError("map_path is empty")
     # ``is not None``, not truthiness: "" is a PROVIDED input — two inputs
     # must still collide, and a lone empty paste must reach the parser's
     # empty-input refusal, not the loader's "required" complaint.
@@ -119,13 +129,20 @@ def parse_manifest_text(raw: str, source: str = "<pasted manifest>") -> dict[str
         "hash": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
         # Basename only: the parsed map must not carry host paths.
         "file": Path(source).name,
+        "flavour": "manifest",
         "summary": _extract_summary(sections),
         "pathways": _extract_pathways(sections),
         "routes": _extract_routes(sections),
         "plugins": _extract_plugins(sections),
         "suspicious": _extract_suspicious(sections),
         "antiPatterns": _extract_anti_patterns(sections),
-        "metadata": {"file": Path(source).name},
+        # The manifest says nothing about these — None, not a borrowed value.
+        "metadata": {
+            "file": Path(source).name,
+            "version": None,
+            "repo": None,
+            "manifest_found": None,
+        },
     }
     if not parsed["pathways"] and not parsed["routes"]:
         # Refuse instead of returning a half-filled dict: text with none of the
@@ -219,11 +236,18 @@ def parse_verifier_json_text(text: str, source: str = "<pasted map>") -> dict[st
     # manifest_summary must not be swapped for a differently-shaped summary.
     manifest_summary = data.get("manifest_summary")
     if isinstance(manifest_summary, dict):
-        summary: dict[str, Any] = manifest_summary
+        source_summary: dict[str, Any] = manifest_summary
     elif isinstance(data.get("summary"), dict):
-        summary = data["summary"]
+        source_summary = data["summary"]
     else:
-        summary = {}
+        source_summary = {}
+
+    if not pathways and not routes:
+        # The same refusal the manifest flavour already makes: a verifier map
+        # that yields zero pathways and zero routes is not a map.
+        raise PathwayMapError(
+            "verifier map yielded no pathways and no routes — refusing an empty map"
+        )
 
     return {
         # Markdown parsing keeps the source text in ``raw``; JSON does too.
@@ -231,7 +255,8 @@ def parse_verifier_json_text(text: str, source: str = "<pasted map>") -> dict[st
         "hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
         # Basename only: the parsed map must not carry host paths.
         "file": Path(source).name,
-        "summary": summary,
+        "flavour": "verifier",
+        "summary": _normalised_summary(source_summary),
         "pathways": pathways,
         "routes": routes,
         "plugins": [],
@@ -244,6 +269,24 @@ def parse_verifier_json_text(text: str, source: str = "<pasted map>") -> dict[st
             "manifest_found": data.get("manifest_found"),
         },
     }
+
+
+_SUMMARY_COUNT_KEYS = (
+    "pathwaysTotal",
+    "wired",
+    "mocked",
+    "unwired",
+    "incomplete",
+    "unclear",
+    "routesCount",
+    "pluginsCount",
+)
+
+
+def _normalised_summary(source: dict[str, Any]) -> dict[str, Any]:
+    """The one summary shape for both flavours: the same 8 count keys, with
+    None where the source does not say."""
+    return {key: source.get(key) for key in _SUMMARY_COUNT_KEYS}
 
 
 def _status_from_finding(check_name: str, finding: dict[str, Any]) -> str:
@@ -295,16 +338,7 @@ def _split_sections(raw: str) -> list[dict[str, Any]]:
 
 
 def _extract_summary(sections: list[dict[str, Any]]) -> dict[str, Any]:
-    summary: dict[str, Any] = {
-        "pathwaysTotal": None,
-        "wired": None,
-        "mocked": None,
-        "unwired": None,
-        "incomplete": None,
-        "unclear": None,
-        "routesCount": None,
-        "pluginsCount": None,
-    }
+    summary: dict[str, Any] = {key: None for key in _SUMMARY_COUNT_KEYS}
     for sec in sections:
         text = "\n".join(sec["body"])
         # IGNORECASE makes the uppercase spellings cover every case variant;
