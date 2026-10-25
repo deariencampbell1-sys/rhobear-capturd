@@ -299,6 +299,56 @@ def test_attribute_value_with_gt_does_not_break_the_chain():
 
 
 # ---------------------------------------------------------------------------
+# Fragments: #root children get :nth-of-type too, and navigation exclusion is
+# uniform across every discovery loop.
+# ---------------------------------------------------------------------------
+
+
+def test_root_siblings_are_disambiguated():
+    # Brief 01d feeds fragments (synthetic #root, several top-level controls);
+    # two top-level buttons must both plan via :nth-of-type, never both drop.
+    root = parse_html("<button>One</button><button>Two</button>")
+    plan = plan_candidates(root)
+
+    assert plan.reason == "ok"
+    assert [c.label for c in plan.candidates] == ["One", "Two"]
+    assert [c.selector for c in plan.candidates] == [
+        "button:nth-of-type(1)",
+        "button:nth-of-type(2)",
+    ]
+    for candidate in plan.candidates:
+        assert _count_matches(root, candidate.selector) == 1
+
+
+def test_summary_in_navigation_is_excluded_and_counted():
+    # A <summary> inside navigation chrome is excluded like any other control:
+    # the summary loop must apply the same navigation skip and count it.
+    root = parse_html(
+        "<header class='navbar'><details><summary>Menu</summary></details></header>"
+        "<main><summary>Content disclosure</summary></main>"
+    )
+    plan = plan_candidates(root)
+
+    assert [c.label for c in plan.candidates] == ["Content disclosure"]
+    assert all(c.is_navigation is False for c in plan.candidates)
+    assert plan.limits["navigation_excluded"] == 1
+
+
+def test_role_tab_in_navigation_is_excluded_and_counted():
+    # The role=tab loop must skip nodes inside navigation exactly like the
+    # sweep does; no candidate may ever come out with is_navigation=True.
+    root = parse_html(
+        "<header><button role='tab'>Home tab</button></header>"
+        "<main><button role='tab'>Main tab</button></main>"
+    )
+    plan = plan_candidates(root)
+
+    assert [c.label for c in plan.candidates] == ["Main tab"]
+    assert all(c.is_navigation is False for c in plan.candidates)
+    assert plan.limits["navigation_excluded"] == 1
+
+
+# ---------------------------------------------------------------------------
 # One test per control kind (brief 01b), all against inline HTML strings.
 # ---------------------------------------------------------------------------
 
