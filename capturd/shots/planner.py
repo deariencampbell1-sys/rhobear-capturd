@@ -867,15 +867,19 @@ def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int 
     ceilings: more than 10 000 elements or deeper than 256 levels). There is no
     live-versus-rested reason code here; that distinction is brief 01d's.
 
-    ``limits["discovered"]`` counts validated candidates; when the cap
-    truncates the plan, validation short-circuits at ``cap + 1`` (D7) so the
-    work is bounded by the cap while the ``truncated`` flag stays exact.
+    ``limits["discovered"]`` counts the candidates actually validated into
+    the plan. The cap really bounds the scan (round 2, D4): discovery stops
+    as soon as the plan holds more than ``cap`` validated candidates — it does
+    not run to the end of the document — and ``limits["scan_stopped_at_cap"]``
+    is True exactly when it stopped early. The cap is overshot by one so the
+    ``truncated`` flag stays exact.
     """
     cap = max(0, max_states)
     limits: dict = {
         "max_states": cap,
         "discovered": 0,
         "truncated": False,
+        "scan_stopped_at_cap": False,
         "dropped_ambiguous": 0,
         "navigation_excluded": 0,
         "dropped_action_labels": 0,
@@ -897,16 +901,18 @@ def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int 
     dropped_ambiguous = 0
     navigation_excluded = 0
     dropped_action_labels = 0
+    scan_stopped_at_cap = False
 
     def add(node: _Node, kind: ControlKind, reason: str, priority: int) -> bool:
         """Validate and append one candidate.
 
-        Returns False once the plan holds more than ``cap`` candidates (D7):
-        the caller's remaining iterations then skip validation cheaply, while
-        the navigation and action-label counters keep running to completion —
-        the operator's counts stay exact while the work stays bounded. The cap
-        is overshot by one so the ``truncated`` flag stays exact: a document
-        with exactly ``cap`` valid candidates is not reported as truncated.
+        Returns False once the plan holds more than ``cap`` candidates. The
+        discovery loops check the same condition at the top of every iteration
+        and stop scanning (round 2, D4): the cap bounds the whole scan, not
+        just validation, so the counters reflect the nodes actually visited.
+        The cap is overshot by one so the ``truncated`` flag stays exact: a
+        document with exactly ``cap`` valid candidates is not reported as
+        truncated.
         """
         nonlocal dropped_ambiguous
         if len(candidates) > cap:
@@ -940,6 +946,9 @@ def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int 
         return True
 
     for index_no, node in enumerate(tabs):
+        if len(candidates) > cap:
+            scan_stopped_at_cap = True  # D4: the cap bounds the scan mid-document.
+            break
         # Uniform navigation exclusion (D2): every discovery loop skips nodes
         # inside navigation chrome and counts the skip.
         if _in_navigation(node):
@@ -949,11 +958,17 @@ def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int 
         # table as the swept classification.
         add(node, ControlKind.TAB, f"role tab {index_no + 1}", _PRIORITY_BY_KIND[ControlKind.TAB])
     for index_no, node in enumerate(summaries):
+        if len(candidates) > cap:
+            scan_stopped_at_cap = True
+            break
         if _in_navigation(node):
             navigation_excluded += 1
             continue
         add(node, ControlKind.ACCORDION, f"summary disclosure {index_no + 1}", 25)
     for index_no, node in enumerate(swept):
+        if len(candidates) > cap:
+            scan_stopped_at_cap = True
+            break
         if _in_navigation(node):
             navigation_excluded += 1
             continue
@@ -987,6 +1002,7 @@ def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int 
             "max_states": cap,
             "discovered": len(candidates),
             "truncated": truncated,
+            "scan_stopped_at_cap": scan_stopped_at_cap,
             "dropped_ambiguous": dropped_ambiguous,
             "navigation_excluded": navigation_excluded,
             "dropped_action_labels": dropped_action_labels,
