@@ -218,6 +218,28 @@ def test_verifier_raw_keeps_the_source_text():
     assert parsed["raw"] == text
 
 
+def test_wired_column_yes_is_wired_and_no_is_unwired():
+    # A `wired` column carries its own polarity: `yes`/`true`/`✔`/`wired` are
+    # WIRED and `no`/`false`/`✗`/`unwired` are UNWIRED — the word is read
+    # through the column, so `yes` can never invert into UNWIRED.
+    parsed = parse_manifest_md(FIXTURES / "pathway-manifest-boolean-columns.md")
+    rows = {p["id"]: p for p in parsed["pathways"]}
+    assert rows["boolean-yes"]["status"] == "WIRED"
+    assert rows["boolean-yes"]["rawStatus"] == "yes"
+    assert rows["boolean-no"]["status"] == "UNWIRED"
+    assert rows["boolean-no"]["rawStatus"] == "no"
+
+
+def test_unwired_column_sets_the_flag_and_the_status():
+    # A header of exactly `unwired` is read with the same semantics as
+    # `unwired flag`: it drives the status and it sets unwiredFlag.
+    parsed = parse_manifest_md(FIXTURES / "pathway-manifest-boolean-columns.md")
+    row = next(p for p in parsed["pathways"] if p["id"] == "unwired-flagged")
+    assert row["status"] == "UNWIRED"
+    assert row["rawStatus"] == "⚠"
+    assert row["unwiredFlag"] is True
+
+
 def test_unwired_flag_sees_a_bare_warning_marker():
     parsed = parse_manifest_md(HARDENING)
     row = next(p for p in parsed["pathways"] if p["id"] == "catalog-search")
