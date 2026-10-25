@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from capturd.shots.planner import (
     ControlKind,
     NAVIGATION_SELECTOR_HINTS,
     STABLE_SELECTOR_ATTRIBUTES,
+    Node,
+    NonDocumentRootError,
     classify_control,
     iter_elements,
     parse_html,
@@ -464,6 +468,19 @@ def test_text_after_an_inline_child_keeps_document_order():
     assert plan.limits["dropped_action_labels"] == 1
     (candidate,) = plan.candidates
     assert candidate.label == "Retry now"
+
+
+def test_non_document_root_is_refused():
+    # D4: plan_candidates requires the document root from parse_html
+    # (root.parent is None, root.tag == "#root"). A subtree must be refused
+    # with a named error — never silently planned as an empty plan, which is
+    # indistinguishable from "the document has nothing to interact with".
+    root = parse_html("<main><div id='host'><button>Go</button></div></main>")
+
+    with pytest.raises(NonDocumentRootError):
+        plan_candidates(root.children[0])  # a subtree with a parent
+    with pytest.raises(NonDocumentRootError):
+        plan_candidates(Node("main", {}))  # detached, but not the synthetic root
 
 
 def test_summary_in_navigation_is_excluded_and_counted():
