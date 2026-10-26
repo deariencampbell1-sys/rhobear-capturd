@@ -850,36 +850,37 @@ def test_read_only_tests_do_not_depend_on_cwd(
     assert write_recorder == []
 
 
-def test_summary_writes_nothing_to_disk() -> None:
-    # D2: nothing on disk moves. Record Path.cwd() and the sorted
-    # os.listdir of the repo root before and after the four public calls;
-    # both must come back identical — no temp files, no .json, no summary
-    # sidecar (edge case 3: the working-directory listing itself).
+def test_summary_writes_nothing_to_disk(write_recorder: list[str]) -> None:
+    """Building a summary writes nothing to disk — the module's promise, in
+    as many words: "Read-only: nothing here mutates ... the filesystem".
+
+    D4/D6, which is which: the write recorder is the PROOF — installed
+    before the four public calls, it must still hold zero write-mode
+    opens afterwards, and it fails on a sidecar write, a /tmp file, a
+    content change, or any intercepted open the module could grow. The
+    source grep below is only the TRIPWIRE — a cheap second pair of eyes
+    over primitives the recorder does not intercept (shutil, tempfile,
+    os.makedirs); it is not what proves anything (D6). W0-15-r1's
+    non-recursive listing diff is gone: a listing of top-level names
+    could not see any of the writes above, and it pinned the test to the
+    repo root as cwd. Nothing here reads Path.cwd() (D5).
+    """
     import re
 
     import capturd.shots.quality as quality_module
 
-    # The module source itself carries no write calls — stated here as an
-    # assertion, mirroring the acceptance grep, so a future edit that adds
-    # Path.write_text / a write-mode open() fails here, not just in review:
+    # Tripwire (D6), not the proof. json.dump( keeps the paren: json.dumps
+    # renders text and is allowed, json.dump(...) writes a file.
     source = Path(quality_module.__file__).read_text(encoding="utf-8")
-    assert re.search(r"write_text|open\([^)]*['\"][wa]", source) is None, (
-        "capturd/shots/quality.py must contain no write calls"
-    )
-    # json.dumps renders text; json.dump(target) writes a file — only the
-    # former is allowed in a read-only module.
-    assert "json.dump(" not in source
+    assert re.search(
+        r"write_text|write_bytes|os\.open|shutil|tempfile|os\.makedirs"
+        r"|json\.dump\(|open\([^)]*['\"][wa]",
+        source,
+    ) is None, "capturd/shots/quality.py must contain no write calls"
 
-    cwd = Path.cwd()
-    before = sorted(os.listdir(cwd))
-    # Guard: this really is the repo root listing, not an empty no-op.
-    assert "capturd" in before and "tests" in before
-
+    # Proof (D4): zero write-mode opens over the four public calls.
     result = _mixed_result()
-    quality = summarize_capture_quality(result)
-    build_quality_error(quality)
-    quality.reason_codes
-    is_passing(result)
-
-    assert Path.cwd() == cwd
-    assert sorted(os.listdir(cwd)) == before
+    quality, message, verdict, codes, passing = _exercise_public_surface(result)
+    assert (verdict, codes) == (FAIL, [BASELINE_ONLY, NO_SUCCESSFUL_CAPTURE])
+    assert passing is False
+    assert write_recorder == []
