@@ -1095,28 +1095,38 @@ def _extract_tables(
         # raises through `_count_from_cell` on its own — the ambiguity is
         # refused wherever the cell sits.
         if len(headers) == 2 and not _is_count_table(headers):
+            # D65: the probe tries BOTH column orders — but the reversed
+            # order only where the header itself reads as a REVERSED count
+            # table whose category word is unrecognised (its first cell is
+            # a count word; inside this block the second cell is then no
+            # category word either, or the table would already be
+            # recognised). That is the table D65 names. Probing the
+            # reversed order for EVERY unrecognised header would read a
+            # pathway table's status cell (`| p1 | WIRED |`) as a count
+            # label over the id's leading integer and refuse every
+            # two-column pathway table. D60: a cell that refuses (two bare
+            # integers) is demoted to not-a-count-row by the probe — the
+            # refusal itself still fires where a count is genuinely read.
+            orders = (
+                ((0, 1), (1, 0))
+                if _EMPHASIS_RE.sub("", headers[0]).lower() in _COUNT_WORDS
+                else ((0, 1),)
+            )
             for row in rows:
-                # D38: the probe reads rows in the NORMAL column order only.
-                # A reversed probe would read a pathway table's status cell
-                # (`| p1 | WIRED |`) as a count label over the id's leading
-                # integer and refuse every two-column pathway table — the
-                # header shape (D24/D59), not a row probe, decides whether
-                # a table counts. D60: a row whose count cell refuses is
-                # demoted to not-a-count-row by the probe — the refusal
-                # itself still fires where a count is genuinely read.
-                if _reads_as_count_row(row[0], row[1]):
-                    raise PathwayMapError(
-                        f"table header at line {first_line + i} is "
-                        f"'{' | '.join(headers)}' — its rows read like count "
-                        f"rows (count label '{row[0]}' with a numeric count) "
-                        "but the header is not a recognised count-table "
-                        "header (accepted orders: a category word first and "
-                        "a count word second, or a count word first and a "
-                        "category word second; accepted category words: "
-                        f"{_CATEGORY_WORDS_TEXT}; accepted count words: "
-                        f"{_COUNT_WORDS_TEXT}) — refusing rather than "
-                        "returning nulls"
-                    )
+                for label_index, count_index in orders:
+                    if _reads_as_count_row(row[label_index], row[count_index]):
+                        raise PathwayMapError(
+                            f"table header at line {first_line + i} is "
+                            f"'{' | '.join(headers)}' — its rows read like count "
+                            f"rows (count label '{row[label_index]}' with a numeric count) "
+                            "but the header is not a recognised count-table "
+                            "header (accepted orders: a category word first and "
+                            "a count word second, or a count word first and a "
+                            "category word second; accepted category words: "
+                            f"{_CATEGORY_WORDS_TEXT}; accepted count words: "
+                            f"{_COUNT_WORDS_TEXT}) — refusing rather than "
+                            "returning nulls"
+                        )
         table: dict[str, Any] = {
             "headers": [c.strip() for c in cells],
             "rows": rows,
