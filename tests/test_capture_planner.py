@@ -1193,3 +1193,44 @@ def test_href_is_not_a_stable_attribute():
         assert candidate.selector_strategy == "structural"
         assert plan.limits["dropped_ambiguous"] == 0
     assert "token" not in repr(plan)
+
+
+# ---------------------------------------------------------------------------
+# Review round 6: D19 (base_url is deleted — a parameter that is accepted and
+# ignored is a silent no-op) and D20 (the first <legend> of a disabled
+# <fieldset> stays interactive, per HTML).
+# ---------------------------------------------------------------------------
+
+
+def test_base_url_is_gone():
+    # D19: base_url was accepted and ignored — a silent no-op that reads as a
+    # planner bug in the layer above. It is deleted from the signature; a
+    # caller passing it fails loudly with TypeError instead of being ignored.
+    # Brief 01d gets it back when 01d actually resolves links.
+    import inspect
+
+    assert "base_url" not in inspect.signature(plan_candidates).parameters
+    root = parse_html("<main><button>Go</button></main>")
+    with pytest.raises(TypeError):
+        plan_candidates(root, base_url="https://example.com")
+
+
+def test_legend_controls_are_planned():
+    # D20: per HTML, controls inside the first <legend> subtree of a disabled
+    # <fieldset> are NOT disabled — the fieldset does not disable them. A
+    # control anywhere else in the same fieldset (including a second legend)
+    # is disabled and never planned.
+    root = parse_html(
+        "<main>"
+        "<fieldset disabled>"
+        "<legend><button>Legend top</button><div><button>Legend deep</button></div></legend>"
+        "<legend><button>Second legend</button></legend>"
+        "<button>Outside legend</button>"
+        "</fieldset>"
+        "</main>"
+    )
+    plan = plan_candidates(root)
+
+    assert sorted(c.label for c in plan.candidates) == ["Legend deep", "Legend top"]
+    assert all(c.kind == "control" for c in plan.candidates)
+    assert plan.reason == "ok"
