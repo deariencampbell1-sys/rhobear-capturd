@@ -941,6 +941,9 @@ def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int 
     exceeds the walk ceilings: more than 10 000 elements or deeper than 256
     levels). D3 invariant: ``reason == "truncated"`` whenever
     ``limits["truncated"]`` is true; ``"ok"`` is only for an untruncated plan.
+    On ``"too-large"`` the ``limits["too_large"]`` counter carries the reason
+    text — the ceiling that was exceeded (D9): ``"more than 10000 elements"``
+    or ``"deeper than 256 levels"``, never a bare ``True``.
     There is no live-versus-rested reason code here; that distinction is
     brief 01d's.
 
@@ -974,8 +977,9 @@ def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int 
     }
     try:
         _check_size(root)
-    except _DocumentTooLarge:
-        limits["too_large"] = True
+    except _DocumentTooLarge as exc:
+        # D9: the counter names the ceiling that was exceeded.
+        limits["too_large"] = str(exc)
         return CapturePlan(candidates=[], reason="too-large", limits=limits)
 
     index = _PlanIndex(root)
