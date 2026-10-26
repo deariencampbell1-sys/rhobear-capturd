@@ -406,17 +406,35 @@ def _is_count_table(headers: list[str]) -> bool:
 
 # D7: a count row's LABEL decides WHICH count the row sets — WIRED /
 # MOCKED / UNWIRED / INCOMPLETE / UNCLEAR / TOTAL PATHWAYS / ROUTES /
-# PLUGINS, optionally bold-wrapped. D25: the label is ALL the regex
-# decides — the count VALUE is parsed by `_count_from_cell`, the one
-# count parser for both flavours, so a summary cell is read exactly like
-# an anti-pattern cell ("3.5" → 3 in both) and the two sites can never
-# disagree. The old digit-run value group and its end-of-line anchor are
-# gone with that job.
+# PLUGINS. D25: the label is ALL the regex decides — the count VALUE is
+# parsed by `_count_from_cell`, the one count parser for both flavours,
+# so a summary cell is read exactly like an anti-pattern cell ("3.5" → 3
+# in both) and the two sites can never disagree. D41: emphasis is
+# stripped from the label before matching (see `_count_label_match`), so
+# a bold, italic or bold-italic label is still the label — the old
+# edge-anchored `\*{0,2}` silently dropped a bold-italic count inside
+# the very path that refuses silent drops.
 _COUNT_ROW_RE = re.compile(
-    r"^\*{0,2}(WIRED|MOCKED|UNWIRED|INCOMPLETE|UNCLEAR"
-    r"|TOTAL PATHWAYS|ROUTES|PLUGINS)\*{0,2}$",
+    r"^(WIRED|MOCKED|UNWIRED|INCOMPLETE|UNCLEAR"
+    r"|TOTAL PATHWAYS|ROUTES|PLUGINS)$",
     re.IGNORECASE,
 )
+
+
+# D41: a count row's label is matched AFTER stripping markdown emphasis,
+# so `***WIRED***` (bold-italic — three asterisks per side, which the old
+# hand-rolled `\*{0,2}` could never match) counts exactly like `WIRED`,
+# and `*WIRED*`, `_WIRED_` and `` `WIRED` `` do too. Unlike the header
+# check's `_EMPHASIS_RE`, whitespace is KEPT: "TOTAL PATHWAYS" is a
+# two-word label and needs its space.
+_ROW_EMPHASIS_RE = re.compile(r"[*_`]+")
+
+
+def _count_label_match(cell: str) -> re.Match[str] | None:
+    """The one label matcher for a count row (D7/D41): markdown emphasis is
+    stripped from the cell, then the label set is matched — never a second
+    regex at a second site."""
+    return _COUNT_ROW_RE.match(_ROW_EMPHASIS_RE.sub("", cell))
 
 
 def _normalised_summary(source: dict[str, Any]) -> dict[str, Any]:
@@ -487,7 +505,7 @@ def _extract_summary(sections: list[dict[str, Any]]) -> dict[str, Any]:
             # Counts come from the table's CELLS only, never from prose.
             # The row label decides WHICH count the row sets (D7).
             for row in table["rows"]:
-                match = _COUNT_ROW_RE.match(row[0])
+                match = _count_label_match(row[0])
                 if not match:
                     continue
                 key = match.group(1).lower()
@@ -938,7 +956,7 @@ def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, Any]]:
         # refused wherever the cell sits.
         if len(headers) == 2 and not _is_count_table(headers):
             for row in rows:
-                if _COUNT_ROW_RE.match(row[0]) and _count_from_cell(row[1]) is not None:
+                if _count_label_match(row[0]) and _count_from_cell(row[1]) is not None:
                     raise PathwayMapError(
                         f"table header at line {first_line + i} is "
                         f"'{' | '.join(headers)}' — its rows read like count "
