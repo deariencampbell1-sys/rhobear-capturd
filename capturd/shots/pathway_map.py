@@ -950,9 +950,6 @@ def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, Any]]:
         tables.append({
             "headers": [c.strip() for c in cells],
             "rows": rows,
-            # 1-based input line of the first body row (rows are contiguous:
-            # every pipe-bearing line is a row or the parse raises).
-            "first_row": first_line + i + 2,
         })
         i = j
     return tables
