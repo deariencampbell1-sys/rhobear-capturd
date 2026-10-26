@@ -2155,3 +2155,64 @@ def test_each_table_is_consumed_by_one_extractor():
     parsed = parse_manifest_text(suspicious_text)
     assert parsed["suspicious"] == [{"category": "WIRED", "count": "5"}]
     assert all(v is None for v in parsed["summary"].values())
+
+
+def test_prose_ends_a_table_and_only_a_misaligned_row_refuses():
+    # D67: prose ends a table; only a row-shaped line that cannot align
+    # refuses. Three shapes:
+    #
+    #   * a row candidate — a line whose first non-space character is `|`
+    #     that splits into >=2 cells — that cannot align still refuses,
+    #     naming its line number (unchanged);
+    #   * a prose line that does not start with `|` and carries no pipe
+    #     ends the table — no error, no row;
+    #   * a line whose pipe never forms a second cell (a pipe inside a
+    #     code span) is not row-shaped and does not start with `|`: it is
+    #     prose too. Today such a legend line directly under a table is
+    #     REFUSED as a misaligned row, which breaks legends that used to
+    #     parse.
+    # A misaligned row is never let through as prose — the refusal stays
+    # exactly as wide as row-shaped lines.
+    misaligned_text = "\n".join([
+        "# Pathway Manifest — row candidate misaligned",  # line 1
+        "",                                             # line 2
+        "## 1. Pathways Table",                         # line 3
+        "",                                             # line 4
+        "| id | status |",                              # line 5
+        "|---|---|",                                    # line 6
+        "| p1 | WIRED |",                               # line 7
+        "| p2 | WIRED | extra |",                       # line 8 — 3 cells vs 2
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(misaligned_text)
+    message = str(excinfo.value)
+    assert "line 8" in message
+    assert "3 cells" in message
+    assert "header has 2" in message
+
+    prose_text = "\n".join([
+        "# Pathway Manifest — prose after the table",   # line 1
+        "",                                             # line 2
+        "## 1. Pathways Table",                         # line 3
+        "",                                             # line 4
+        "| id | status |",                              # line 5
+        "|---|---|",                                    # line 6
+        "| p1 | WIRED |",                               # line 7
+        "Total pathways: 1, all wired.",                # line 8 — prose, no pipe
+    ])
+    parsed = parse_manifest_text(prose_text)
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+
+    legend_text = "\n".join([
+        "# Pathway Manifest — legend under the table",  # line 1
+        "",                                             # line 2
+        "## 1. Pathways Table",                         # line 3
+        "",                                             # line 4
+        "| id | status |",                              # line 5
+        "|---|---|",                                    # line 6
+        "| p1 | WIRED |",                               # line 7
+        "the flags are `WIRED | MOCKED` here",          # line 8 — pipe in a code span
+    ])
+    parsed = parse_manifest_text(legend_text)
+    # The legend is prose: the table ends, the legend is no row, no error.
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
