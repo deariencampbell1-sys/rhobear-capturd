@@ -360,12 +360,15 @@ def _is_count_table(headers: list[str]) -> bool:
 
 # D7: a count row's LABEL decides WHICH count the row sets — WIRED /
 # MOCKED / UNWIRED / INCOMPLETE / UNCLEAR / TOTAL PATHWAYS / ROUTES /
-# PLUGINS, optionally bold-wrapped. D19: the count cell may be grouped —
-# digit runs separated by `,` or spaces — and is read WHOLE, so "1,234"
-# is 1234, never the truncated first run 1 and never a silent None.
+# PLUGINS, optionally bold-wrapped. D25: the label is ALL the regex
+# decides — the count VALUE is parsed by `_count_from_cell`, the one
+# count parser for both flavours, so a summary cell is read exactly like
+# an anti-pattern cell ("3.5" → 3 in both) and the two sites can never
+# disagree. The old digit-run value group and its end-of-line anchor are
+# gone with that job.
 _COUNT_ROW_RE = re.compile(
-    r"^\s*\|?\s*\*{0,2}(WIRED|MOCKED|UNWIRED|INCOMPLETE|UNCLEAR"
-    r"|TOTAL PATHWAYS|ROUTES|PLUGINS)\*{0,2}\s*\|\s*(\d+(?:[,\s]+\d+)*)\s*\|?\s*$",
+    r"^\*{0,2}(WIRED|MOCKED|UNWIRED|INCOMPLETE|UNCLEAR"
+    r"|TOTAL PATHWAYS|ROUTES|PLUGINS)\*{0,2}$",
     re.IGNORECASE,
 )
 
@@ -438,14 +441,18 @@ def _extract_summary(sections: list[dict[str, Any]]) -> dict[str, Any]:
             # Counts come from the table's CELLS only, never from prose.
             # The row label decides WHICH count the row sets (D7).
             for row in table["rows"]:
-                match = _COUNT_ROW_RE.match("| " + " | ".join(row) + " |")
+                match = _COUNT_ROW_RE.match(row[0])
                 if not match:
                     continue
                 key = match.group(1).lower()
-                # D19, decided: read whole — strip the `,`/space grouping
-                # before the integer, so "1,234" is 1234, never the
-                # truncated run 1.
-                val = int(re.sub(r"[,\s]", "", match.group(2)))
+                # D25: one parser for every count — the cell itself goes
+                # through `_count_from_cell`, exactly like an anti-pattern
+                # entry's count, so the two sites cannot disagree.
+                val = _count_from_cell(row[1])
+                if val is None:
+                    # An empty or digit-less cell sets nothing — a real
+                    # zero is a real count (D4).
+                    continue
                 if "unwire" in key:
                     summary["unwired"] = val
                 elif "wire" in key:
