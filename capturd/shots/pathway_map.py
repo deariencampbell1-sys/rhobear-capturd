@@ -59,11 +59,16 @@ pathways, routes, plugins, suspicious or anti-patterns sections) is
 table-parsed wherever it sits; any other section is decided on a
 refusal-free probe of its tables and is consumed when one of them is a
 count table wherever it sits (D24), a routes table, a pathways table, or
-the D38 deformed count table. In a section no extractor reads —
-``## Notes``, ``## Legend``, ``## Appendix``, any other free prose — a
-misaligned row, an unbalanced backtick or an unrecognised count header is
-ignored, not refused, and every refusal in a consumed section is
-unchanged.
+the D38 deformed count table. D84: the section rule is the extractors'
+own gates — `_section_is_consumed` asks each extractor's gate predicate
+(the same helpers the extractors gate through) instead of restating
+them, so a widened extractor widens the consumed set with it and the two
+cannot disagree; the routes and pathways shape branches are those
+extractors' predicates, tested both ways against the extractors'
+behaviour. In a section no extractor reads — ``## Notes``, ``## Legend``,
+``## Appendix``, any other free prose — a misaligned row, an unbalanced
+backtick or an unrecognised count header is ignored, not refused, and
+every refusal in a consumed section is unchanged.
 
 Refusals — every one of these constructs raises ``PathwayMapError``
 rather than half-fill. The list is data (``REFUSALS`` below, D49) and
@@ -157,60 +162,140 @@ class PathwayMapError(ValueError):
 # (section, tables in that section).
 _ParsedSections = list[tuple[dict[str, Any], list[dict[str, Any]]]]
 
-# D77: the sections the manifest itself declares — the summary and every
-# section a heading-gated extractor reads — are consumed BY HEADING, so a
-# malformed table there still refuses exactly as before. The vocabulary is
-# the extractors' own heading gates (pathways, routes, plugins, suspicious,
-# anti-patterns) plus the summary section; no new words are invented.
+# D84: each heading-gated extractor's own heading vocabulary, written ONCE
+# and reused by that extractor's gate helper below — `_CONSUMED_SECTION_RE`
+# is their union plus the declared structure names the shape-reading
+# extractors' sections carry (summary, pathway, route), so a widened
+# extractor widens the consumed set with it instead of drifting from it.
+_PLUGIN_HEADING_RE = r"plugin"
+_SUSPICIOUS_HEADING_RE = r"suspicious|top\s+\d|risk"
+_ANTI_PATTERN_HEADING_RE = r"anti-?pattern|finding|grep|catch"
+_PATHWAYS_EXCLUDED_HEADING_RE = r"suspicious|risk|anti-?pattern|open questions|plugin"
+
+# D77/D84: the sections the manifest itself declares — the summary and
+# every section a heading-gated extractor reads — are consumed BY HEADING,
+# so a malformed table there still refuses exactly as before.
 _CONSUMED_SECTION_RE = re.compile(
-    r"summary|pathway|route|plugin|suspicious|top\s+\d|risk"
-    r"|anti-?pattern|finding|grep|catch",
+    r"summary|pathway|route"
+    f"|{_PLUGIN_HEADING_RE}"
+    f"|{_SUSPICIOUS_HEADING_RE}"
+    f"|{_ANTI_PATTERN_HEADING_RE}",
     re.IGNORECASE,
 )
 
 
+def _deformed_count_row(
+    headers: list[str], rows: list[list[str]]
+) -> tuple[list[str], int, int] | None:
+    """D38/D65/D60: the first row of a two-column table that reads as a
+    count row over an unrecognised header, with the (label, count) order
+    that read it — None when the table is not a deformed count table. THE
+    one probe, shared by `_extract_tables` (whose D38 refusal fires on the
+    result) and `_summary_reads` (D84: section consumption follows the
+    extractors) — the two cannot disagree. D65: both column orders are
+    probed, the reversed one only where the header's first cell is itself
+    a count word; D60: a cell that refuses (two bare integers) demotes
+    the row to not-a-count-row."""
+    if len(headers) != 2 or _is_count_table(headers):
+        return None
+    orders = ((0, 1), (1, 0)) if _is_count_cell(headers[0]) else ((0, 1),)
+    for row in rows:
+        for label_index, count_index in orders:
+            if _reads_as_count_row(row[label_index], row[count_index]):
+                return row, label_index, count_index
+    return None
+
+
+def _summary_reads(table: dict[str, Any]) -> bool:
+    """D84: the summary extractor's own gate — does it read this table,
+    returning counts from it or refusing on it? A count table anywhere
+    (D24: the heading is irrelevant — `_extract_summary` reads those rows
+    through `_count_table_order`), plus the D38 deformed count table:
+    count rows over an unrecognised two-column header are the summary
+    extractor's own refusal, fired by `_extract_tables` wherever the
+    table sits."""
+    if _count_table_order(table["headers"]) is not None:
+        return True
+    return _deformed_count_row(table["headers"], table["rows"]) is not None
+
+
+def _routes_reads(table: dict[str, Any]) -> bool:
+    """D84: the routes extractor's own gate — a header of exactly `path`,
+    `route` or `endpoint` (D69: no heading gate, shape only)."""
+    headers = [h.lower() for h in table["headers"]]
+    return any(re.search(r"^path$|^route$|^endpoint$", h) for h in headers)
+
+
+def _pathways_reads(heading: str | None, table: dict[str, Any]) -> bool:
+    """D84: the pathways extractor's own gate — a table with an id-ish
+    and a status-ish column, outside the headings whose own extractors own
+    the rows, and never a `rank` column (a comparison table's rows are no
+    pathway's)."""
+    headers = [h.lower() for h in table["headers"]]
+    if "rank" in headers:
+        return False
+    if re.search(_PATHWAYS_EXCLUDED_HEADING_RE, str(heading or ""), re.I):
+        return False
+    has_id = any(re.search(r"^id$|slug|element|pathway", h) for h in headers)
+    has_status = any(
+        h in {"status", "wired", "unwired flag", "unwired"} for h in headers
+    )
+    return has_id and has_status
+
+
+def _plugins_reads(heading: str | None, table: dict[str, Any]) -> bool:
+    """D84: the plugins extractor's own gate — a plugin heading and a
+    name/plugin/skill column."""
+    if not re.search(_PLUGIN_HEADING_RE, str(heading or ""), re.I):
+        return False
+    headers = [h.lower() for h in table["headers"]]
+    return any(re.search(r"^name$|plugin|skill", h) for h in headers)
+
+
+def _suspicious_reads(heading: str | None, table: dict[str, Any]) -> bool:
+    """D84: the suspicious extractor's own gate — a suspicious, top-N or
+    risk heading and any table at all (it reads every row it finds)."""
+    if not re.search(_SUSPICIOUS_HEADING_RE, str(heading or ""), re.I):
+        return False
+    return bool(table["headers"])
+
+
+def _anti_patterns_reads(heading: str | None, table: dict[str, Any]) -> bool:
+    """D84: the anti-pattern extractor's own gate — an anti-pattern
+    heading and a category word in the header."""
+    if not re.search(_ANTI_PATTERN_HEADING_RE, str(heading or ""), re.I):
+        return False
+    headers = [h.lower() for h in table["headers"]]
+    return any(re.search(r"category|type|anti-?pattern|pattern", h) for h in headers)
+
+
 def _section_is_consumed(heading: str | None, tables: list[dict[str, Any]]) -> bool:
-    """D77: does an extractor read this section? A heading naming one of the
-    manifest's declared structures consumes it; otherwise the probed tables
-    decide by the shapes the heading-irrelevant extractors read (D69/D24:
-    the summary and routes extractors gate on header shape alone, the
-    pathways extractor on shape outside its excluded headings), plus the
-    D38 deformed count table — rows that read as count rows over an
-    unrecognised two-column header are the summary extractor's own
-    refusal, so the section is consumed wherever that table sits."""
+    """D77/D84: does an extractor read this section?
+
+    D84: ONE source of truth — this function no longer re-implements the
+    extractors' gates. It asks each extractor's own gate predicate — the
+    same helpers the extractors gate through below — whether it reads one
+    of the section's probed tables, so a widened extractor widens the
+    consumed set with it and the two cannot disagree. A section whose
+    heading names one of the manifest's declared structures (the union of
+    the heading-gated extractors' vocabulary plus the summary, pathway and
+    route section names) is consumed BY HEADING wherever it sits — the
+    strictness D77 states, so a malformed table there still refuses; every
+    other section is consumed exactly when some extractor would read one
+    of its tables."""
     text = str(heading or "")
     if _CONSUMED_SECTION_RE.search(text):
         return True
-    excluded = re.search(
-        r"suspicious|risk|anti-?pattern|open questions|plugin", text, re.I
-    )
     for table in tables:
-        headers = [h.lower() for h in table["headers"]]
-        if _is_count_table(table["headers"]):
-            return True  # the summary extractor reads count tables anywhere (D24)
-        if any(re.search(r"^path$|^route$|^endpoint$", h) for h in headers):
-            return True  # the routes extractor (heading-irrelevant, D69)
-        if not excluded and (
-            any(re.search(r"^id$|slug|element|pathway", h) for h in headers)
-            and any(
-                h in {"status", "wired", "unwired flag", "unwired"}
-                for h in headers
-            )
+        if (
+            _summary_reads(table)
+            or _routes_reads(table)
+            or _pathways_reads(text, table)
+            or _plugins_reads(text, table)
+            or _suspicious_reads(text, table)
+            or _anti_patterns_reads(text, table)
         ):
-            return True  # the pathways extractor
-        if len(table["headers"]) == 2 and not _is_count_table(table["headers"]):
-            # D38's own probe (D65 column orders, D60's demotion on a
-            # refusing cell): rows that read as count rows over an
-            # unrecognised header are the summary extractor's deformed
-            # table — its refusal fires wherever the extractor reads.
-            orders = (
-                ((0, 1), (1, 0))
-                if _is_count_cell(table["headers"][0])
-                else ((0, 1),)
-            )
-            for row in table["rows"]:
-                if any(_reads_as_count_row(row[li], row[ci]) for li, ci in orders):
-                    return True
+            return True
     return False
 
 
@@ -799,19 +884,12 @@ def _extract_pathways(parsed_sections: _ParsedSections) -> list[dict[str, Any]]:
     seen_ids: set[str] = set()
     for sec, tables in parsed_sections:
         heading = str(sec.get("heading") or "")
-        if re.search(r"suspicious|risk|anti-?pattern|open questions|plugin", heading, re.I):
-            continue
-        # D63: the tables arrive already parsed (once per section); the
-        # heading and header-shape gates below decide (D76), shared tables
-        # included.
+        # D63/D84: the tables arrive already parsed (once per section); the
+        # extractor's own gate decides (D76), shared tables included.
         for table in tables:
+            if not _pathways_reads(heading, table):
+                continue
             headers = [h.lower() for h in table["headers"]]
-            if "rank" in headers:
-                continue
-            has_id = any(re.search(r"^id$|slug|element|pathway", h) for h in headers)
-            has_status = any(h in {"status", "wired", "unwired flag", "unwired"} for h in headers)
-            if not has_id or not has_status:
-                continue
             for row in table["rows"]:
                 row_map: dict[str, str] = {}
                 for i, header in enumerate(headers):
@@ -969,14 +1047,12 @@ def _extract_routes(parsed_sections: _ParsedSections) -> list[dict[str, Any]]:
     # D69: routes carry no heading gate — only the tables matter, so the
     # loop binds no `sec` local at all.
     for _, tables in parsed_sections:
-        # D63: the tables arrive already parsed (once per section); the
-        # header-shape gate below decides (D76), shared tables included.
+        # D63/D84: the tables arrive already parsed (once per section); the
+        # extractor's own gate decides (D76), shared tables included.
         for table in tables:
-            headers = [h.lower() for h in table["headers"]]
-            # Anchored: a `pathway` column in a pathways table must not pull
-            # its rows into routes.
-            if not any(re.search(r"^path$|^route$|^endpoint$", h) for h in headers):
+            if not _routes_reads(table):
                 continue
+            headers = [h.lower() for h in table["headers"]]
             for row in table["rows"]:
                 row_map: dict[str, str] = {}
                 for i, header in enumerate(headers):
@@ -998,15 +1074,11 @@ def _extract_routes(parsed_sections: _ParsedSections) -> list[dict[str, Any]]:
 def _extract_plugins(parsed_sections: _ParsedSections) -> list[dict[str, Any]]:
     plugins: list[dict[str, Any]] = []
     for sec, tables in parsed_sections:
-        if not re.search(r"plugin", sec.get("heading") or "", re.I):
-            continue
-        # D63: the tables arrive already parsed (once per section); the
-        # heading and header gates below decide (D76), shared tables
-        # included.
+        heading = str(sec.get("heading") or "")
         for table in tables:
-            headers = [h.lower() for h in table["headers"]]
-            if not any(re.search(r"^name$|plugin|skill", h) for h in headers):
+            if not _plugins_reads(heading, table):
                 continue
+            headers = [h.lower() for h in table["headers"]]
             for row in table["rows"]:
                 row_map: dict[str, str] = {}
                 for i, header in enumerate(headers):
@@ -1021,15 +1093,11 @@ def _extract_plugins(parsed_sections: _ParsedSections) -> list[dict[str, Any]]:
 def _extract_suspicious(parsed_sections: _ParsedSections) -> list[dict[str, Any]]:
     suspicious: list[dict[str, Any]] = []
     for sec, tables in parsed_sections:
-        if not re.search(r"suspicious|top\s+\d|risk", sec.get("heading") or "", re.I):
-            continue
-        # D63: the tables arrive already parsed (once per section); the
-        # heading gate above and the non-empty-header gate below decide
-        # (D76), shared tables included.
+        heading = str(sec.get("heading") or "")
         for table in tables:
-            headers = [h.lower() for h in table["headers"]]
-            if not headers:
+            if not _suspicious_reads(heading, table):
                 continue
+            headers = [h.lower() for h in table["headers"]]
             for row in table["rows"]:
                 entry: dict[str, str] = {}
                 for i, header in enumerate(headers):
@@ -1133,17 +1201,11 @@ def _normalise_anti_pattern(entry: dict[str, Any]) -> dict[str, Any] | None:
 def _extract_anti_patterns(parsed_sections: _ParsedSections) -> list[dict[str, Any]]:
     patterns: list[dict[str, Any]] = []
     for sec, tables in parsed_sections:
-        if not re.search(r"anti-?pattern|finding|grep|catch", sec.get("heading") or "", re.I):
-            continue
-        # D63: the tables arrive already parsed (once per section); the
-        # heading gate above and the category-word header gate below decide
-        # (D76) — a count-shaped table under this heading with no category
-        # word in its header never matched the gate, and a count-shaped
-        # table WITH one is read here as on main (D76).
+        heading = str(sec.get("heading") or "")
         for table in tables:
-            headers = [h.lower() for h in table["headers"]]
-            if not any(re.search(r"category|type|anti-?pattern|pattern", h) for h in headers):
+            if not _anti_patterns_reads(heading, table):
                 continue
+            headers = [h.lower() for h in table["headers"]]
             row_lines = table["row_lines"]
             for row_position, row in enumerate(table["rows"]):
                 entry: dict[str, str] = {}
@@ -1295,40 +1357,22 @@ def _extract_tables(
         # outside the refusal. A row whose cell is two bare integers
         # raises through `_count_from_cell` on its own — the ambiguity is
         # refused wherever the cell sits.
-        if refuse and len(headers) == 2 and not _is_count_table(headers):
-            # D65: the probe tries BOTH column orders — but the reversed
-            # order only where the header itself reads as a REVERSED count
-            # table whose category word is unrecognised (its first cell is
-            # a count cell — D75's containment check; inside this block the
-            # second cell is then no category cell either, or the table
-            # would already be recognised). That is the table D65 names.
-            # Probing the reversed order for EVERY unrecognised header
-            # would read a pathway table's status cell (`| p1 | WIRED |`)
-            # as a count label over the id's leading integer and refuse
-            # every two-column pathway table. D60: a cell that refuses (two
-            # bare integers) is demoted to not-a-count-row by the probe —
-            # the refusal itself still fires where a count is genuinely
-            # read.
-            orders = (
-                ((0, 1), (1, 0))
-                if _is_count_cell(headers[0])
-                else ((0, 1),)
-            )
-            for row in rows:
-                for label_index, count_index in orders:
-                    if _reads_as_count_row(row[label_index], row[count_index]):
-                        raise PathwayMapError(
-                            f"table header at line {first_line + i} is "
-                            f"'{' | '.join(headers)}' — its rows read like count "
-                            f"rows (count label '{row[label_index]}' with a numeric count) "
-                            "but the header is not a recognised count-table "
-                            "header (accepted orders: a category word first and "
-                            "a count word second, or a count word first and a "
-                            "category word second; accepted category words: "
-                            f"{_CATEGORY_WORDS_TEXT}; accepted count words: "
-                            f"{_COUNT_WORDS_TEXT}) — refusing rather than "
-                            "returning nulls"
-                        )
+        if refuse:
+            deformed = _deformed_count_row(headers, rows)
+            if deformed is not None:
+                row, label_index, count_index = deformed
+                raise PathwayMapError(
+                    f"table header at line {first_line + i} is "
+                    f"'{' | '.join(headers)}' — its rows read like count "
+                    f"rows (count label '{row[label_index]}' with a numeric count) "
+                    "but the header is not a recognised count-table "
+                    "header (accepted orders: a category word first and "
+                    "a count word second, or a count word first and a "
+                    "category word second; accepted category words: "
+                    f"{_CATEGORY_WORDS_TEXT}; accepted count words: "
+                    f"{_COUNT_WORDS_TEXT}) — refusing rather than "
+                    "returning nulls"
+                )
         table: dict[str, Any] = {
             "headers": [c.strip() for c in cells],
             "rows": rows,
