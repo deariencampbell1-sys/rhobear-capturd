@@ -96,6 +96,13 @@ class _NodeBuilder(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.root = _Node("#root", {})
         self._stack = [self.root]
+        #: D43: per-tag index of open stack depths, maintained beside
+        #: ``_stack`` — ``_open_depths[tag]`` is the sorted list of depths at
+        #: which ``tag`` is open. An end tag is matched in constant time from
+        #: this index instead of scanning the open stack, so an unmatched end
+        #: tag returns immediately and the end-tag path never walks the whole
+        #: stack per stray tag.
+        self._open_depths: dict[str, list[int]] = {}
         self._elements = 0
         #: D44: deterministic cost counter for the end-tag path — incremented
         #: once per open-stack entry examined while matching an end tag, never
@@ -122,19 +129,29 @@ class _NodeBuilder(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         node = self._add_element(tag, attrs)
-        if tag.lower() not in self._VOID:
+        if node.tag not in self._VOID:
             self._stack.append(node)
+            self._open_depths.setdefault(node.tag, []).append(len(self._stack) - 1)
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self._add_element(tag, attrs)
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
-        for depth in range(len(self._stack) - 1, 0, -1):
-            self.stack_scans += 1  # one stack entry examined (D44)
-            if self._stack[depth].tag == tag:
-                del self._stack[depth:]
-                return
+        depths = self._open_depths.get(tag)
+        if not depths:
+            # D43: nothing of this tag is open — a stray end tag returns
+            # immediately, examining zero stack entries.
+            return
+        depth = depths[-1]  # topmost open element with this tag
+        # D43: pop to the matched depth without scanning; the dropped suffix
+        # is removed from the per-tag index one entry per dropped node, so the
+        # whole end-tag path stays proportional to the nodes it drops.
+        dropped = self._stack[depth:]
+        self.stack_scans += len(dropped)  # stack entries examined (D44)
+        for node in dropped:
+            self._open_depths[node.tag].pop()
+        del self._stack[depth:]
 
     def handle_data(self, data: str) -> None:
         if data:
