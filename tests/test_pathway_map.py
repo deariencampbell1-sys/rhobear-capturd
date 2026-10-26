@@ -1981,3 +1981,28 @@ def test_duplicate_count_rows_refuse():
     assert "wired" in message
     assert "line 7" in message
     assert "line 8" in message
+
+
+def test_normalise_anti_pattern_docstring_matches_behaviour():
+    # D62: the documentation says "only an absent key becomes ''", but the
+    # behaviour is wider: a PRESENT None also becomes "" — None is not a
+    # value (D39's `is None` check treats it as absent). The docs must
+    # state the None case, not hide it.
+    # Behaviour first, through the public parse: a JSON null in the feed
+    # round-trips as "".
+    text = json.dumps({
+        "antiPatterns": [{"category": "nulled", "file": None, "line": None}],
+        "checks": {"api-wiring": {"findings": [{"id": "f1", "path": "/api/x"}]}},
+    })
+    parsed = parse_verifier_json_text(text)
+    assert parsed["antiPatterns"] == [
+        {"category": "nulled", "count": None, "file": "", "line": "", "quote": ""},
+    ]
+    # The docstring itself must name the None case — None becoming the
+    # empty string, not only the absent key.
+    doc = pathway_map._normalise_anti_pattern.__doc__ or ""
+    assert re.search(r"None[^.]*becomes[^.]*''", doc), (
+        "_normalise_anti_pattern's docstring must state that a present None "
+        "becomes '' (like an absent key) — it currently claims only the "
+        "absent-key case"
+    )
