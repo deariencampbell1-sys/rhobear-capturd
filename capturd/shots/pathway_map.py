@@ -52,6 +52,19 @@ array is never shorter than what the feed declared. D64: the manifest
 flavour refuses a category-less anti-pattern table row by its line the
 same way.
 
+D77: a refusal fires only where an extractor is reading — a section is
+table-parsed only when an extractor will consume it. A section whose
+heading names one of the manifest's own declared structures (the summary,
+pathways, routes, plugins, suspicious or anti-patterns sections) is
+table-parsed wherever it sits; any other section is decided on a
+refusal-free probe of its tables and is consumed when one of them is a
+count table wherever it sits (D24), a routes table, a pathways table, or
+the D38 deformed count table. In a section no extractor reads —
+``## Notes``, ``## Legend``, ``## Appendix``, any other free prose — a
+misaligned row, an unbalanced backtick or an unrecognised count header is
+ignored, not refused, and every refusal in a consumed section is
+unchanged.
+
 Refusals — every one of these constructs raises ``PathwayMapError``
 rather than half-fill. The list is data (``REFUSALS`` below, D49) and
 is rendered at the end of this docstring, so it cannot live only in a
@@ -122,6 +135,62 @@ class PathwayMapError(ValueError):
 # extractor reads the section's already-parsed tables instead of reparsing
 # the body. The tuple is (section, tables in that section).
 _ParsedSections = list[tuple[dict[str, Any], list[dict[str, Any]]]]
+
+# D77: the sections the manifest itself declares — the summary and every
+# section a heading-gated extractor reads — are consumed BY HEADING, so a
+# malformed table there still refuses exactly as before. The vocabulary is
+# the extractors' own heading gates (pathways, routes, plugins, suspicious,
+# anti-patterns) plus the summary section; no new words are invented.
+_CONSUMED_SECTION_RE = re.compile(
+    r"summary|pathway|route|plugin|suspicious|top\s+\d|risk"
+    r"|anti-?pattern|finding|grep|catch",
+    re.IGNORECASE,
+)
+
+
+def _section_is_consumed(heading: str | None, tables: list[dict[str, Any]]) -> bool:
+    """D77: does an extractor read this section? A heading naming one of the
+    manifest's declared structures consumes it; otherwise the probed tables
+    decide by the shapes the heading-irrelevant extractors read (D69/D24:
+    the summary and routes extractors gate on header shape alone, the
+    pathways extractor on shape outside its excluded headings), plus the
+    D38 deformed count table — rows that read as count rows over an
+    unrecognised two-column header are the summary extractor's own
+    refusal, so the section is consumed wherever that table sits."""
+    text = str(heading or "")
+    if _CONSUMED_SECTION_RE.search(text):
+        return True
+    excluded = re.search(
+        r"suspicious|risk|anti-?pattern|open questions|plugin", text, re.I
+    )
+    for table in tables:
+        headers = [h.lower() for h in table["headers"]]
+        if _is_count_table(table["headers"]):
+            return True  # the summary extractor reads count tables anywhere (D24)
+        if any(re.search(r"^path$|^route$|^endpoint$", h) for h in headers):
+            return True  # the routes extractor (heading-irrelevant, D69)
+        if not excluded and (
+            any(re.search(r"^id$|slug|element|pathway", h) for h in headers)
+            and any(
+                h in {"status", "wired", "unwired flag", "unwired"}
+                for h in headers
+            )
+        ):
+            return True  # the pathways extractor
+        if len(table["headers"]) == 2 and not _is_count_table(table["headers"]):
+            # D38's own probe (D65 column orders, D60's demotion on a
+            # refusing cell): rows that read as count rows over an
+            # unrecognised header are the summary extractor's deformed
+            # table — its refusal fires wherever the extractor reads.
+            orders = (
+                ((0, 1), (1, 0))
+                if _is_count_cell(table["headers"][0])
+                else ((0, 1),)
+            )
+            for row in table["rows"]:
+                if any(_reads_as_count_row(row[li], row[ci]) for li, ci in orders):
+                    return True
+    return False
 
 
 def load_pathway_map(
@@ -203,10 +272,21 @@ def parse_manifest_text(raw: str, source: str = "<pasted manifest>") -> dict[str
     # D63: each section body is table-parsed exactly ONCE, here; every
     # extractor below reads these same parsed tables. Row lines ride along
     # (D61) so a refusal raised outside `_extract_tables` can name its line.
-    parsed_sections: _ParsedSections = [
-        (sec, _extract_tables("\n".join(sec["body"]), sec["start"] + 1, row_lines=True))
-        for sec in sections
-    ]
+    # D77: a section is table-parsed only when an extractor will consume
+    # it. The body is probed without refusals first; a consumed section is
+    # re-parsed with refusals (the probe's tables are thrown away — the
+    # strict parse is the one that counts), an unconsumed one contributes
+    # no tables and its malformed rows are ignored, not refused.
+    parsed_sections: _ParsedSections = []
+    for sec in sections:
+        body = "\n".join(sec["body"])
+        probe = _extract_tables(body, sec["start"] + 1, refuse=False)
+        if _section_is_consumed(sec["heading"], probe):
+            parsed_sections.append(
+                (sec, _extract_tables(body, sec["start"] + 1, row_lines=True))
+            )
+        else:
+            parsed_sections.append((sec, []))
     parsed = {
         "raw": raw,
         "hash": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
@@ -1067,7 +1147,11 @@ def _extract_anti_patterns(parsed_sections: _ParsedSections) -> list[dict[str, A
 
 
 def _extract_tables(
-    text: str, first_line: int = 1, *, row_lines: bool = False
+    text: str,
+    first_line: int = 1,
+    *,
+    row_lines: bool = False,
+    refuse: bool = True,
 ) -> list[dict[str, Any]]:
     """Extract markdown pipe tables. ``first_line`` is the 1-based line number
     of ``text``'s first line within the original input, so a refused row can
@@ -1091,7 +1175,11 @@ def _extract_tables(
     detection, so pipe-bearing prose with a stray backtick does not abort
     the parse. D47: "confirmed header" includes a header the backtick
     collapsed to fewer than two cells — the separator still matched, so
-    the refusal fires and the table is never silently dropped."""
+    the refusal fires and the table is never silently dropped. D77: with
+    ``refuse=False`` — the consumption probe ``parse_manifest_text`` runs
+    before it decides a section is read at all — every malformation below
+    is SKIPPED instead of raised: the probe never refuses, and a consumed
+    section is re-parsed with refusals on."""
     # D51: the accumulator is annotated against this function's return —
     # the dict's values include `rows: list[list[str]]`, so a narrower
     # value type would be a lie.
@@ -1115,7 +1203,10 @@ def _extract_tables(
             # and the refusal holds even when the stray backtick collapsed
             # the header to fewer than two cells (D47): the header refuses,
             # it never silently drops the table and every row under it.
-            raise PathwayMapError(backtick_refusal)
+            # D77 probe: skipped, not raised — the probe decides nothing
+            # about malformations; the strict re-parse raises it.
+            if refuse:
+                raise PathwayMapError(backtick_refusal)
         if len(cells) < 2:
             i += 1
             continue
@@ -1148,13 +1239,23 @@ def _extract_tables(
                 # established by header + separator), so the refusal fires
                 # — an unterminated code span swallows the row's remaining
                 # pipes, which makes the cell count untrustworthy; the
-                # backtick is the defect to name.
-                raise PathwayMapError(backtick_refusal)
+                # backtick is the defect to name. D77 probe: the row is
+                # skipped — its cells are untrustworthy, so it decides
+                # nothing about the section's shapes.
+                if refuse:
+                    raise PathwayMapError(backtick_refusal)
+                j += 1
+                continue
             if len(row) != len(cells):
-                raise PathwayMapError(
-                    f"table row at line {first_line + j} has {len(row)} cells but its "
-                    f"header has {len(cells)} — refusing misaligned row, first cell: '{row[0]}'"
-                )
+                if refuse:
+                    raise PathwayMapError(
+                        f"table row at line {first_line + j} has {len(row)} cells but its "
+                        f"header has {len(cells)} — refusing misaligned row, first cell: '{row[0]}'"
+                    )
+                # D77 probe: the misaligned row is skipped — it decides
+                # nothing about the section's shapes.
+                j += 1
+                continue
             rows.append(row)
             row_line_numbers.append(first_line + j)
             j += 1
@@ -1171,7 +1272,7 @@ def _extract_tables(
         # outside the refusal. A row whose cell is two bare integers
         # raises through `_count_from_cell` on its own — the ambiguity is
         # refused wherever the cell sits.
-        if len(headers) == 2 and not _is_count_table(headers):
+        if refuse and len(headers) == 2 and not _is_count_table(headers):
             # D65: the probe tries BOTH column orders — but the reversed
             # order only where the header itself reads as a REVERSED count
             # table whose category word is unrecognised (its first cell is

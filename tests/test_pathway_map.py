@@ -1710,7 +1710,10 @@ def test_collapsed_header_with_a_separator_refuses():
     # is inspected — the whole table and every row under it vanish with no
     # error, the exact silent drop this PR exists to close. The separator
     # following proves the line IS a table header, so the same refusal as
-    # the >=2-cell case fires, naming the line.
+    # the >=2-cell case fires, naming the line. D77: the malformed table
+    # lives under ## Summary — a section the summary extractor reads —
+    # because in a section no extractor reads the same table would be
+    # ignored, not refused.
     text = "\n".join([
         "# Pathway Manifest — collapsed header",    # line 1
         "",                                        # line 2
@@ -1720,7 +1723,7 @@ def test_collapsed_header_with_a_separator_refuses():
         "|---|---|",                               # line 6
         "| p1 | WIRED |",                          # line 7
         "",                                        # line 8
-        "## 2. Second Table",                      # line 9
+        "## Summary",                              # line 9
         "",                                        # line 10
         "| `a | b |",                              # line 11 — collapses to one cell
         "|---|---|",                               # line 12
@@ -2362,11 +2365,14 @@ def test_normalise_anti_pattern_docstring_matches_behaviour():
 
 
 def test_section_body_is_table_parsed_once(monkeypatch):
-    # D63: each section body is table-parsed ONCE and the parsed tables are
-    # shared by every extractor — `_extract_summary` alone reparsed each
-    # section body, so a section was parsed up to six times. Proven with a
-    # counter, not a clock: `_extract_tables` is called at most once per
-    # section for a fixture document.
+    # D63: each section body is table-parsed ONCE for the extractors and the
+    # parsed tables are shared by every extractor — `_extract_summary` alone
+    # reparsed each section body, so a section was parsed up to six times.
+    # Proven with a counter, not a clock. D77: a section may be probed once
+    # more, refusal-free, BEFORE the extractors read it — the probe decides
+    # whether an extractor reads the section at all and is no extractor's
+    # re-parse; the bound is at most two `_extract_tables` calls per section
+    # for a fixture document.
     raw = (FIXTURES / "pathway-manifest-sample.md").read_text(encoding="utf-8")
     sections = pathway_map._split_sections(raw)
     assert len(sections) > 1, "the fixture must have several sections"
@@ -2379,10 +2385,11 @@ def test_section_body_is_table_parsed_once(monkeypatch):
 
     monkeypatch.setattr(pathway_map, "_extract_tables", counting)
     parsed = parse_manifest_text(raw)
-    assert calls["n"] <= len(sections), (
+    assert calls["n"] <= 2 * len(sections), (
         f"_extract_tables called {calls['n']} times for {len(sections)} "
-        "sections — each section body must be table-parsed once and the "
-        "parsed tables shared by every extractor"
+        "sections — each section body must be table-parsed at most once for "
+        "the extractors plus one D77 refusal-free probe, the parsed tables "
+        "shared by every extractor"
     )
     # The parse itself is unchanged.
     assert [p["id"] for p in parsed["pathways"]] == [
