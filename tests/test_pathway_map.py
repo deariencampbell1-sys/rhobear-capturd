@@ -474,12 +474,39 @@ def test_every_manifest_fixture_parses():
     # D3': the duplicate/over-long id refusals must be proven safe for the
     # inputs we ship — every manifest fixture in the repo parses without
     # raising, so the refusal cannot be blamed for breaking a real input.
+    # D6: the test asserts counts, not just non-emptiness — a total, silent
+    # loss of a fixture's summary block must fail the suite. EVERY *.md
+    # fixture here carries a `## Summary Counts` table (none lacks one); the
+    # map lists the counts each fixture's table actually declares, and all
+    # of them must come out non-None. A fixture added later must join the
+    # map — an unlisted fixture fails below instead of silently skipping
+    # the count assertion.
     manifests = sorted(FIXTURES.glob("*.md"))
     assert manifests, "no manifest fixtures found under capture-foundations"
+    declared_counts = {
+        "pathway-manifest-boolean-columns.md": (
+            "pathwaysTotal", "wired", "unwired", "routesCount", "pluginsCount",
+        ),
+        "pathway-manifest-full.md": ("pathwaysTotal", "wired"),
+        "pathway-manifest-hardening.md": ("pathwaysTotal", "wired", "unwired", "mocked"),
+        "pathway-manifest-sample.md": (
+            "pathwaysTotal", "wired", "unwired", "routesCount", "pluginsCount",
+        ),
+        "single-pathway-manifest.md": ("pathwaysTotal", "wired"),
+    }
     for path in manifests:
+        assert path.name in declared_counts, (
+            f"{path.name} is not in the D6 count map — say in this test's "
+            "comment whether it carries a summary table"
+        )
         parsed = parse_manifest_md(path)
         assert parsed["flavour"] == "manifest"
         assert parsed["pathways"], f"{path.name} parsed to zero pathways"
+        for key in declared_counts[path.name]:
+            assert parsed["summary"][key] is not None, (
+                f"{path.name} lost its summary count '{key}' — a summary "
+                "block must never be silently dropped"
+            )
 
 
 def test_zero_count_is_kept():
