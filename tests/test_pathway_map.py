@@ -594,6 +594,30 @@ def test_verifier_anti_patterns_must_be_a_list():
         )
 
 
+def test_verifier_anti_pattern_entry_must_be_a_mapping():
+    # D22: a non-dict entry in `antiPatterns` is REFUSED, not skipped.
+    # Skipping returns a shorter array than the feed declared with no
+    # signal — the silent drop this module exists to prevent. The refusal
+    # names the offending entry's index and type.
+    for entries, index, type_name in (
+        (["fine", 42], 0, "str"),
+        ([{"category": "ok"}, 42], 1, "int"),
+    ):
+        text = json.dumps({
+            "antiPatterns": entries,
+            "checks": {"api-wiring": {"findings": [{"id": "f1", "path": "/api/x"}]}},
+        })
+        with pytest.raises(PathwayMapError) as excinfo:
+            parse_verifier_json_text(text)
+        message = str(excinfo.value)
+        assert f"index {index}" in message, (
+            f"refusal must name the entry's index ({index}): {message}"
+        )
+        assert type_name in message, (
+            f"refusal must name the entry's type ({type_name}): {message}"
+        )
+
+
 def test_comma_formatted_count_is_read_whole_or_refused():
     # D19, decided: READ WHOLE — `,` and spaces are stripped before taking
     # the first integer run, so "1,234" is 1234: never the truncated first
