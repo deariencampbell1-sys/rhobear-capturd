@@ -633,6 +633,15 @@ def _is_visible(node: _Node) -> bool:
 
 
 def _is_disabled(node: _Node) -> bool:
+    """Disabled-ness, self and inherited (D10).
+
+    A control is disabled by its own ``disabled`` attribute (form controls
+    plus ``fieldset``), by ``aria-disabled="true"``, or by a ``disabled``
+    class. D10: a disabled ancestor disables its descendants too — a
+    ``<button>`` inside ``<fieldset disabled>`` is unclickable however deep
+    it is nested, so it is never planned. The ancestor chain is walked via
+    :func:`_ancestors_inclusive`, like :func:`_is_visible`.
+    """
     if node.tag in ("button", "input", "select", "textarea", "optgroup", "option", "fieldset"):
         if "disabled" in node.attrs:
             return True
@@ -640,6 +649,9 @@ def _is_disabled(node: _Node) -> bool:
         return True
     if "disabled" in _classes(node):
         return True
+    for ancestor in _ancestors_inclusive(node):
+        if ancestor.tag == "fieldset" and "disabled" in ancestor.attrs:
+            return True
     return False
 
 
