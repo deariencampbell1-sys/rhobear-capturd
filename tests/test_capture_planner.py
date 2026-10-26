@@ -150,7 +150,7 @@ def test_max_states_zero_is_a_failed_plan():
     assert plan.reason == "truncated"
     assert plan.limits["truncated"] is True
     assert plan.limits["max_states"] == 0
-    assert plan.limits["discovered"] >= 1
+    assert plan.limits["kept"] >= 1
 
     # A negative cap behaves like zero.
     negative = plan_candidates(root, max_states=-3)
@@ -781,9 +781,8 @@ def test_reason_taxonomy_is_exactly_four_codes():
 def test_discovery_stops_at_the_cap():
     # D4 (round 2): the cap really bounds the scan — discovery stops as soon
     # as the plan holds more than max_states validated candidates, and
-    # limits["scan_stopped_at_cap"] says so. discovered reports what was
-    # actually validated (cap + 1, the truncation sentinel), never a
-    # full-document count.
+    # limits["scan_stopped_at_cap"] says so. kept reports the candidates
+    # kept (cap + 1, the truncation sentinel), never a full-document count.
     links = "".join(f'<a href="/p/{index}">Item {index}</a>' for index in range(2_000))
     root = parse_html(f"<main>{links}</main>")
     plan = plan_candidates(root, max_states=5)
@@ -795,13 +794,13 @@ def test_discovery_stops_at_the_cap():
     assert plan.reason == "truncated"
     assert plan.limits["truncated"] is True
     assert plan.limits["scan_stopped_at_cap"] is True
-    assert plan.limits["discovered"] == 6
+    assert plan.limits["kept"] == 6
 
 
 def test_large_document_planning_is_bounded_by_max_states():
     # D7: the id/attribute index is built once, and add() short-circuits once
     # the plan holds one candidate more than the cap (so the truncated flag
-    # stays exact). Discovery stops at cap + 1 validated candidates instead of
+    # stays exact). Discovery stops at cap + 1 kept candidates instead of
     # verifying all 2 000 links.
     links = "".join(f'<a href="/p/{index}">Item {index}</a>' for index in range(2_000))
     root = parse_html(f"<main>{links}</main>")
@@ -812,13 +811,13 @@ def test_large_document_planning_is_bounded_by_max_states():
     # reason="truncated", whatever its size — "ok" is untruncated only.
     assert plan.reason == "truncated"
     assert plan.limits["truncated"] is True
-    assert plan.limits["discovered"] == 6
+    assert plan.limits["kept"] == 6
 
     # Exactly cap candidates in the document is NOT a truncation.
     exact = plan_candidates(parse_html("<main><button>One</button><button>Two</button></main>"), max_states=2)
     assert exact.reason == "ok"
     assert exact.limits["truncated"] is False
-    assert exact.limits["discovered"] == 2
+    assert exact.limits["kept"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -1135,7 +1134,7 @@ def test_empty_document_yields_empty_plan():
 
     assert plan.candidates == []
     assert plan.reason == "no-candidates"
-    assert plan.limits["discovered"] == 0
+    assert plan.limits["kept"] == 0
     assert plan.limits["navigation_excluded"] == 0
 
     whitespace = plan_candidates(parse_html("   \n "))

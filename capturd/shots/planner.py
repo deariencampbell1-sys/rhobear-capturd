@@ -1036,8 +1036,13 @@ def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int 
     There is no live-versus-rested reason code here; that distinction is
     brief 01d's.
 
-    ``limits["discovered"]`` counts the candidates actually validated into
-    the plan. The cap really bounds the scan (round 2, D4): discovery stops
+    ``limits`` keys (D12): ``max_states`` (the effective cap), ``kept`` (the
+    candidates kept — validated, deduped and added — before the cap
+    truncates the plan; the counter says kept, never "validated"),
+    ``truncated``, ``scan_stopped_at_cap``, ``dropped_ambiguous``,
+    ``navigation_excluded``, ``dropped_action_labels``, and ``too_large``
+    (the reason text, present only on reason="too-large").
+    The cap really bounds the scan (round 2, D4): discovery stops
     as soon as the plan holds more than ``cap`` validated candidates — it does
     not run to the end of the document — and ``limits["scan_stopped_at_cap"]``
     is True exactly when it stopped early. The cap is overshot by one so the
@@ -1057,7 +1062,7 @@ def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int 
     cap = max(0, max_states)
     limits: dict = {
         "max_states": cap,
-        "discovered": 0,
+        "kept": 0,
         "truncated": False,
         "scan_stopped_at_cap": False,
         "dropped_ambiguous": 0,
@@ -1198,7 +1203,7 @@ def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int 
         reason=reason,
         limits={
             "max_states": cap,
-            "discovered": len(candidates),
+            "kept": len(candidates),
             "truncated": truncated,
             "scan_stopped_at_cap": scan_stopped_at_cap,
             "dropped_ambiguous": dropped_ambiguous,
