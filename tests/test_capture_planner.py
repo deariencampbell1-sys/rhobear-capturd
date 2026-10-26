@@ -1299,3 +1299,28 @@ def test_candidate_note_is_not_a_plan_reason():
     assert candidate.kind_note not in statuses
     assert "role tab" in candidate.kind_note
     assert "accordion" in candidate.kind_note
+
+
+# ---------------------------------------------------------------------------
+# Review round 6: D23 — .menu is a navigation exclusion and the module
+# docstring says so in the same paragraph as .nav.
+# ---------------------------------------------------------------------------
+
+
+def test_menu_is_a_documented_navigation_exclusion():
+    # D23: dropdown menus are navigation in this product, so excluding
+    # ul.menu is right — but the accepted-limitation paragraph must name
+    # .menu alongside .nav, not understate the exclusion.
+    import capturd.shots.planner as planner_module
+
+    assert ".menu" in NAVIGATION_SELECTOR_HINTS
+    nav_paragraph = next(
+        part for part in (planner_module.__doc__ or "").split("\n\n") if ".nav" in part
+    )
+    assert ".menu" in nav_paragraph
+
+    root = parse_html("<ul class='menu'><li><a href='/settings'>Settings</a></li></ul>")
+    plan = plan_candidates(root)
+    assert plan.candidates == []
+    assert plan.reason == "no-candidates"
+    assert plan.limits["navigation_excluded"] == 1
