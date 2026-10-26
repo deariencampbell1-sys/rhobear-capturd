@@ -177,6 +177,54 @@ def test_summary_ignores_pathway_rows():
     assert all(v is None for v in bare["summary"].values())
 
 
+def test_accounting_heading_is_not_a_summary_section():
+    # D1': the summary heading match is word-anchored with an explicit
+    # allow-list — "Accounting" contains the letters "count" but is not a
+    # summary section, so its `| WIRED | 3 |` row must not leak 3 into
+    # summary["wired"]. A heading outside the allow-list stays outside.
+    text = "\n".join([
+        "# Pathway Manifest — accounting heading",
+        "",
+        "## Accounting",
+        "",
+        "| WIRED | 3 |",
+        "|---|---|",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+    ])
+    parsed = parse_manifest_text(text)
+    assert parsed["summary"]["wired"] is None
+    assert all(v is None for v in parsed["summary"].values())
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+
+
+def test_totals_heading_is_a_summary_section():
+    # D1': the allow-list also covers headings the old bare substring
+    # missed — "## Totals" is a summary section and still yields its counts.
+    text = "\n".join([
+        "# Pathway Manifest — totals heading",
+        "",
+        "## Totals",
+        "",
+        "| Category | Count |",
+        "|---|---|",
+        "| **WIRED** | 2 |",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+    ])
+    parsed = parse_manifest_text(text)
+    assert parsed["summary"]["wired"] == 2
+    assert parsed["summary"]["pathwaysTotal"] is None
+
+
 def test_both_flavours_return_the_same_key_set():
     # One shape for both flavours: identical top-level keys, with `flavour`
     # saying which produced it; summary and metadata carry the same keys too.
@@ -219,6 +267,44 @@ def test_prose_with_pipe_after_a_table_is_not_a_row():
     assert [p["id"] for p in parsed["pathways"]] == ["p1"]
 
 
+def test_table_without_leading_pipes_parses():
+    # D2': GFM lets a table row omit the leading pipe. Such a row is
+    # parsed, never silently dropped — a table parsing to zero rows beside
+    # a pipe-bearing line is exactly the silent drop this module prevents.
+    text = "\n".join([
+        "# Pathway Manifest — no leading pipes",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "id | status | trigger",
+        "---|---|---",
+        "p1 | WIRED | ok",
+    ])
+    parsed = parse_manifest_text(text)
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+    assert parsed["pathways"][0]["status"] == "WIRED"
+    assert parsed["pathways"][0]["trigger"] == "ok"
+
+
+def test_misaligned_row_is_refused():
+    # D2': a pipe-bearing row that cannot be aligned with its header is
+    # REFUSED naming the line — never dropped, never a zero-row table.
+    text = "\n".join([
+        "# Pathway Manifest — misaligned row",      # line 1
+        "",                                         # line 2
+        "## 1. Pathways Table",                     # line 3
+        "",                                         # line 4
+        "| id | status | trigger |",                # line 5
+        "|---|---|---|",                            # line 6
+        "p1 | WIRED",                               # line 7 — 2 cells vs 3
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(text)
+    message = str(excinfo.value)
+    assert "line 7" in message
+    assert "p1" in message
+
+
 def test_duplicate_pathway_id_is_refused():
     # D3: a repeated id is REFUSED, not silently dropped — a map that says
     # the same pathway twice is ambiguous and must not half-parse.
@@ -255,6 +341,18 @@ def test_overlong_pathway_id_is_refused():
     message = str(excinfo.value)
     assert "201" in message
     assert long_id[:40] in message
+
+
+def test_every_manifest_fixture_parses():
+    # D3': the duplicate/over-long id refusals must be proven safe for the
+    # inputs we ship — every manifest fixture in the repo parses without
+    # raising, so the refusal cannot be blamed for breaking a real input.
+    manifests = sorted(FIXTURES.glob("*.md"))
+    assert manifests, "no manifest fixtures found under capture-foundations"
+    for path in manifests:
+        parsed = parse_manifest_md(path)
+        assert parsed["flavour"] == "manifest"
+        assert parsed["pathways"], f"{path.name} parsed to zero pathways"
 
 
 def test_zero_count_is_kept():
