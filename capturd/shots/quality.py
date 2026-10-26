@@ -26,11 +26,14 @@ Tolerances (each documented here, per the lane rule):
 - an entry without ``manifest`` has no captures, so it is empty;
 - a ``manifest`` without ``captures`` (or with a non-list ``captures``)
   has no captures, so it is empty;
-- a captures entry without ``kind`` is treated as NOT baseline — a missing
-  kind is never invented into a baseline, and a missing success is never
-  invented into a success;
 - a captures entry that is not a mapping cannot be read, so it is not a
   successful capture;
+- a successful capture counts as meaningful evidence only when its
+  ``kind`` is present (a non-empty string) and is not ``baseline`` — an
+  absent or empty ``kind`` is never provably meaningful, so a file whose
+  only successful captures are kindless is baseline-only evidence
+  (``BASELINE_ONLY``), never a pass (D1). A missing success is never
+  invented into a success;
 - an entry without a usable ``file`` string is still counted, recorded as
   ``""`` rather than given an invented name;
 - file names are deduplicated in first-seen order, so one file with two
@@ -138,13 +141,28 @@ def _file_name(item: Mapping[str, Any]) -> str:
     return name if isinstance(name, str) else ""
 
 
+def _is_meaningful(capture: Mapping[str, Any]) -> bool:
+    """D1: a capture is provably meaningful only when its ``kind`` is
+    present — a non-empty string — and is not ``BASELINE_KIND``. Absent
+    or empty kinds are never evidence, so they can never make a run
+    pass. Deliberately no ``MEANINGFUL_KINDS`` allowlist: the real
+    capture kinds are not defined anywhere in ``capturd/`` —
+    ``BASELINE_KIND`` in this module is the only kind the code knows
+    (grep over ``capturd/`` finds ``kind`` only here and in unrelated
+    ``service/`` sqlite columns), so the rule is "present, not baseline".
+    """
+    kind = capture.get("kind")
+    return isinstance(kind, str) and kind != "" and kind != BASELINE_KIND
+
+
 def summarize_capture_quality(result: Any) -> CaptureQuality:
     """Split a capture result's files into baseline-only and empty lists.
 
     A capture counts as successful only when ``success is True`` — a
     truthy string is not a success (D7). A file whose manifest has no
-    successful capture is empty; a file whose
-    successful captures are all ``kind == "baseline"`` is baseline-only;
+    successful capture is empty; a file whose successful captures are
+    all non-meaningful (baseline kind, or an absent/empty kind — D1) is
+    baseline-only;
     a result whose ``results`` is absent, empty or not a list reports
     ``no_captures`` (``NO_CAPTURES``). Read-only: nothing here mutates
     ``result`` or the filesystem.
@@ -183,7 +201,7 @@ def summarize_capture_quality(result: Any) -> CaptureQuality:
         useful = [
             capture
             for capture in successful
-            if capture.get("kind") != BASELINE_KIND
+            if _is_meaningful(capture)
         ]
         if not successful:
             if name:
