@@ -24,6 +24,11 @@ planned such link tabs as ``page`` controls. Captur'd excludes chrome where
 upstream planned it; a framework that hangs its tabs off ``.nav`` or ``.menu``
 is captured only if it also marks them up some other way outside navigation
 containers.
+Accepted, on the record: free-text inputs — ``type=text``, ``textarea`` and
+the other free-text input types — are not swept as click targets (a capture
+tool clicks controls, it does not type), while ``checkbox``, ``radio`` and
+``select`` are swept because they are clickable controls a capture tool must
+be able to reach (D71); this paragraph names the exclusion.
 
 Everything here is deterministic: identical HTML in produces an identical
 ``CapturePlan`` out, byte for byte under ``repr``. All ordering comes from
@@ -1079,7 +1084,18 @@ def _in_control_sweep(node: _Node) -> bool:
     attrs = node.attrs
     if tag == "button":
         return True
-    if tag == "input" and _keyword_value(node, "type") in ("button", "submit"):
+    # D71: checkbox, radio and select are swept — clickable controls a
+    # capture tool must be able to reach. Free-text inputs (text, textarea
+    # and the rest) are never swept as click targets; the exclusion is named
+    # in the module docstring's accepted-limitations paragraph.
+    if tag == "input" and _keyword_value(node, "type") in (
+        "button",
+        "submit",
+        "checkbox",
+        "radio",
+    ):
+        return True
+    if tag == "select":
         return True
     if tag == "a" and "href" in attrs:
         return True
