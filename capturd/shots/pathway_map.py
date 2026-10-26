@@ -150,9 +150,11 @@ class PathwayMapError(ValueError):
     """Raised when a pathway map is missing, ambiguous or unparseable."""
 
 
-# D63: a section body is table-parsed ONCE, in the manifest parse; each
-# extractor reads the section's already-parsed tables instead of reparsing
-# the body. The tuple is (section, tables in that section).
+# D63/D77: a section body is table-parsed at most TWICE in the manifest
+# parse — one refusal-free probe (D77) and, for a consumed section, one
+# strict parse whose tables every extractor shares instead of reparsing
+# the body; an unconsumed section contributes no tables. The tuple is
+# (section, tables in that section).
 _ParsedSections = list[tuple[dict[str, Any], list[dict[str, Any]]]]
 
 # D77: the sections the manifest itself declares — the summary and every
@@ -288,9 +290,11 @@ def parse_manifest_text(raw: str, source: str = "<pasted manifest>") -> dict[str
     if not (raw or "").strip():
         raise PathwayMapError("pathway manifest is empty")
     sections = _split_sections(raw)
-    # D63: each section body is table-parsed exactly ONCE, here; every
-    # extractor below reads these same parsed tables. Row lines ride along
-    # (D61) so a refusal raised outside `_extract_tables` can name its line.
+    # D63/D77: each section body is table-parsed at most twice, here — the
+    # D77 refusal-free probe below and, for a consumed section, one strict
+    # parse — and every extractor reads the strict parse's tables. Row
+    # lines ride along (D61) so a refusal raised outside `_extract_tables`
+    # can name its line.
     # D77: a section is table-parsed only when an extractor will consume
     # it. The body is probed without refusals first; a consumed section is
     # re-parsed with refusals (the probe's tables are thrown away — the
