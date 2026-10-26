@@ -1147,8 +1147,9 @@ def test_full_manifest_extracts_plugins_suspicious_and_anti_patterns():
 
 
 def test_verifier_raw_keeps_the_source_text():
-    # D8 now refuses an empty-checks verifier, so the raw-text property is
-    # codified on the smallest map that still parses (one finding, one route).
+    # The verifier's no-pathways/no-routes refusal keeps an empty-checks
+    # map out, so the raw-text property is codified on the smallest map
+    # that still parses (one finding, one route).
     text = '{"checks": {"api-wiring": {"findings": [{"id": "f1", "path": "/api/x"}]}}}'
     parsed = parse_verifier_json_text(text)
     assert parsed["raw"] == text
