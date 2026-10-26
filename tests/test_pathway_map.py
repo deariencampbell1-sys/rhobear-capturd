@@ -2216,3 +2216,81 @@ def test_prose_ends_a_table_and_only_a_misaligned_row_refuses():
     parsed = parse_manifest_text(legend_text)
     # The legend is prose: the table ends, the legend is no row, no error.
     assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+
+
+def test_anti_pattern_category_aliases_normalise():
+    # D68: the category aliases (`anti-pattern`, `pattern`) land in the
+    # canonical `category` field. The verifier flavour routes every
+    # declared entry through the shared normaliser, and the manifest
+    # flavour builds its entries from the table's headers — the aliases
+    # must land in both, on the same input value (D18).
+    verifier_text = json.dumps({
+        "antiPatterns": [
+            {"anti-pattern": "duplicate-fetch", "count": 3},
+            {"pattern": "console-noise"},
+        ],
+        "checks": {"api-wiring": {"findings": [{"id": "f1", "path": "/api/x"}]}},
+    })
+    parsed = parse_verifier_json_text(verifier_text)
+    assert [a["category"] for a in parsed["antiPatterns"]] == [
+        "duplicate-fetch", "console-noise",
+    ]
+    assert parsed["antiPatterns"][0]["count"] == 3
+
+    manifest_text = "\n".join([
+        "# Pathway Manifest — category aliases",      # line 1
+        "",                                           # line 2
+        "## 1. Pathways Table",                       # line 3
+        "",                                           # line 4
+        "| id | status |",                            # line 5
+        "|---|---|",                                  # line 6
+        "| p1 | WIRED |",                             # line 7
+        "",                                           # line 8
+        "## 2. Anti-patterns",                        # line 9
+        "",                                           # line 10
+        "| Anti-Pattern | Count |",                   # line 11
+        "|---|---|",                                  # line 12
+        "| dup-fetch | 3 |",                          # line 13
+    ])
+    assert parse_manifest_text(manifest_text)["antiPatterns"] == [
+        {"category": "dup-fetch", "count": 3, "file": "", "line": "", "quote": ""},
+    ]
+
+
+def test_anti_pattern_quote_aliases_normalise():
+    # D68: the quote aliases (`snippet`, `code`) land in the canonical
+    # `quote` field — the same normaliser serves both flavours, so the
+    # aliases land in both on the same input value (D18).
+    verifier_text = json.dumps({
+        "antiPatterns": [
+            {"category": "duplicate-fetch", "snippet": "fetch(url)"},
+            {"category": "console-noise", "code": "console.log(x)"},
+        ],
+        "checks": {"api-wiring": {"findings": [{"id": "f1", "path": "/api/x"}]}},
+    })
+    parsed = parse_verifier_json_text(verifier_text)
+    assert [a["quote"] for a in parsed["antiPatterns"]] == [
+        "fetch(url)", "console.log(x)",
+    ]
+
+    for header, quote in (("| Category | Snippet |", "fetch(url)"),
+                          ("| Category | Code |", "console.log(x)")):
+        manifest_text = "\n".join([
+            "# Pathway Manifest — quote aliases",      # line 1
+            "",                                       # line 2
+            "## 1. Pathways Table",                   # line 3
+            "",                                       # line 4
+            "| id | status |",                        # line 5
+            "|---|---|",                              # line 6
+            "| p1 | WIRED |",                         # line 7
+            "",                                       # line 8
+            "## 2. Anti-patterns",                    # line 9
+            "",                                       # line 10
+            header,                                   # line 11
+            "|---|---|",                              # line 12
+            f"| dup-fetch | {quote} |",               # line 13
+        ])
+        assert parse_manifest_text(manifest_text)["antiPatterns"] == [
+            {"category": "dup-fetch", "count": None, "file": "", "line": "",
+             "quote": quote},
+        ]
