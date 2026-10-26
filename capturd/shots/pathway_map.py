@@ -428,37 +428,18 @@ def parse_manifest_text(raw: str, source: str = "<pasted manifest>") -> dict[str
     for sec in sections:
         body = "\n".join(sec["body"])
         probe = _extract_tables(body, sec["start"] + 1, refuse=False)
-        section_name = str(sec["heading"]) if sec["heading"] else "(document top)"
         if _section_is_consumed(sec["heading"], probe):
+            # The strict parse raises here, before anything else in the
+            # document can refuse — the misaligned-row, unbalanced-backtick
+            # and unrecognised-count-header refusals are the strict
+            # parser's own and fire first (D106).
             tables = _extract_tables(body, sec["start"] + 1, row_lines=True)
-            # D89: D85's symmetry, in the safe direction — the scan runs
-            # in a CONSUMED section too, AFTER the strict parse above. A
-            # count-shaped construct the parser cannot build (a two-column
-            # run of pipe lines with no separator, or a header collapsed
-            # to fewer than two cells over a two-column separator) built
-            # no table, so no extractor gate ever saw it and its counts
-            # would read as all-None — the silent drop D85 forbids in an
-            # unconsumed section. It refuses here the same way, naming
-            # the section and the line. The scan judges only constructs
-            # the table parser cannot build, so it can never displace a
-            # refusal the strict parse raises nor change a read any
-            # extractor makes.
-            refusal = _count_intent_refusal(sec["body"], sec["start"] + 1, section_name)
-            if refusal is not None:
-                raise PathwayMapError(refusal)
             parsed_sections.append((sec, tables))
         else:
-            # D85: a count-shaped-by-intent construct the parser cannot
-            # build (a collapsed header over a separator, a two-column run
-            # of pipe lines with no separator) never silently drops its
-            # counts in a section no extractor reads — refuse, naming the
-            # section and the line, exactly as a consumed section's own
-            # refusal would (and, since D89, as its scan actually does).
-            # A shapeless table with no count anywhere still parses
-            # untouched (D77).
-            refusal = _count_intent_refusal(sec["body"], sec["start"] + 1, section_name)
-            if refusal is not None:
-                raise PathwayMapError(refusal)
+            # An unconsumed section contributes no tables and its
+            # malformed rows are ignored, not refused (D77) — its
+            # unbuildable count constructs are the scan's business, and
+            # the scan runs last (D106, below).
             parsed_sections.append((sec, []))
     parsed = {
         "raw": raw,
@@ -487,6 +468,29 @@ def parse_manifest_text(raw: str, source: str = "<pasted manifest>") -> dict[str
             "text does not look like a pathway manifest — no pathways or routes "
             "table found (expected markdown headings and pipe tables)"
         )
+    # D85/D89's scan, run LAST (D106): D85's symmetry in the safe
+    # direction — the scan covers EVERY section, consumed or not. A
+    # count-shaped construct the table parser cannot build (a two-column
+    # run of pipe lines with no separator, or a header collapsed to fewer
+    # than two cells over a two-column separator) built no table, so no
+    # extractor gate ever saw it and its counts would read as all-None —
+    # the silent drop D85 forbids. It refuses here, naming the section
+    # and the line, exactly as a consumed section's own strict refusal
+    # would. Running it after EVERY strict parse and every extractor (and
+    # the no-pathways check above) pins the ordering invariant: for every
+    # construct that refused before D89 — a misaligned row, an
+    # unbalanced backtick, an unrecognised count header, a
+    # duplicate/conflicting count — the refusal that fires is the strict
+    # parser's own, same class and same message; a scan that cannot
+    # pre-empt cannot displace. The scan judges only constructs the
+    # table parser cannot build, so it changes no read any extractor
+    # makes, and a document with no other defect still refuses here
+    # (D85/D89 stand).
+    for sec in sections:
+        section_name = str(sec["heading"]) if sec["heading"] else "(document top)"
+        refusal = _count_intent_refusal(sec["body"], sec["start"] + 1, section_name)
+        if refusal is not None:
+            raise PathwayMapError(refusal)
     return parsed
 
 
