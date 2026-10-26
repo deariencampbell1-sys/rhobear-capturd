@@ -836,6 +836,37 @@ def test_deep_but_legal_plans_and_too_deep_refuses():
     assert refused.limits["too_large"] == "deeper than 256 levels"
 
 
+def test_ancestor_aria_disabled_and_unrendered_containers_are_not_planned():
+    # D34: aria-disabled is inherited. The standard ARIA disabled-toolbar
+    # pattern <div aria-disabled="true"><button>Go</button></div> renders a
+    # control the browser will not activate; planning it makes 01d click a
+    # no-op. The same ancestor chain _is_visible walks is walked here.
+    root = parse_html(
+        "<main>"
+        '<div aria-disabled="true"><div><button>Alpha</button></div></div>'
+        '<button aria-expanded="false">Beta</button>'
+        "</main>"
+    )
+    plan = plan_candidates(root)
+    assert [c.label for c in plan.candidates] == ["Beta"]
+
+    # D35: a control the browser never renders is not planned. A control in a
+    # <details> body whose <details> has no open attribute, and any control
+    # under <template>, never appear on screen — both shapes appear verbatim
+    # in outerHTML, so they are attribute-detectable. The <summary> of a
+    # closed <details> IS rendered (it is the disclosure's own toggle) and
+    # stays planned; <details open> renders its body and gets planned.
+    hidden = parse_html(
+        "<main>"
+        "<details><summary>Gamma</summary><button>Delta</button></details>"
+        "<template><button>Epsilon</button></template>"
+        "<details open><summary>Zeta</summary><button>Eta</button></details>"
+        "</main>"
+    )
+    plan2 = plan_candidates(hidden)
+    assert [c.label for c in plan2.candidates] == ["Gamma", "Zeta", "Eta"]
+
+
 def test_oversized_document_fails_with_a_reason_not_a_crash():
     # More than 10 000 elements exceeds the node ceiling -> too-large.
     plan = plan_candidates(_spans_tree(10_001))
