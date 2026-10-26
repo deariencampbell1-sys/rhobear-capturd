@@ -19,7 +19,9 @@ as the equivalent file. Output is deterministic: same input bytes, same dict
 (no timestamps, no host paths).
 
 The parser refuses rather than half-fill: a table is returned with every row
-or the parse raises ``PathwayMapError`` — never part of one.
+or the parse raises ``PathwayMapError`` — never part of one — and a
+summary-shaped table outside a summary-named section is refused, not
+silently ignored.
 """
 
 from __future__ import annotations
@@ -366,6 +368,10 @@ def _extract_summary(sections: list[dict[str, Any]]) -> dict[str, Any]:
             str(sec.get("heading") or ""),
             re.I,
         ):
+            # D8: a summary-shaped table outside a summary-named section is
+            # a decision, not an accident — refused, never silently ignored
+            # and never read as summary (that would void this gate).
+            _refuse_misplaced_summary_table(sec)
             continue
         text = "\n".join(sec["body"])
         # IGNORECASE makes the uppercase spellings cover every case variant;
@@ -396,6 +402,30 @@ def _extract_summary(sections: list[dict[str, Any]]) -> dict[str, Any]:
             elif "plugin" in key:
                 summary["pluginsCount"] = val
     return summary
+
+
+def _refuse_misplaced_summary_table(sec: dict[str, Any]) -> None:
+    """D8, decided: a summary-shaped table outside a summary-named section is
+    REFUSED ("summary table outside a summary section") — never silently
+    ignored, and never read as summary. Reading it as summary would void the
+    heading gate (## Accounting must not set counts, D1'); silently ignoring
+    it would hide a misplaced summary block behind an all-None summary. A
+    header-only count table — `| WIRED | 3 |` over a separator, no body rows
+    — is a stray header, not a summary table, and stays outside."""
+    heading = str(sec.get("heading") or "")
+    for table in _extract_tables("\n".join(sec["body"]), sec["start"] + 1):
+        if len(table["headers"]) != 2:
+            continue
+        for idx, row in enumerate(table["rows"]):
+            # Rebuild the line so the same two-cell count-row shape (bold
+            # label included) decides here as in a summary section.
+            match = _COUNT_ROW_RE.match("| " + " | ".join(row) + " |")
+            if match:
+                raise PathwayMapError(
+                    f"summary table outside a summary section: section "
+                    f"'{heading or '<no heading>'}' has a '{match.group(1)}' "
+                    f"count row at line {table['first_row'] + idx} — refusing"
+                )
 
 
 def _extract_pathways(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -668,7 +698,7 @@ def _extract_anti_patterns(sections: list[dict[str, Any]]) -> list[dict[str, Any
     return patterns
 
 
-def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, list[str]]]:
+def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, Any]]:
     """Extract markdown pipe tables. ``first_line`` is the 1-based line number
     of ``text``'s first line within the original input, so a refused row can
     name its line. A body row may omit the leading pipe (GFM). D5: the table
@@ -717,7 +747,13 @@ def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, list[str]]
                 )
             rows.append(row)
             j += 1
-        tables.append({"headers": [c.strip() for c in cells], "rows": rows})
+        tables.append({
+            "headers": [c.strip() for c in cells],
+            "rows": rows,
+            # 1-based input line of the first body row (rows are contiguous:
+            # every pipe-bearing line is a row or the parse raises).
+            "first_row": first_line + i + 2,
+        })
         i = j
     return tables
 
