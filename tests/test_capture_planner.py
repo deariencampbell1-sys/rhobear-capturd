@@ -1769,3 +1769,19 @@ def test_closed_details_and_its_summary_are_visible():
         )
     )
     assert "x" in [c.label for c in opened.candidates]
+
+
+def test_navigation_excluded_counts_on_a_truncated_plan():
+    # D56: navigation_excluded counts every excluded node once across the
+    # full discovery lists. The cap stops discovery early, but the counter
+    # must not stop with it — a document whose navigation nodes lie partly
+    # past the truncation point still reports the full number of navigation
+    # nodes excluded from the walk.
+    early = "".join(f'<a href="/n/{index}">N{index}</a>' for index in range(3))
+    buttons = "".join(f"<button>B{index}</button>" for index in range(4))
+    late = "".join(f'<a href="/m/{index}">M{index}</a>' for index in range(4))
+    root = parse_html(f"<nav>{early}</nav><main>{buttons}</main><footer>{late}</footer>")
+    plan = plan_candidates(root, max_states=2)
+
+    assert plan.reason == "truncated"
+    assert plan.limits["navigation_excluded"] == 7
