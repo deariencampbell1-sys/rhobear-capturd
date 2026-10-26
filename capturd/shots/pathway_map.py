@@ -576,7 +576,7 @@ def _extract_pathways(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
             for row in table["rows"]:
                 row_map: dict[str, str] = {}
                 for i, header in enumerate(headers):
-                    row_map[header] = row[i] if i < len(row) else ""
+                    row_map[header] = row[i]
                 pid = (
                     row_map.get("id")
                     or row_map.get("slug")
@@ -737,7 +737,7 @@ def _extract_routes(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
             for row in table["rows"]:
                 row_map: dict[str, str] = {}
                 for i, header in enumerate(headers):
-                    row_map[header] = row[i] if i < len(row) else ""
+                    row_map[header] = row[i]
                 # "" when the manifest gives no verb — never invent GET.
                 method = (row_map.get("method") or row_map.get("http method") or "").upper().strip()
                 path = (row_map.get("path") or row_map.get("route") or row_map.get("endpoint") or "").strip().strip("`")
@@ -764,7 +764,7 @@ def _extract_plugins(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
             for row in table["rows"]:
                 row_map: dict[str, str] = {}
                 for i, header in enumerate(headers):
-                    row_map[header] = row[i] if i < len(row) else ""
+                    row_map[header] = row[i]
                 name = (row_map.get("name") or row_map.get("plugin") or row_map.get("skill") or "").strip()
                 if not name or name.lower() == "name":
                     continue
@@ -784,7 +784,7 @@ def _extract_suspicious(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
             for row in table["rows"]:
                 entry: dict[str, str] = {}
                 for i, header in enumerate(headers):
-                    entry[header] = row[i] if i < len(row) else ""
+                    entry[header] = row[i]
                 if all(not v or v == headers[0] for v in entry.values()):
                     continue
                 suspicious.append(entry)
@@ -888,7 +888,7 @@ def _extract_anti_patterns(sections: list[dict[str, Any]]) -> list[dict[str, Any
             for row in table["rows"]:
                 entry: dict[str, str] = {}
                 for i, header in enumerate(headers):
-                    entry[header] = row[i] if i < len(row) else ""
+                    entry[header] = row[i]
                 # D18: the entry normalisation is shared with the verifier
                 # flavour (one shape, one count parser), so an integer 0
                 # count is a real count in both flavours alike.
@@ -913,7 +913,10 @@ def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, Any]]:
     the parse. D47: "confirmed header" includes a header the backtick
     collapsed to fewer than two cells — the separator still matched, so
     the refusal fires and the table is never silently dropped."""
-    tables: list[dict[str, list[str]]] = []
+    # D51: the accumulator is annotated against this function's return —
+    # the dict's values include `rows: list[list[str]]`, so a narrower
+    # value type would be a lie.
+    tables: list[dict[str, Any]] = []
     lines = text.split("\n")
     i = 0
     while i < len(lines):
