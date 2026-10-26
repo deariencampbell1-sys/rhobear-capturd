@@ -826,8 +826,12 @@ def _normalise_anti_pattern(entry: dict[str, Any]) -> dict[str, Any] | None:
     return {
         "category": category,
         "count": _count_from_cell(entry.get("count")),
-        "file": str(entry.get("file") or ""),
-        "line": str(entry.get("line") or ""),
+        # D39: `is None`, not truthiness — `str(entry.get(key) or "")`
+        # collapses an integer 0 into "", the same falsy collapse D18
+        # fixed for `count`. A present zero is a real value and
+        # round-trips as "0"; only an absent key becomes "".
+        "file": str(entry["file"]) if entry.get("file") is not None else "",
+        "line": str(entry["line"]) if entry.get("line") is not None else "",
         "quote": str(entry.get("quote") or entry.get("snippet") or entry.get("code") or ""),
     }
 
