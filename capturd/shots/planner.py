@@ -598,9 +598,10 @@ class _PlanIndex:
 
     Counting a candidate's selector through the index keeps planning roughly
     linear in the document size instead of rescanning the whole tree per
-    candidate, and counts are memoised per selector because the tree is
-    immutable during a plan. Structural chains still verify by scanning, but
-    only for candidates that have no id or stable attribute.
+    candidate, and counts are memoised per selector (D28: for id/attr
+    selectors only) because the tree is immutable during a plan. Structural
+    chains verify against the target node's parent chain in O(depth) —
+    :meth:`verify_structural` — never by scanning the document.
     """
 
     def __init__(self, root: _Node) -> None:
@@ -615,6 +616,13 @@ class _PlanIndex:
             for name, value in node.attrs.items():
                 if value:
                     self.by_attr.setdefault((name, value), []).append(node)
+        # D28: the boundary nodes — children of ``#root`` and of every
+        # ``<html>`` — are where a structural chain anchors (see
+        # :func:`_match_chain`); verifying one needs them and nothing else.
+        self._boundary_nodes: list[_Node] = list(root.children)
+        for node in self.nodes:
+            if node.tag == "html":
+                self._boundary_nodes.extend(node.children)
         self._counts: dict[str, int] = {}
 
     def count_matches(self, selector: str) -> int:
@@ -643,10 +651,43 @@ class _PlanIndex:
                     return sum(1 for node in nodes if node.tag == tag)
         return sum(1 for node in self.nodes if _match_chain(node, selector))
 
+    def verify_structural(self, node: _Node, selector: str) -> bool:
+        """Does ``selector`` name exactly this one node? O(depth), never O(nodes).
+
+        D28: a structural path is verified by comparing the parent chain of
+        the target node directly — :func:`_match_chain` — and by proving each
+        segment selects exactly one node. At the boundary level the count
+        spans every boundary container (``#root`` and every ``<html>``),
+        which is where the old full-document scan saw cross-document
+        ambiguity (two ``<html>`` roots, two ``body > button`` chains); at
+        every deeper level exactly one child of the matched parent must match
+        the segment. Together these prove the selector names exactly one
+        node — this node — without visiting the rest of the document.
+        """
+        parts = _split_chain(selector)
+        if not parts or not _match_chain(node, selector):
+            return False
+        if sum(1 for candidate in self._boundary_nodes if _match_simple(candidate, parts[0])) != 1:
+            return False
+        # Uniqueness, level by level: each segment must select exactly one
+        # child of its matched parent. The top segment's parent is the
+        # boundary — counted above across every container.
+        current = node
+        for part in reversed(parts[1:]):
+            parent = current.parent
+            if parent is None:
+                return False
+            if sum(1 for child in parent.children if _match_simple(child, part)) != 1:
+                return False
+            current = parent
+        return True
+
     def unique_selector(self, node: _Node) -> tuple[Optional[str], str]:
         """Best selector for ``node``: ``#id``, then a stable attribute, then
         structure — the same strategies and verification as the module-level
-        :func:`unique_selector`, but counting through this index."""
+        :func:`unique_selector`, but counting through this index. The
+        structural fallback is verified by :meth:`verify_structural`, not
+        counted (D28)."""
         node_id = node.attrs.get("id")
         if node_id:
             selector = f"#{_escape_css(node_id)}"
@@ -1236,7 +1277,16 @@ def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
         if not _is_visible(node) or _is_disabled(node):
             return
         selector, strategy = index.unique_selector(node)
-        if selector is None or index.count_matches(selector) != 1:
+        if selector is None:
+            dropped_ambiguous += 1
+            return
+        if strategy == "structural":
+            # D28: verify against the target's parent chain in O(depth) — the
+            # verifier has just proved the selector names exactly one node.
+            if not index.verify_structural(node, selector):
+                dropped_ambiguous += 1
+                return
+        elif index.count_matches(selector) != 1:
             dropped_ambiguous += 1
             return
         label = _text_of(node) or node.attrs.get("aria-controls") or _href_artifact(node.attrs.get("href")) or kind.value
