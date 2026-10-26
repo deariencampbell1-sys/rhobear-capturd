@@ -354,7 +354,12 @@ _CSS_ESCAPE_RE = re.compile(r"\\([0-9a-fA-F]{1,6})(?:\r\n|[ \t\r\n\f])?|\\(.)", 
 def _css_unescape(value: str) -> str:
     def _replace(match):
         if match.group(1) is not None:
-            return chr(int(match.group(1), 16))
+            # D36: a 6-hex-digit escape can name code points beyond chr()'s
+            # range (\ffffff is 0xFFFFFF, over the 0x10FFFF maximum). Mask
+            # instead of raising ValueError out of the verifier — a bad escape
+            # in a hand-written selector must count 0 matches, never abort
+            # the plan.
+            return chr(int(match.group(1), 16) & 0x10FFFF)
         return match.group(2)
 
     return _CSS_ESCAPE_RE.sub(_replace, value)
