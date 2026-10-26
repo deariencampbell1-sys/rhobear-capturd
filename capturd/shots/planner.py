@@ -863,18 +863,21 @@ def _is_visible(node: _Node) -> bool:
     refuses controls the browser never renders at all — anything under a
     ``<template>``, and anything in a ``<details>`` body whose ``<details>``
     has no ``open`` attribute. Both shapes appear verbatim in ``outerHTML``,
-    so unlike computed layout they are attribute-detectable. The first
-    ``<summary>`` of a closed ``<details>`` IS rendered (it is the toggle)
-    and stays visible; ``<details open>`` renders its body. Rect-size checks
-    from planner.js are impossible without a browser and are intentionally
-    omitted; the live-clicking layer re-checks visibility on the real DOM.
+    so unlike computed layout they are attribute-detectable. D55: only the
+    BODY is conditional — the closed ``<details>`` element itself is rendered
+    (it holds the toggle) and its first ``<summary>`` is too (it IS the
+    toggle); the old gate judged the ``<details>`` invisible itself because
+    ``_in_first_summary(details, details)`` is False. ``<details open>``
+    renders its body. Rect-size checks from planner.js are impossible without
+    a browser and are intentionally omitted; the live-clicking layer
+    re-checks visibility on the real DOM.
     """
     current: Optional[_Node] = node
     while current is not None and current.tag != "#root":
         if current.tag == "template":
             return False
         if current.tag == "details" and "open" not in current.attrs:
-            if not _in_first_summary(current, node):
+            if node is not current and not _in_first_summary(current, node):
                 return False
         if "hidden" in current.attrs:
             return False
