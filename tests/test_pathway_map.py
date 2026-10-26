@@ -8,7 +8,6 @@ output. No network, no Playwright — this module is pure parsing.
 from __future__ import annotations
 
 import ast
-import inspect
 import json
 import re
 import traceback
@@ -640,20 +639,12 @@ def test_tables_have_no_first_row_field():
     assert tables[0]["rows"] == [["p1", "WIRED"]]
 
 
-def test_tables_are_aligned_and_retyped():
-    # D51: two structural claims, no behaviour change.
-    # 1. Rows are refused unless aligned with their header, so the row-map
-    #    fill that guards a short row can never take its false branch —
-    #    dead defensive code, gone from the module.
-    # 2. `_extract_tables`' local accumulator is annotated against its
-    #    return (`list[dict[str, Any]]`), not `list[dict[str, list[str]]]`
-    #    — the dict's values include `rows: list[list[str]]`.
-    source = inspect.getsource(pathway_map)
-    assert "if i < len(row)" not in source
-    assert "list[dict[str, list[str]]]" not in source
-    assert re.search(r"tables: list\[dict\[str, Any\]\] = \[\]", source)
-    # Aligned rows survive intact end to end: dropping the dead fill
-    # changes nothing for a well-formed table.
+def test_aligned_rows_parse_and_misaligned_rows_refuse():
+    # D78 (rewrites D51's source-text assertions): the claims are asserted
+    # from observable output only — aligned rows survive intact end to end
+    # (dropping the dead short-row fill changed nothing for a well-formed
+    # table) and a misaligned row refuses naming its line and both cell
+    # counts. No source text, no AST.
     text = "\n".join([
         "# Pathway Manifest — aligned rows",
         "",
@@ -666,11 +657,27 @@ def test_tables_are_aligned_and_retyped():
     parsed = parse_manifest_text(text)
     assert parsed["pathways"][0]["trigger"] == "onClick"
 
+    misaligned = "\n".join([
+        "# Pathway Manifest — misaligned row",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status | trigger |",
+        "|---|---|---|",
+        "| p1 | WIRED |",
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(misaligned)
+    message = str(excinfo.value)
+    assert "line 7" in message
+    assert "2 cells" in message
+    assert "header has 3" in message
+
 
 def test_extractor_behaviour_is_asserted_not_source():
     # D78: tests assert behaviour, not source. The two D51/D69-era
-    # assertions that read the module's source text and AST
-    # (`inspect.getsource(pathway_map)` and the ast-walk over an
+    # assertions that read the module's source text and AST (inspect's
+    # source reader applied to the module, and the ast-walk over an
     # extractor's stored locals) are deleted — this guard keeps them
     # deleted, and the assertions below pin the same claims from
     # observable output only: each extractor returns the documented
@@ -2726,33 +2733,6 @@ def test_anti_pattern_quote_aliases_normalise():
             {"category": "dup-fetch", "count": None, "file": "", "line": "",
              "quote": quote},
         ]
-
-
-def test_extractor_locals_are_used():
-    # D69: the D63 refactor left the `sec` loop variable unused in
-    # `_extract_summary` and `_extract_routes` — a dead local each, left
-    # behind when the extractors stopped needing the section heading.
-    # Structural, not behavioural: every local the two functions STORE must
-    # also be READ somewhere in the same function (the `_` placeholder
-    # excepted). No behaviour is asserted here; the extractors' own tests
-    # pin that.
-    for name in ("_extract_summary", "_extract_routes"):
-        func = getattr(pathway_map, name)
-        tree = ast.parse(inspect.getsource(func))
-        fn = tree.body[0]
-        stored = {
-            node.id for node in ast.walk(fn)
-            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
-        }
-        loaded = {
-            node.id for node in ast.walk(fn)
-            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
-        }
-        unused = stored - loaded - {"_"}
-        assert not unused, (
-            f"{name} stores locals it never reads: {sorted(unused)} — "
-            "dead locals left behind by the D63 refactor must be deleted"
-        )
 
 
 def test_docstring_is_static_and_refusals_are_text():
