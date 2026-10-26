@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from capturd.shots import pathway_map
 from capturd.shots.pathway_map import (
     PathwayMapError,
     load_pathway_map,
@@ -1458,3 +1459,24 @@ def test_file_field_is_basename_never_a_host_path(tmp_path):
     dumped = json.dumps(from_left)
     assert str(left) not in dumped
     assert str(right) not in dumped
+
+
+def test_refusals_are_documented_in_the_module():
+    # D33: the constructs that raise are listed in the module docstring,
+    # not only in a PR body — the next worker reads the module, not the
+    # board. A string check is enough: the point is that the refusals
+    # list cannot silently disappear from the docstring.
+    doc = pathway_map.__doc__ or ""
+    for phrase in (
+        "misaligned row",
+        "pipe-bearing prose",
+        "duplicate",
+        "over-long",
+        "unbalanced backtick",
+        "antiPatterns",
+        "not a list",
+        "not a mapping",
+        "no usable category",
+        "two bare integers",
+    ):
+        assert phrase in doc, f"module docstring must still name: {phrase}"
