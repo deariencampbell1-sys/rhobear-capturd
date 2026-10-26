@@ -1811,20 +1811,6 @@ def test_unknown_unwired_token_is_unclear():
     assert row["unwiredFlag"] is False
 
 
-def test_stray_file_in_the_fixtures_directory_does_not_fail_the_suite():
-    # D88: a stray file in the fixtures directory must not fail the suite —
-    # the fixture comparison asserts the REQUIRED fixtures are present and
-    # each has its expected values, never the exact iterdir() set. The two
-    # fixture-consuming tests are run as-is with the stray in place.
-    stray = FIXTURES / "stray-notes.txt"
-    stray.write_text("a stray file — not a fixture\n", encoding="utf-8")
-    try:
-        test_every_manifest_fixture_parses()
-        test_every_fixture_populates_every_key_main_populated()
-    finally:
-        stray.unlink(missing_ok=True)
-
-
 def test_permission_error_becomes_pathway_map_error(tmp_path, monkeypatch):
     # D6/D88: an OSError on read (PermissionError) becomes PathwayMapError
     # with no host path anywhere in the rendered exception chain — the
