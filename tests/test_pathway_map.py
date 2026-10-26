@@ -1814,3 +1814,74 @@ def test_refusals_are_a_structured_list():
     doc = pathway_map.__doc__ or ""
     for name in refusals:
         assert name in doc, f"module docstring must still name refusal: {name}"
+
+
+def test_count_table_recognised_in_either_column_order():
+    # D59: a count table is recognised in either column order — `| Count |
+    # Category |` over `| 5 | WIRED |` rows is the same header shape as
+    # `| Category | Count |` and yields the same counts; the unrecognised-
+    # header refusal lists BOTH accepted orders, because the shape check
+    # now recognises both.
+    normal_text = "\n".join([
+        "# Pathway Manifest — either column order",  # line 1
+        "",                                         # line 2
+        "## Status Overview",                       # line 3
+        "",                                         # line 4
+        "| Category | Count |",                     # line 5
+        "|---|---|",                                # line 6
+        "| **WIRED** | 5 |",                        # line 7
+        "| **TOTAL PATHWAYS** | 7 |",               # line 8
+        "",                                         # line 9
+        "## 1. Pathways Table",                     # line 10
+        "",                                         # line 11
+        "| id | status |",                          # line 12
+        "|---|---|",                                # line 13
+        "| p1 | WIRED |",                           # line 14
+    ])
+    reversed_text = "\n".join([
+        "# Pathway Manifest — either column order",
+        "",
+        "## Status Overview",
+        "",
+        "| Count | Category |",
+        "|---|---|",
+        "| 5 | **WIRED** |",
+        "| 7 | **TOTAL PATHWAYS** |",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+    ])
+    expected = {
+        "pathwaysTotal": 7, "wired": 5, "mocked": None, "unwired": None,
+        "incomplete": None, "unclear": None, "routesCount": None,
+        "pluginsCount": None,
+    }
+    assert parse_manifest_text(normal_text)["summary"] == expected
+    # Same data, columns reversed: the same counts — never an all-None
+    # summary with no error.
+    assert parse_manifest_text(reversed_text)["summary"] == expected
+
+    # The unrecognised-header refusal names both accepted orders...
+    thing_text = "\n".join([
+        "# Pathway Manifest — unrecognised count header",  # line 1
+        "",                                               # line 2
+        "## Status Overview",                             # line 3
+        "",                                               # line 4
+        "| Thing | Blah |",                               # line 5
+        "|---|---|",                                      # line 6
+        "| WIRED | 5 |",                                  # line 7
+        "",                                               # line 8
+        "## 1. Pathways Table",                           # line 9
+        "",                                               # line 10
+        "| id | status |",                                # line 11
+        "|---|---|",                                      # line 12
+        "| p1 | WIRED |",                                 # line 13
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(thing_text)
+    message = str(excinfo.value)
+    assert "category word first" in message
+    assert "count word first" in message
