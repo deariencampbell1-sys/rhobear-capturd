@@ -731,38 +731,55 @@ def _extract_suspicious(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _count_from_cell(raw: Any) -> int | None:
-    """The one count parser for both flavours. D18: ``raw is None`` is the
-    only "absent" test — ``0 or ""`` swallowed a JSON integer ``0`` into
-    None while the manifest flavour kept the string cell "0" as 0, so the
-    two flavours disagreed on the same input value; a real zero is a real
-    count. D19: grouping separators are read WHOLE — `,` and the
-    non-breaking space sit INSIDE one number and are stripped before the
-    integer, so "1,234" is 1234, never the truncated first run 1 and never
-    a silent None. D26: any other whitespace between digit runs is NOT
-    grouping — two independent integer runs are two numbers and are
-    REFUSED naming the cell ("2 5" raises; it must not glue into 25).
-    D4's decimal semantics survive: a decimal number is one run and reads
-    its integer part ("3.5" → 3), and a cell with no digits at all stays
-    None. The verifier anti-patterns round trip (D23) parses each entry's
+    """The one count parser for both flavours — the grammar, written out
+    (D32):
+
+    * ``raw is None`` is the only "absent" (D18) — a JSON integer ``0``
+      is a real count, never a silent None.
+    * grouping separators sit INSIDE one number and are stripped first
+      (D19): ``,` and the non-breaking space, so "1,234" is 1234, never
+      the truncated first run 1 and never a silent None.
+    * a decimal number is one run and reads its integer part (D4):
+      "3.5" → 3.
+    * otherwise the cell's count is its LEADING integer (D32): whatever
+      follows the first integer run — a range ("3-5"), an annotation
+      ("3 of 5", "3 (of 5)"), a trailing mark ("3+"), a tilde ("~12") —
+      is not the count, exactly as the old row-regex read it.
+    * two BARE integers — nothing between the two runs but whitespace
+      ("2 5") — are REFUSED naming the cell (D26): two numbers with no
+      separator is ambiguous, and guessing would glue them into one
+      wrong count (never 25).
+    * a cell with no integer at all is None — a count-table cell with no
+      number is not a count.
+
+    The verifier anti-patterns round trip (D23) parses each entry's
     ``count`` through this same parser."""
     if raw is None:
         return None
     text = str(raw)
     # Grouping separators live INSIDE one number: `,` and the non-breaking
-    # space are stripped, so "1,234" reads whole (D19). Any other
-    # whitespace between digit runs separates two numbers (D26).
+    # space are stripped, so "1,234" reads whole (D19).
     joined = text.replace(",", "").replace("\u00a0", "")
     # A decimal point does not split: one decimal number is one run, so
-    # "3.5" keeps its integer part (D4) and "2 5" is two runs, never 25.
-    runs = re.findall(r"\d+(?:\.\d+)?", joined)
-    if not runs:
+    # "3.5" keeps its integer part (D4).
+    matches = list(re.finditer(r"\d+(?:\.\d+)?", joined))
+    if not matches:
         return None
-    if len(runs) > 1:
-        raise PathwayMapError(
-            f"count cell '{text}' has two independent integer runs "
-            f"('{runs[0].split('.')[0]}' and '{runs[1].split('.')[0]}') — refusing"
-        )
-    return int(runs[0].split(".", 1)[0])
+    if len(matches) > 1:
+        between = joined[matches[0].end():matches[1].start()]
+        if not between.strip():
+            # D26/D32: two bare integers separated by nothing but
+            # whitespace are two numbers — refuse rather than glue.
+            raise PathwayMapError(
+                f"count cell '{text}' has two bare integers "
+                f"('{matches[0].group(0).split('.')[0]}' and "
+                f"'{matches[1].group(0).split('.')[0]}') with nothing between "
+                "them but whitespace — refusing"
+            )
+        # D32: any other separator (a hyphen, "of", parentheses, a plus)
+        # makes the later runs an annotation or range — the count is the
+        # leading integer, never a refusal.
+    return int(matches[0].group(0).split(".", 1)[0])
 
 
 def _normalise_anti_pattern(entry: dict[str, Any]) -> dict[str, Any] | None:
