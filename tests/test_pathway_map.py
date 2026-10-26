@@ -667,6 +667,94 @@ def test_tables_are_aligned_and_retyped():
     assert parsed["pathways"][0]["trigger"] == "onClick"
 
 
+def test_extractor_behaviour_is_asserted_not_source():
+    # D78: tests assert behaviour, not source. The two D51/D69-era
+    # assertions that read the module's source text and AST
+    # (`inspect.getsource(pathway_map)` and the ast-walk over an
+    # extractor's stored locals) are deleted — this guard keeps them
+    # deleted, and the assertions below pin the same claims from
+    # observable output only: each extractor returns the documented
+    # values for one table. The banned patterns are assembled by
+    # concatenation so this guard cannot trip over its own text.
+    source = Path(__file__).read_text(encoding="utf-8")
+    for banned in ("inspect." + "getsource", "ast." + "parse(inspect."):
+        assert banned not in source, banned
+
+    # One document, six extractors, every returned value asserted.
+    text = "\n".join([
+        "# Pathway Manifest — every extractor, one document",  # line 1
+        "",                                                    # line 2
+        "## Summary Counts",                                   # line 3
+        "",                                                    # line 4
+        "| Category | Count |",                                # line 5
+        "|---|---|",                                           # line 6
+        "| Total Pathways | 1 |",                              # line 7
+        "| WIRED | 1 |",                                       # line 8
+        "",                                                    # line 9
+        "## 1. Pathways Table",                                # line 10
+        "",                                                    # line 11
+        "| id | status | handler |",                           # line 12
+        "|---|---|---|",                                       # line 13
+        "| p1 | WIRED | startCapture |",                       # line 14
+        "",                                                    # line 15
+        "## 2. Routes Table",                                  # line 16
+        "",                                                    # line 17
+        "| Method | Path | Handler file:line |",               # line 18
+        "|---|---|---|",                                       # line 19
+        "| GET | /setup | api.py:956 |",                       # line 20
+        "",                                                    # line 21
+        "## 3. Plugins",                                       # line 22
+        "",                                                    # line 23
+        "| Name | Kind |",                                     # line 24
+        "|---|---|",                                           # line 25
+        "| rested-capture | core |",                           # line 26
+        "",                                                    # line 27
+        "## 4. Suspicious Calls",                              # line 28
+        "",                                                    # line 29
+        "| Call | Where |",                                    # line 30
+        "|---|---|",                                           # line 31
+        "| fetch(url) | A.jsx:1 |",                            # line 32
+        "",                                                    # line 33
+        "## 5. Anti-patterns",                                 # line 34
+        "",                                                    # line 35
+        "| Category | Count | File | Line | Quote |",          # line 36
+        "|---|---|---|---|---|",                               # line 37
+        "| duplicate-fetch | 3 | hub.ts | 88 | fetch(url) |",  # line 38
+    ])
+    parsed = parse_manifest_text(text)
+    # Summary extractor: the eight count keys, counts from the count table.
+    assert parsed["summary"] == {
+        "pathwaysTotal": 1, "wired": 1, "mocked": None, "unwired": None,
+        "incomplete": None, "unclear": None, "routesCount": None,
+        "pluginsCount": None,
+    }
+    # Pathways extractor.
+    assert parsed["pathways"] == [{
+        "id": "p1", "location": "", "trigger": "", "selector": "",
+        "declaredIntent": "", "handler": "startCapture",
+        "downstreamCall": "", "expectedSideEffect": "", "evidence": "",
+        "status": "WIRED", "rawStatus": "WIRED", "unwiredFlag": False,
+    }]
+    # Routes extractor.
+    assert parsed["routes"] == [{
+        "method": "GET", "path": "/setup", "handler": "api.py:956",
+        "raw": {"method": "GET", "path": "/setup",
+                "handler file:line": "api.py:956"},
+    }]
+    # Plugins extractor.
+    assert parsed["plugins"] == [
+        {"name": "rested-capture",
+         "raw": {"name": "rested-capture", "kind": "core"}},
+    ]
+    # Suspicious extractor.
+    assert parsed["suspicious"] == [{"call": "fetch(url)", "where": "A.jsx:1"}]
+    # Anti-patterns extractor.
+    assert parsed["antiPatterns"] == [{
+        "category": "duplicate-fetch", "count": 3, "file": "hub.ts",
+        "line": "88", "quote": "fetch(url)",
+    }]
+
+
 def test_both_flavours_return_the_same_key_set():
     # One shape for both flavours: identical top-level keys, with `flavour`
     # saying which produced it; summary and metadata carry the same keys too.
@@ -2485,6 +2573,76 @@ def test_prose_ends_a_table_and_only_a_misaligned_row_refuses():
     assert [p["id"] for p in parsed["pathways"]] == ["p1"]
 
 
+def test_malformed_tables_outside_a_consumed_section_are_ignored():
+    # D77: a refusal fires only where an extractor is reading. `## Notes`
+    # is free prose no extractor reads: the malformed table below is
+    # shapeless (`| Thing | Blah |`) and its rows are no count rows, so no
+    # extractor reads it — the misaligned row there is IGNORED and the
+    # document parses to its real values. The SAME malformed table under
+    # `## Summary` — a section the summary extractor reads — still refuses
+    # with the same message as before D77. An unbalanced backtick in an
+    # `## Appendix` table is ignored the same way. (A count-SHAPED table
+    # under Notes is a different case: the summary extractor reads count
+    # tables wherever they sit, D24, so that refusal is kept.)
+    notes_text = "\n".join([
+        "# Pathway Manifest — malformed table under Notes",  # line 1
+        "",                                                # line 2
+        "## Summary Counts",                               # line 3
+        "",                                                # line 4
+        "| Category | Count |",                            # line 5
+        "|---|---|",                                       # line 6
+        "| **WIRED** | 2 |",                               # line 7
+        "",                                                # line 8
+        "## 1. Pathways Table",                            # line 9
+        "",                                                # line 10
+        "| id | status |",                                 # line 11
+        "|---|---|",                                       # line 12
+        "| p1 | WIRED |",                                  # line 13
+        "",                                                # line 14
+        "## Notes",                                        # line 15
+        "",                                                # line 16
+        "| Thing | Blah |",                                # line 17
+        "|---|---|",                                       # line 18
+        "| alpha | 5 | extra |",                           # line 19 — misaligned
+    ])
+    parsed = parse_manifest_text(notes_text)
+    assert parsed["summary"]["wired"] == 2
+    assert all(
+        v is None for k, v in parsed["summary"].items() if k != "wired"
+    )
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+
+    # The same malformed table under ## Summary still refuses, same message.
+    summary_text = notes_text.replace("## Notes", "## Summary")
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(summary_text)
+    message = str(excinfo.value)
+    assert "line 19" in message
+    assert "3 cells" in message
+    assert "header has 2" in message
+
+    # An unbalanced backtick in an ## Appendix table is ignored too: the
+    # appendix table is shapeless with no count rows, so no extractor
+    # reads the section and the document parses.
+    appendix_text = "\n".join([
+        "# Pathway Manifest — unbalanced backtick in Appendix",  # line 1
+        "",                                                      # line 2
+        "## 1. Pathways Table",                                  # line 3
+        "",                                                      # line 4
+        "| id | status |",                                       # line 5
+        "|---|---|",                                             # line 6
+        "| p1 | WIRED |",                                        # line 7
+        "",                                                      # line 8
+        "## Appendix",                                           # line 9
+        "",                                                      # line 10
+        "| Thing | Blah |",                                      # line 11
+        "|---|---|",                                             # line 12
+        "| alpha | `beta | gamma |",                             # line 13
+    ])
+    parsed = parse_manifest_text(appendix_text)
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+
+
 def test_anti_pattern_category_aliases_normalise():
     # D68: the category aliases (`anti-pattern`, `pattern`) land in the
     # canonical `category` field. The verifier flavour routes every
@@ -2588,3 +2746,21 @@ def test_extractor_locals_are_used():
             f"{name} stores locals it never reads: {sorted(unused)} — "
             "dead locals left behind by the D63 refactor must be deleted"
         )
+
+
+def test_docstring_is_static_and_refusals_are_text():
+    # D79: the module docstring is static — nothing appends the refusal
+    # list to `__doc__` at import (under `python -OO` that mutation
+    # replaced the whole docstring with the list alone). REFUSALS stays a
+    # module constant and the docstring states the list as text in the
+    # source module, so the two can be compared line for line: importing
+    # the module must not change `__doc__` away from the docstring found
+    # in the source file.
+    source = Path(pathway_map.__file__).read_text(encoding="utf-8")
+    source_docstring = ast.get_docstring(ast.parse(source))
+    assert source_docstring, "the source module must carry a docstring"
+    # Importing the module did not change the docstring.
+    assert pathway_map.__doc__ == source_docstring
+    # Every refusal entry appears in the docstring as text.
+    for refusal in pathway_map.REFUSALS:
+        assert refusal in source_docstring, refusal
