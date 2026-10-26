@@ -17,6 +17,105 @@ Captur'd is a desktop tool: the map usually arrives as PASTED text, so
 markdown, pasted verifier JSON — and a pasted input parses to the same content
 as the equivalent file. Output is deterministic: same input bytes, same dict
 (no timestamps, no host paths).
+
+The parser refuses rather than half-fill: a table is returned with every row
+or the parse raises ``PathwayMapError`` — never part of one. Counts come from
+count tables — tables whose header SHAPE is exactly two columns carrying a
+category word and a count word in either order (D24, D59) — wherever they
+sit; each extractor reads every table its own heading and header shape
+match, and one table may feed more than one extractor (D76: D66's
+one-table-one-extractor exclusivity is withdrawn and main's claiming is
+restored — the D63 single-parse-per-section optimisation stays); a
+three-column
+table sets no counts and raises nothing, and a two-column pathway table
+(``| id | status |``) is not a count table because its second header is not
+a count word. D75: header words are matched by PHRASE CONTAINMENT after
+stripping markdown emphasis — internal spaces survive and runs of
+whitespace collapse to one space — so the multi-word count headers
+(``Total Count``, ``Path Count``, ``Wired Count``) and category headers
+(``Category Name``, ``Metric Value``) are recognised, while an
+unrecognised header over count rows still refuses (D38). A summary count
+table key set by two rows is refused when the values conflict (D61; D87 —
+identical duplicates collapse, one fact stated twice), exactly like a
+duplicate pathway
+id. The refusal is decided once a line is KNOWN to be a
+table, never during header detection: a prose line that carries a pipe
+and a stray backtick is skipped like any other non-table line, not a
+parse abort (D17).
+
+Verifier JSON may declare the anti-patterns array itself: its well-formed
+entries round-trip into the returned ``antiPatterns`` through the same
+normaliser the manifest flavour uses (D23), while a non-list array is
+refused naming the field and the type it got (D21), a non-mapping entry is
+refused naming its index and type — never skipped (D22) — and a mapping
+entry with no usable category is refused the same way (D27): the returned
+array is never shorter than what the feed declared. D64: the manifest
+flavour refuses a category-less anti-pattern table row by its line the
+same way.
+
+D77: a refusal fires only where an extractor is reading — a section is
+table-parsed only when an extractor will consume it. A section whose
+heading names one of the manifest's own declared structures (the summary,
+pathways, routes, plugins, suspicious or anti-patterns sections) is
+table-parsed wherever it sits; any other section is decided on a
+refusal-free probe of its tables and is consumed when one of them is a
+count table wherever it sits (D24), a routes table, a pathways table, or
+the D38 deformed count table. D84: the section rule is the extractors'
+own gates — `_section_is_consumed` asks each extractor's gate predicate
+(the same helpers the extractors gate through) instead of restating
+them, so a widened extractor widens the consumed set with it and the two
+cannot disagree; the routes and pathways shape branches are those
+extractors' predicates, tested both ways against the extractors'
+behaviour. In a section no extractor reads — ``## Notes``, ``## Legend``,
+``## Appendix``, any other free prose — a misaligned row, an unbalanced
+backtick or an unrecognised count header is ignored, not refused, and
+every refusal in a consumed section is unchanged.
+
+D86: an anti-pattern record is never fabricated from summary rows — a
+count-shaped table under an anti-patterns heading populates the summary
+(D76's restoration) and yields no records; the anti-pattern extractor
+reads a table by its heading and a category-word header that is not the
+count-table shape (D68's alias shapes keep their reading).
+
+D85: a count-shaped table the parser cannot build — a header collapsed
+over its separator, or a two-column run of pipe lines with no separator —
+inside a section no extractor reads is never silently dropped: it
+refuses naming the section and the line, exactly as a consumed section's
+own refusal would. The count vocabulary is the summary's own (count
+words in header cells, count rows in the body); a shapeless table with
+no count anywhere still parses untouched (D77).
+
+Refusals — every one of these constructs raises ``PathwayMapError``
+rather than half-fill. The list is data (``REFUSALS`` below, D49) and
+is written out at the end of this docstring as text (D79 — the
+docstring is static: nothing appends to ``__doc__`` at import, so the
+list survives ``python -OO`` and cannot live only in a PR body; the
+test suite pins that every ``REFUSALS`` entry appears here verbatim).
+A misaligned row is refused naming its line number;
+pipe-bearing prose immediately after a table is refused the same way
+when it is row-shaped — the parser cannot tell it from a misaligned
+row, so put a blank line between; D67 adds the one prose escape: a
+pipe that never forms a second cell (a pipe inside a code span, a
+stray mark) is not row-shaped, and such a line is prose that ends the
+table without error; a collapsed table header raises the same backtick
+refusal as any confirmed header (D47) — it never drops the table; an
+unrecognised count-table header names the vocabulary it accepts
+(D48) — the feed owner fixes the header, the consumer never receives
+nulls. The list, written out:
+
+* a misaligned row
+* pipe-bearing prose immediately after a table
+* a duplicate pathway id
+* an over-long pathway id
+* an unbalanced backtick in a confirmed table header or row
+* a collapsed table header (the same backtick refusal)
+* a verifier 'antiPatterns' value that is not a list
+* an anti-pattern entry that is not a mapping
+* an anti-pattern entry with no usable category
+* a manifest anti-pattern row with no usable category
+* an unrecognised count-table header over count rows
+* a count cell of two bare integers
+* a conflicting count row
 """
 
 from __future__ import annotations
@@ -36,6 +135,29 @@ __all__ = [
     "parse_verifier_json_text",
 ]
 
+# D49: the refusal list as data — private bookkeeping (deliberately NOT in
+# ``__all__``). D79: the module docstring is static and states the list as
+# text BY HAND — nothing is rendered into ``__doc__`` at import (that
+# mutation replaced the whole docstring with the list under ``python -OO``);
+# test_docstring_is_static_and_refusals_are_text pins that every entry here
+# appears in the source docstring verbatim, so the two cannot drift
+# silently.
+REFUSALS: tuple[str, ...] = (
+    "a misaligned row",
+    "pipe-bearing prose immediately after a table",
+    "a duplicate pathway id",
+    "an over-long pathway id",
+    "an unbalanced backtick in a confirmed table header or row",
+    "a collapsed table header (the same backtick refusal)",
+    "a verifier 'antiPatterns' value that is not a list",
+    "an anti-pattern entry that is not a mapping",
+    "an anti-pattern entry with no usable category",
+    "a manifest anti-pattern row with no usable category",
+    "an unrecognised count-table header over count rows",
+    "a count cell of two bare integers",
+    "a conflicting count row",
+)
+
 _ROUTE_METHOD_RE = re.compile(
     r"\b(GET|POST|PUT|DELETE|PATCH|WS)\s+(/[^\s`'\"]+)",
     re.IGNORECASE,
@@ -46,6 +168,158 @@ _ROUTE_METHOD_RE = re.compile(
 
 class PathwayMapError(ValueError):
     """Raised when a pathway map is missing, ambiguous or unparseable."""
+
+
+# D63/D77: a section body is table-parsed at most TWICE in the manifest
+# parse — one refusal-free probe (D77) and, for a consumed section, one
+# strict parse whose tables every extractor shares instead of reparsing
+# the body; an unconsumed section contributes no tables. The tuple is
+# (section, tables in that section).
+_ParsedSections = list[tuple[dict[str, Any], list[dict[str, Any]]]]
+
+# D84: each heading-gated extractor's own heading vocabulary, written ONCE
+# and reused by that extractor's gate helper below — `_CONSUMED_SECTION_RE`
+# is their union plus the declared structure names the shape-reading
+# extractors' sections carry (summary, pathway, route), so a widened
+# extractor widens the consumed set with it instead of drifting from it.
+_PLUGIN_HEADING_RE = r"plugin"
+_SUSPICIOUS_HEADING_RE = r"suspicious|top\s+\d|risk"
+_ANTI_PATTERN_HEADING_RE = r"anti-?pattern|finding|grep|catch"
+_PATHWAYS_EXCLUDED_HEADING_RE = r"suspicious|risk|anti-?pattern|open questions|plugin"
+
+# D77/D84: the sections the manifest itself declares — the summary and
+# every section a heading-gated extractor reads — are consumed BY HEADING,
+# so a malformed table there still refuses exactly as before.
+_CONSUMED_SECTION_RE = re.compile(
+    r"summary|pathway|route"
+    f"|{_PLUGIN_HEADING_RE}"
+    f"|{_SUSPICIOUS_HEADING_RE}"
+    f"|{_ANTI_PATTERN_HEADING_RE}",
+    re.IGNORECASE,
+)
+
+
+def _deformed_count_row(
+    headers: list[str], rows: list[list[str]]
+) -> tuple[list[str], int, int] | None:
+    """D38/D65/D60: the first row of a two-column table that reads as a
+    count row over an unrecognised header, with the (label, count) order
+    that read it — None when the table is not a deformed count table. THE
+    one probe, shared by `_extract_tables` (whose D38 refusal fires on the
+    result) and `_summary_reads` (D84: section consumption follows the
+    extractors) — the two cannot disagree. D65: both column orders are
+    probed, the reversed one only where the header's first cell is itself
+    a count word; D60: a cell that refuses (two bare integers) demotes
+    the row to not-a-count-row."""
+    if len(headers) != 2 or _is_count_table(headers):
+        return None
+    orders = ((0, 1), (1, 0)) if _is_count_cell(headers[0]) else ((0, 1),)
+    for row in rows:
+        for label_index, count_index in orders:
+            if _reads_as_count_row(row[label_index], row[count_index]):
+                return row, label_index, count_index
+    return None
+
+
+def _summary_reads(table: dict[str, Any]) -> bool:
+    """D84: the summary extractor's own gate — does it read this table,
+    returning counts from it or refusing on it? A count table anywhere
+    (D24: the heading is irrelevant — `_extract_summary` reads those rows
+    through `_count_table_order`), plus the D38 deformed count table:
+    count rows over an unrecognised two-column header are the summary
+    extractor's own refusal, fired by `_extract_tables` wherever the
+    table sits."""
+    if _count_table_order(table["headers"]) is not None:
+        return True
+    return _deformed_count_row(table["headers"], table["rows"]) is not None
+
+
+def _routes_reads(table: dict[str, Any]) -> bool:
+    """D84: the routes extractor's own gate — a header of exactly `path`,
+    `route` or `endpoint` (D69: no heading gate, shape only)."""
+    headers = [h.lower() for h in table["headers"]]
+    return any(re.search(r"^path$|^route$|^endpoint$", h) for h in headers)
+
+
+def _pathways_reads(heading: str | None, table: dict[str, Any]) -> bool:
+    """D84: the pathways extractor's own gate — a table with an id-ish
+    and a status-ish column, outside the headings whose own extractors own
+    the rows, and never a `rank` column (a comparison table's rows are no
+    pathway's)."""
+    headers = [h.lower() for h in table["headers"]]
+    if "rank" in headers:
+        return False
+    if re.search(_PATHWAYS_EXCLUDED_HEADING_RE, str(heading or ""), re.I):
+        return False
+    has_id = any(re.search(r"^id$|slug|element|pathway", h) for h in headers)
+    has_status = any(
+        h in {"status", "wired", "unwired flag", "unwired"} for h in headers
+    )
+    return has_id and has_status
+
+
+def _plugins_reads(heading: str | None, table: dict[str, Any]) -> bool:
+    """D84: the plugins extractor's own gate — a plugin heading and a
+    name/plugin/skill column."""
+    if not re.search(_PLUGIN_HEADING_RE, str(heading or ""), re.I):
+        return False
+    headers = [h.lower() for h in table["headers"]]
+    return any(re.search(r"^name$|plugin|skill", h) for h in headers)
+
+
+def _suspicious_reads(heading: str | None, table: dict[str, Any]) -> bool:
+    """D84: the suspicious extractor's own gate — a suspicious, top-N or
+    risk heading and any table at all (it reads every row it finds)."""
+    if not re.search(_SUSPICIOUS_HEADING_RE, str(heading or ""), re.I):
+        return False
+    return bool(table["headers"])
+
+
+def _anti_patterns_reads(heading: str | None, table: dict[str, Any]) -> bool:
+    """D84/D86: the anti-pattern extractor's own gate — an anti-pattern
+    heading and a category word in the header that is not the count-table
+    shape: a count-shaped table is the summary extractor's (D24 — its
+    rows are summary rows wherever the table sits), and the heading alone
+    fabricates no records from them (D86). D68's alias shapes —
+    ``| Anti-Pattern | Count | File | Line | Quote |``,
+    ``| Category | Snippet|Code |`` — are not count-shaped and keep
+    their reading."""
+    if not re.search(_ANTI_PATTERN_HEADING_RE, str(heading or ""), re.I):
+        return False
+    headers = [h.lower() for h in table["headers"]]
+    if not any(re.search(r"category|type|anti-?pattern|pattern", h) for h in headers):
+        return False
+    return not _is_count_table(table["headers"])
+
+
+def _section_is_consumed(heading: str | None, tables: list[dict[str, Any]]) -> bool:
+    """D77/D84: does an extractor read this section?
+
+    D84: ONE source of truth — this function no longer re-implements the
+    extractors' gates. It asks each extractor's own gate predicate — the
+    same helpers the extractors gate through below — whether it reads one
+    of the section's probed tables, so a widened extractor widens the
+    consumed set with it and the two cannot disagree. A section whose
+    heading names one of the manifest's declared structures (the union of
+    the heading-gated extractors' vocabulary plus the summary, pathway and
+    route section names) is consumed BY HEADING wherever it sits — the
+    strictness D77 states, so a malformed table there still refuses; every
+    other section is consumed exactly when some extractor would read one
+    of its tables."""
+    text = str(heading or "")
+    if _CONSUMED_SECTION_RE.search(text):
+        return True
+    for table in tables:
+        if (
+            _summary_reads(table)
+            or _routes_reads(table)
+            or _pathways_reads(text, table)
+            or _plugins_reads(text, table)
+            or _suspicious_reads(text, table)
+            or _anti_patterns_reads(text, table)
+        ):
+            return True
+    return False
 
 
 def load_pathway_map(
@@ -124,18 +398,49 @@ def parse_manifest_text(raw: str, source: str = "<pasted manifest>") -> dict[str
     if not (raw or "").strip():
         raise PathwayMapError("pathway manifest is empty")
     sections = _split_sections(raw)
+    # D63/D77: each section body is table-parsed at most twice, here — the
+    # D77 refusal-free probe below and, for a consumed section, one strict
+    # parse — and every extractor reads the strict parse's tables. Row
+    # lines ride along (D61) so a refusal raised outside `_extract_tables`
+    # can name its line.
+    # D77: a section is table-parsed only when an extractor will consume
+    # it. The body is probed without refusals first; a consumed section is
+    # re-parsed with refusals (the probe's tables are thrown away — the
+    # strict parse is the one that counts), an unconsumed one contributes
+    # no tables and its malformed rows are ignored, not refused.
+    parsed_sections: _ParsedSections = []
+    for sec in sections:
+        body = "\n".join(sec["body"])
+        probe = _extract_tables(body, sec["start"] + 1, refuse=False)
+        if _section_is_consumed(sec["heading"], probe):
+            parsed_sections.append(
+                (sec, _extract_tables(body, sec["start"] + 1, row_lines=True))
+            )
+        else:
+            # D85: a count-shaped-by-intent construct the parser cannot
+            # build (a collapsed header over a separator, a two-column run
+            # of pipe lines with no separator) never silently drops its
+            # counts in a section no extractor reads — refuse, naming the
+            # section and the line, exactly as a consumed section's own
+            # refusal would. A shapeless table with no count anywhere
+            # still parses untouched (D77).
+            section_name = str(sec["heading"]) if sec["heading"] else "(document top)"
+            refusal = _count_intent_refusal(sec["body"], sec["start"] + 1, section_name)
+            if refusal is not None:
+                raise PathwayMapError(refusal)
+            parsed_sections.append((sec, []))
     parsed = {
         "raw": raw,
         "hash": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
         # Basename only: the parsed map must not carry host paths.
         "file": Path(source).name,
         "flavour": "manifest",
-        "summary": _extract_summary(sections),
-        "pathways": _extract_pathways(sections),
-        "routes": _extract_routes(sections),
-        "plugins": _extract_plugins(sections),
-        "suspicious": _extract_suspicious(sections),
-        "antiPatterns": _extract_anti_patterns(sections),
+        "summary": _extract_summary(parsed_sections),
+        "pathways": _extract_pathways(parsed_sections),
+        "routes": _extract_routes(parsed_sections),
+        "plugins": _extract_plugins(parsed_sections),
+        "suspicious": _extract_suspicious(parsed_sections),
+        "antiPatterns": _extract_anti_patterns(parsed_sections),
         # The manifest says nothing about these — None, not a borrowed value.
         "metadata": {
             "file": Path(source).name,
@@ -176,6 +481,7 @@ def parse_verifier_json_text(text: str, source: str = "<pasted map>") -> dict[st
 
     pathways: list[dict[str, Any]] = []
     routes: list[dict[str, Any]] = []
+    anti_patterns: list[dict[str, Any]] = []
     seen_route_paths: set[str] = set()
 
     checks = data.get("checks")
@@ -232,6 +538,48 @@ def parse_verifier_json_text(text: str, source: str = "<pasted map>") -> dict[st
                     "raw": finding,
                 })
 
+    # D18: the verifier JSON may carry the anti-patterns array itself — the
+    # rhobear-verifier manifest.js field semantics this module is compatible
+    # with name { ..., antiPatterns[], ... } — and an entry's count arrives
+    # as a JSON value. The entries ride the SAME normaliser as the manifest
+    # flavour, so the two flavours agree on the same input value: an integer
+    # 0 count is a real count (only `raw is None` is absent), never a silent
+    # None. An anti-patterns-only map still parses to nothing a planner can
+    # use: the no-pathways/no-routes refusal below is unchanged.
+    declared_anti_patterns = data.get("antiPatterns")
+    if declared_anti_patterns is not None and not isinstance(declared_anti_patterns, list):
+        # D21: name the field AND the type it got — a dict yields its keys
+        # and a string its characters, so a bare "must be a list" hides
+        # what actually arrived and the caller cannot tell a shape bug
+        # from a payload bug.
+        raise PathwayMapError(
+            "verifier map 'antiPatterns' must be a list, got "
+            f"{type(declared_anti_patterns).__name__}"
+        )
+    for index, entry in enumerate(declared_anti_patterns or []):
+        if not isinstance(entry, dict):
+            # D22: refuse, never skip. A skipped entry returns a shorter
+            # array than the feed declared with no signal — precisely the
+            # silent half-fill this module exists to prevent. The refusal
+            # names the offending entry's index and type.
+            raise PathwayMapError(
+                "verifier map 'antiPatterns' entry at index "
+                f"{index} must be an object, got {type(entry).__name__} — refusing"
+            )
+        pattern = _normalise_anti_pattern(entry)
+        if pattern is None:
+            # D27: refuse, never skip — a mapping entry with no usable
+            # category would return a shorter array than the feed declared
+            # with no signal. Mirrors D22: the refusal names the entry's
+            # index (a falsy-but-present category — 0, "" — is no category
+            # at all).
+            raise PathwayMapError(
+                "verifier map 'antiPatterns' entry at index "
+                f"{index} has no usable category (category/type/anti-pattern/"
+                "pattern all missing or empty) — refusing"
+            )
+        anti_patterns.append(pattern)
+
     # Key presence decides, not truthiness: a present-but-empty
     # manifest_summary must not be swapped for a differently-shaped summary.
     manifest_summary = data.get("manifest_summary")
@@ -261,7 +609,7 @@ def parse_verifier_json_text(text: str, source: str = "<pasted map>") -> dict[st
         "routes": routes,
         "plugins": [],
         "suspicious": [],
-        "antiPatterns": [],
+        "antiPatterns": anti_patterns,
         "metadata": {
             "file": Path(source).name,
             "version": data.get("version"),
@@ -281,6 +629,165 @@ _SUMMARY_COUNT_KEYS = (
     "routesCount",
     "pluginsCount",
 )
+
+# D24: a count table is identified by its header SHAPE, not by the section
+# heading — exactly two columns carrying a category word and a count word
+# in either order (D59). Wherever such a table sits, its rows are count rows: there is
+# no "wrong place" for a count table to be, so a real feed whose counts
+# live under ## Status Overview or ## Breakdown reads them instead of
+# raising. A three-column table is never a count table, and a two-column
+# pathway table (| id | status |) is not one because `status` is not a
+# count word. D38: the vocabulary is wider — a feed that names its count
+# column Metric / Value / Number / Amount / Qty, or its category column
+# Metric / Measure / Item, is still the count-table shape; before the
+# widening those headers were not recognised and every count under them
+# was silently returned as None.
+_COUNT_WORDS = frozenset(
+    {"count", "counts", "n", "total", "totals", "paths", "pathways", "#",
+     "metric", "metrics", "value", "values", "number", "amount", "qty"}
+)
+_CATEGORY_WORDS = frozenset(
+    {"category", "status", "kind", "label", "state", "type", "name",
+     "metric", "metrics", "measure", "item"}
+)
+
+# D48: the refusal renders its accepted vocabulary straight from these
+# sets, so the message can never drift from the words the shape check
+# actually matches — widening the vocabulary widens the message with it.
+_COUNT_WORDS_TEXT = ", ".join(sorted(_COUNT_WORDS))
+_CATEGORY_WORDS_TEXT = ", ".join(sorted(_CATEGORY_WORDS))
+
+
+# D31/D75: header cells are matched after removing markdown emphasis —
+# `*`, `_` and backticks are stripped (replaced with a space so emphasis
+# between two words cannot glue them into one) while whitespace is KEPT
+# and runs of whitespace collapse to one space (D75), so `| **Category** |
+# **Count** |`, `| _Category_ | _Count_ |` and `` | `Count` | ... `` are
+# all count tables — and so is the multi-word `| Total Count |` style.
+# The old D31 strip removed the internal spaces too, which turned
+# `Total Count` into one unrecognised token and made D38 refuse a feed
+# that parsed the day before. (Row LABELS keep their own whitespace for
+# the same reason — see `_ROW_EMPHASIS_RE`.)
+_EMPHASIS_RE = re.compile(r"[*_`]+")
+
+
+def _header_tokens(header: str) -> frozenset[str]:
+    """D75: the words of a header cell. Emphasis (`*`, `_`, backticks) is
+    stripped, runs of whitespace collapse to one space, and the remainder
+    splits on everything that is not a letter, a digit or ``#`` — so
+    ``Total Count`` is {total, count} and a bare ``#`` is still a word."""
+    text = " ".join(_EMPHASIS_RE.sub(" ", header).lower().split())
+    return frozenset(re.findall(r"[a-z0-9#]+", text))
+
+
+def _is_count_cell(header: str) -> bool:
+    """D75: a header cell is a COUNT cell when it contains a count word as
+    a word — phrase containment, not exact set membership."""
+    return bool(_header_tokens(header) & _COUNT_WORDS)
+
+
+def _is_category_cell(header: str) -> bool:
+    """D75: a header cell is a CATEGORY cell when it contains a category
+    word as a word — phrase containment, not exact set membership."""
+    return bool(_header_tokens(header) & _CATEGORY_WORDS)
+
+
+def _count_table_order(headers: list[str]) -> tuple[int, int] | None:
+    """D24/D59: the count-table header shape — exactly two columns carrying
+    a category word and a count word in EITHER order. Returns the
+    ``(label_cell_index, count_cell_index)`` a recognised header's rows are
+    read with, or None when the header is not a count-table shape. This
+    decides WHERE counts may be read from; the section heading is
+    irrelevant. D31: the comparison runs on the header cells with markdown
+    emphasis removed, so a bold or italic header is still a count table —
+    never a silent drop of every count under it. D59: a feed that writes
+    its count column first (``| Count | Category |``) is the same shape —
+    recognised and read, never an all-None summary with no error. D75: the
+    two cells are matched by PHRASE CONTAINMENT — a cell is a count cell
+    when it contains a count word as a word and a category cell when it
+    contains a category word as a word, with internal spaces kept and
+    runs of whitespace collapsed — so ``Total Count``, ``Path Count``,
+    ``Wired Count``, ``Category Name`` and ``Metric Value`` are all
+    recognised."""
+    if len(headers) != 2:
+        return None
+    if _is_category_cell(headers[0]) and _is_count_cell(headers[1]):
+        return (0, 1)
+    if _is_count_cell(headers[0]) and _is_category_cell(headers[1]):
+        return (1, 0)
+    return None
+
+
+def _is_count_table(headers: list[str]) -> bool:
+    """D24: the count-table header shape — exactly two columns, a category
+    word and a count word in either column order (D59). This decides WHERE
+    counts may be read from; the section heading is irrelevant. See
+    `_count_table_order` for the shape's details (D31 emphasis stripping
+    and D75 phrase containment included)."""
+    return _count_table_order(headers) is not None
+
+
+# D76: D66's one-table-one-extractor exclusivity is withdrawn and main's
+# claiming is restored — each extractor claims a table by its OWN heading
+# and header shape, and more than one extractor may read the same table
+# (a count-shaped table under a suspicious heading feeds the summary AND
+# the suspicious extractor; that is main's behaviour, not a data loss).
+# D86 narrows one intersection: a count-shaped table under an
+# anti-patterns heading feeds the summary ONLY — the anti-pattern
+# extractor reads a non-count-shaped header there, so records are never
+# fabricated from summary rows. The gates below are the ones each
+# extractor applies to the shared parsed tables; the D63
+# single-parse-per-section optimisation stays.
+
+# D7: a count row's LABEL decides WHICH count the row sets — WIRED /
+# MOCKED / UNWIRED / INCOMPLETE / UNCLEAR / TOTAL PATHWAYS / ROUTES /
+# PLUGINS. D25: the label is ALL the regex decides — the count VALUE is
+# parsed by `_count_from_cell`, the one count parser for both flavours,
+# so a summary cell is read exactly like an anti-pattern cell ("3.5" → 3
+# in both) and the two sites can never disagree. D41: emphasis is
+# stripped from the label before matching (see `_count_label_match`), so
+# a bold, italic or bold-italic label is still the label — the old
+# edge-anchored `\*{0,2}` silently dropped a bold-italic count inside
+# the very path that refuses silent drops.
+_COUNT_ROW_RE = re.compile(
+    r"^(WIRED|MOCKED|UNWIRED|INCOMPLETE|UNCLEAR"
+    r"|TOTAL PATHWAYS|ROUTES|PLUGINS)$",
+    re.IGNORECASE,
+)
+
+
+# D41: a count row's label is matched AFTER stripping markdown emphasis,
+# so `***WIRED***` (bold-italic — three asterisks per side, which the old
+# hand-rolled `\*{0,2}` could never match) counts exactly like `WIRED`,
+# and `*WIRED*`, `_WIRED_` and `` `WIRED` `` do too. Unlike the header
+# check the match is on the WHOLE cell, not its words: whitespace is kept
+# so the two-word label "TOTAL PATHWAYS" stays one label, and the label
+# set is matched by full-string membership where the header cells are
+# matched by phrase containment (D75).
+_ROW_EMPHASIS_RE = re.compile(r"[*_`]+")
+
+
+def _count_label_match(cell: str) -> re.Match[str] | None:
+    """The one label matcher for a count row (D7/D41): markdown emphasis is
+    stripped from the cell, then the label set is matched — never a second
+    regex at a second site."""
+    return _COUNT_ROW_RE.match(_ROW_EMPHASIS_RE.sub("", cell))
+
+
+def _reads_as_count_row(label_cell: str, count_cell: str) -> bool:
+    """D60: the DETECTION probe for "does this row read like a count row?" —
+    a count label (D7's set) over a parseable count. A cell that REFUSES
+    (two bare integers) means "this is not a count row" here: the refusal
+    is caught and the row demoted, so an unrelated two-column table can
+    never abort the whole document. The refusal itself still fires where a
+    count is genuinely being read — a recognised count table's rows
+    (`_extract_summary`) and an anti-pattern entry's count cell."""
+    if not _count_label_match(label_cell):
+        return False
+    try:
+        return _count_from_cell(count_cell) is not None
+    except PathwayMapError:
+        return False
 
 
 def _normalised_summary(source: dict[str, Any]) -> dict[str, Any]:
@@ -337,59 +844,99 @@ def _split_sections(raw: str) -> list[dict[str, Any]]:
     return sections
 
 
-def _extract_summary(sections: list[dict[str, Any]]) -> dict[str, Any]:
+def _extract_summary(parsed_sections: _ParsedSections) -> dict[str, Any]:
     summary: dict[str, Any] = {key: None for key in _SUMMARY_COUNT_KEYS}
-    for sec in sections:
-        text = "\n".join(sec["body"])
-        # IGNORECASE makes the uppercase spellings cover every case variant;
-        # TODO/FIXME mapped to no downstream branch, so they are gone. ROUTES
-        # and PLUGINS ride the same cell shape — counts come from summary
-        # cells only, never from prose or a pathway row's text.
-        for match in re.finditer(
-            r"\|\s*\*{0,2}(WIRED|MOCKED|UNWIRED|INCOMPLETE|UNCLEAR|TOTAL PATHWAYS|ROUTES|PLUGINS)\*{0,2}\s*\|?\s*(\d+)\s*\|",
-            text,
-            re.IGNORECASE,
-        ):
-            key = match.group(1).lower()
-            val = int(match.group(2))
-            if "unwire" in key:
-                summary["unwired"] = val
-            elif "wire" in key:
-                summary["wired"] = val
-            elif "mock" in key:
-                summary["mocked"] = val
-            elif "incomplete" in key:
-                summary["incomplete"] = val
-            elif "unclear" in key:
-                summary["unclear"] = val
-            elif "total" in key:
-                summary["pathwaysTotal"] = val
-            elif "route" in key:
-                summary["routesCount"] = val
-            elif "plugin" in key:
-                summary["pluginsCount"] = val
+    # D61/D87: the summary is one document-wide object; a second row
+    # setting a key the first row already set is refused when the two
+    # values CONFLICT (the ambiguity is the conflict, not the value).
+    # Identical duplicates are not ambiguous — they collapse (D87): one
+    # count named twice is the same fact stated twice.
+    line_and_value_by_count_key: dict[str, tuple[int, int]] = {}
+    # D69: the section heading decides nothing here (D24) — only the tables
+    # matter, so the loop binds no `sec` local at all.
+    for _, tables in parsed_sections:
+        # D24: the section heading no longer decides anything — every table
+        # in the document is checked against the count-table header shape,
+        # and a matching table's rows are read wherever the table sits. A
+        # pathway row shaped `| p1 | WIRED | 3 |` lives in a three-column
+        # table, which is never a count table, so it cannot set a count.
+        # D63: the tables arrive already parsed (once per section). D76: a
+        # heading-specific extractor's claim no longer withholds a
+        # count-shaped table from here — main's rule reads it too.
+        for table in tables:
+            order = _count_table_order(table["headers"])
+            if order is None:
+                continue
+            label_index, count_index = order
+            row_lines = table["row_lines"]
+            # Counts come from the table's CELLS only, never from prose.
+            # The row label decides WHICH count the row sets (D7); which
+            # cell carries the label is the header's column order (D59).
+            for row_position, row in enumerate(table["rows"]):
+                match = _count_label_match(row[label_index])
+                if not match:
+                    continue
+                key = match.group(1).lower()
+                # D25: one parser for every count — the cell itself goes
+                # through `_count_from_cell`, exactly like an anti-pattern
+                # entry's count, so the two sites cannot disagree.
+                val = _count_from_cell(row[count_index])
+                if val is None:
+                    # An empty or digit-less cell sets nothing — a real
+                    # zero is a real count (D4).
+                    continue
+                if "unwire" in key:
+                    summary_key = "unwired"
+                elif "wire" in key:
+                    summary_key = "wired"
+                elif "mock" in key:
+                    summary_key = "mocked"
+                elif "incomplete" in key:
+                    summary_key = "incomplete"
+                elif "unclear" in key:
+                    summary_key = "unclear"
+                elif "total" in key:
+                    summary_key = "pathwaysTotal"
+                elif "route" in key:
+                    summary_key = "routesCount"
+                else:
+                    summary_key = "pluginsCount"
+                row_line = row_lines[row_position]
+                first_set = line_and_value_by_count_key.get(summary_key)
+                if first_set is not None:
+                    first_line, first_value = first_set
+                    if val != first_value:
+                        # D61/D87: refuse, never keep-the-last — two rows
+                        # that disagree about the same count are a real
+                        # ambiguity.
+                        raise PathwayMapError(
+                            f"count row at line {row_line} sets summary key "
+                            f"'{summary_key}' to {val} — already set to "
+                            f"{first_value} at line {first_line} — refusing a "
+                            "conflicting count row"
+                        )
+                    # D87: identical duplicate — collapse, never refuse.
+                    continue
+                line_and_value_by_count_key[summary_key] = (row_line, val)
+                summary[summary_key] = val
     return summary
 
 
-def _extract_pathways(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _extract_pathways(parsed_sections: _ParsedSections) -> list[dict[str, Any]]:
     pathways: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
-    for sec in sections:
+    for sec, tables in parsed_sections:
         heading = str(sec.get("heading") or "")
-        if re.search(r"suspicious|risk|anti-?pattern|open questions|plugin", heading, re.I):
-            continue
-        for table in _extract_tables("\n".join(sec["body"]), sec["start"] + 1):
+        # D63/D84: the tables arrive already parsed (once per section); the
+        # extractor's own gate decides (D76), shared tables included.
+        for table in tables:
+            if not _pathways_reads(heading, table):
+                continue
             headers = [h.lower() for h in table["headers"]]
-            if "rank" in headers:
-                continue
-            has_id = any(re.search(r"^id$|slug|element|pathway", h) for h in headers)
-            has_status = any(h in {"status", "wired", "unwired flag", "unwired"} for h in headers)
-            if not has_id or not has_status:
-                continue
             for row in table["rows"]:
                 row_map: dict[str, str] = {}
                 for i, header in enumerate(headers):
-                    row_map[header] = row[i] if i < len(row) else ""
+                    row_map[header] = row[i]
                 pid = (
                     row_map.get("id")
                     or row_map.get("slug")
@@ -422,10 +969,21 @@ def _extract_pathways(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     or row_map.get("file:line")
                     or f"{row_map.get('file', '')}:{row_map.get('line', '')}".strip(":")
                 ).strip()
-                if not pid or pid in {"id", "slug", "element"} or len(pid) > 200:
+                # The placeholder-header skip stays a skip — `id`/`slug`/
+                # `element` is a header row, not a pathway. But a real id that
+                # is over-long or already seen is REFUSED, not dropped: a
+                # half-filled map is the failure this module exists to prevent.
+                if not pid or pid in {"id", "slug", "element"}:
                     continue
+                if len(pid) > 200:
+                    raise PathwayMapError(
+                        f"pathway id is {len(pid)} characters (max 200), "
+                        f"first 40: '{pid[:40]}' — refusing"
+                    )
                 if pid in seen_ids:
-                    continue
+                    raise PathwayMapError(
+                        f"duplicate pathway id '{pid}' — refusing"
+                    )
                 seen_ids.add(pid)
                 pathways.append({
                     "id": pid,
@@ -527,19 +1085,21 @@ def _normalize_status(status: str) -> str:
     return "UNCLEAR"
 
 
-def _extract_routes(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _extract_routes(parsed_sections: _ParsedSections) -> list[dict[str, Any]]:
     routes: list[dict[str, Any]] = []
-    for sec in sections:
-        for table in _extract_tables("\n".join(sec["body"]), sec["start"] + 1):
-            headers = [h.lower() for h in table["headers"]]
-            # Anchored: a `pathway` column in a pathways table must not pull
-            # its rows into routes.
-            if not any(re.search(r"^path$|^route$|^endpoint$", h) for h in headers):
+    # D69: routes carry no heading gate — only the tables matter, so the
+    # loop binds no `sec` local at all.
+    for _, tables in parsed_sections:
+        # D63/D84: the tables arrive already parsed (once per section); the
+        # extractor's own gate decides (D76), shared tables included.
+        for table in tables:
+            if not _routes_reads(table):
                 continue
+            headers = [h.lower() for h in table["headers"]]
             for row in table["rows"]:
                 row_map: dict[str, str] = {}
                 for i, header in enumerate(headers):
-                    row_map[header] = row[i] if i < len(row) else ""
+                    row_map[header] = row[i]
                 # "" when the manifest gives no verb — never invent GET.
                 method = (row_map.get("method") or row_map.get("http method") or "").upper().strip()
                 path = (row_map.get("path") or row_map.get("route") or row_map.get("endpoint") or "").strip().strip("`")
@@ -554,19 +1114,18 @@ def _extract_routes(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return routes
 
 
-def _extract_plugins(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _extract_plugins(parsed_sections: _ParsedSections) -> list[dict[str, Any]]:
     plugins: list[dict[str, Any]] = []
-    for sec in sections:
-        if not re.search(r"plugin", sec.get("heading") or "", re.I):
-            continue
-        for table in _extract_tables("\n".join(sec["body"]), sec["start"] + 1):
-            headers = [h.lower() for h in table["headers"]]
-            if not any(re.search(r"^name$|plugin|skill", h) for h in headers):
+    for sec, tables in parsed_sections:
+        heading = str(sec.get("heading") or "")
+        for table in tables:
+            if not _plugins_reads(heading, table):
                 continue
+            headers = [h.lower() for h in table["headers"]]
             for row in table["rows"]:
                 row_map: dict[str, str] = {}
                 for i, header in enumerate(headers):
-                    row_map[header] = row[i] if i < len(row) else ""
+                    row_map[header] = row[i]
                 name = (row_map.get("name") or row_map.get("plugin") or row_map.get("skill") or "").strip()
                 if not name or name.lower() == "name":
                     continue
@@ -574,63 +1133,283 @@ def _extract_plugins(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return plugins
 
 
-def _extract_suspicious(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _extract_suspicious(parsed_sections: _ParsedSections) -> list[dict[str, Any]]:
     suspicious: list[dict[str, Any]] = []
-    for sec in sections:
-        if not re.search(r"suspicious|top\s+\d|risk", sec.get("heading") or "", re.I):
-            continue
-        for table in _extract_tables("\n".join(sec["body"]), sec["start"] + 1):
-            headers = [h.lower() for h in table["headers"]]
-            if not headers:
+    for sec, tables in parsed_sections:
+        heading = str(sec.get("heading") or "")
+        for table in tables:
+            if not _suspicious_reads(heading, table):
                 continue
+            headers = [h.lower() for h in table["headers"]]
             for row in table["rows"]:
                 entry: dict[str, str] = {}
                 for i, header in enumerate(headers):
-                    entry[header] = row[i] if i < len(row) else ""
+                    entry[header] = row[i]
                 if all(not v or v == headers[0] for v in entry.values()):
                     continue
                 suspicious.append(entry)
     return suspicious
 
 
-def _extract_anti_patterns(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _count_from_cell(raw: Any) -> int | None:
+    """The one count parser for both flavours — the grammar, written out
+    (D32):
+
+    * ``raw is None`` is the only "absent" (D18) — a JSON integer ``0``
+      is a real count, never a silent None.
+    * grouping separators sit INSIDE one number and are stripped first
+      (D19): ``,` and the non-breaking space, so "1,234" is 1234, never
+      the truncated first run 1 and never a silent None.
+    * a decimal number is one run and reads its integer part (D4):
+      "3.5" → 3.
+    * otherwise the cell's count is its LEADING integer (D32): whatever
+      follows the first integer run — a range ("3-5"), an annotation
+      ("3 of 5", "3 (of 5)"), a trailing mark ("3+"), a tilde ("~12") —
+      is not the count, exactly as the old row-regex read it.
+    * two BARE integers — nothing between the two runs but whitespace
+      ("2 5") — are REFUSED naming the cell (D26): two numbers with no
+      separator is ambiguous, and guessing would glue them into one
+      wrong count (never 25).
+    * a cell with no integer at all is None — a count-table cell with no
+      number is not a count.
+
+    The verifier anti-patterns round trip (D23) parses each entry's
+    ``count`` through this same parser."""
+    if raw is None:
+        return None
+    text = str(raw)
+    # Grouping separators live INSIDE one number: `,` and the non-breaking
+    # space are stripped, so "1,234" reads whole (D19).
+    joined = text.replace(",", "").replace("\u00a0", "")
+    # A decimal point does not split: one decimal number is one run, so
+    # "3.5" keeps its integer part (D4).
+    matches = list(re.finditer(r"\d+(?:\.\d+)?", joined))
+    if not matches:
+        return None
+    if len(matches) > 1:
+        between = joined[matches[0].end():matches[1].start()]
+        if not between.strip():
+            # D26/D32: two bare integers separated by nothing but
+            # whitespace are two numbers — refuse rather than glue.
+            raise PathwayMapError(
+                f"count cell '{text}' has two bare integers "
+                f"('{matches[0].group(0).split('.')[0]}' and "
+                f"'{matches[1].group(0).split('.')[0]}') with nothing between "
+                "them but whitespace — refusing"
+            )
+        # D32: any other separator (a hyphen, "of", parentheses, a plus)
+        # makes the later runs an annotation or range — the count is the
+        # leading integer, never a refusal.
+    return int(matches[0].group(0).split(".", 1)[0])
+
+
+def _normalise_anti_pattern(entry: dict[str, Any]) -> dict[str, Any] | None:
+    """One anti-pattern shape for both flavours: the locked 5 keys, with the
+    same category aliases and count parser whether the entry came from a
+    manifest table row or from verifier JSON (D18 — the flavours must agree
+    on the same input value). Returns None for an entry with no category:
+    the manifest caller REFUSES such a table row by its line (D64), and the
+    verifier caller REFUSES the entry by index (D27), so either flavour's
+    returned array can never be shorter than what the feed declared. Every
+    value is read with
+    absence decided by ``is None`` (D39): a present ``None`` is not a value
+    and becomes ``''`` exactly like an absent key — only a real value
+    round-trips, a present zero as ``"0"`` (D62). The verifier's own
+    ``antiPatterns`` array round-trips through here (D23); a non-mapping
+    entry never reaches this normaliser — the verifier caller refuses it
+    by index and type (D22)."""
+    category = str(
+        entry.get("category")
+        or entry.get("type")
+        or entry.get("anti-pattern")
+        or entry.get("pattern")
+        or ""
+    ).strip()
+    if not category:
+        return None
+    return {
+        "category": category,
+        "count": _count_from_cell(entry.get("count")),
+        # D39: `is None`, not truthiness — `str(entry.get(key) or "")`
+        # collapses an integer 0 into "", the same falsy collapse D18
+        # fixed for `count`. A present zero is a real value and
+        # round-trips as "0"; a present None or an absent key becomes ""
+        # (D62 — None is not a value).
+        "file": str(entry["file"]) if entry.get("file") is not None else "",
+        "line": str(entry["line"]) if entry.get("line") is not None else "",
+        "quote": str(entry.get("quote") or entry.get("snippet") or entry.get("code") or ""),
+    }
+
+
+def _extract_anti_patterns(parsed_sections: _ParsedSections) -> list[dict[str, Any]]:
     patterns: list[dict[str, Any]] = []
-    for sec in sections:
-        if not re.search(r"anti-?pattern|finding|grep|catch", sec.get("heading") or "", re.I):
-            continue
-        for table in _extract_tables("\n".join(sec["body"]), sec["start"] + 1):
-            headers = [h.lower() for h in table["headers"]]
-            if not any(re.search(r"category|type|anti-?pattern|pattern", h) for h in headers):
+    for sec, tables in parsed_sections:
+        heading = str(sec.get("heading") or "")
+        for table in tables:
+            if not _anti_patterns_reads(heading, table):
                 continue
-            for row in table["rows"]:
+            headers = [h.lower() for h in table["headers"]]
+            row_lines = table["row_lines"]
+            for row_position, row in enumerate(table["rows"]):
                 entry: dict[str, str] = {}
                 for i, header in enumerate(headers):
-                    entry[header] = row[i] if i < len(row) else ""
-                cat = (
-                    entry.get("category")
-                    or entry.get("type")
-                    or entry.get("anti-pattern")
-                    or entry.get("pattern")
-                    or ""
-                ).strip()
-                if not cat:
-                    continue
-                patterns.append({
-                    "category": cat,
-                    "count": int(re.sub(r"\D", "", str(entry.get("count") or "")) or 0) or None,
-                    "file": entry.get("file") or "",
-                    "line": entry.get("line") or "",
-                    "quote": entry.get("quote") or entry.get("snippet") or entry.get("code") or "",
-                })
+                    entry[header] = row[i]
+                # D18: the entry normalisation is shared with the verifier
+                # flavour (one shape, one count parser), so an integer 0
+                # count is a real count in both flavours alike.
+                pattern = _normalise_anti_pattern(entry)
+                if pattern is None:
+                    # D64: refuse, never skip — the manifest flavour now
+                    # agrees with the verifier flavour (D27): a declared
+                    # row with no usable category must not shorten the
+                    # returned array with no signal. The refusal names the
+                    # row's line.
+                    raise PathwayMapError(
+                        "manifest anti-pattern table row at line "
+                        f"{row_lines[row_position]} has no usable category "
+                        "(category/type/anti-pattern/pattern all missing or "
+                        "empty) — refusing"
+                    )
+                patterns.append(pattern)
     return patterns
 
 
-def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, list[str]]]:
+# The table separator test, shared by `_extract_tables` and the D85
+# intent scan so the two cannot disagree about what a separator is.
+_SEP_LINE_RE = re.compile(r"^\s*\|?[\s\-:|]+\|?\s*$")
+
+
+def _is_separator_line(line: str) -> bool:
+    return bool(_SEP_LINE_RE.match(line)) and "-" in line
+
+
+def _count_intent_refusal(lines: list[str], first_line: int, section: str) -> str | None:
+    """D85: the refusal for a count-shaped-by-intent table construct the
+    table parser cannot build — a collapsed header over a separator, or a
+    two-column run of pipe lines with no separator — inside a section no
+    extractor reads. `parse_manifest_text` runs this scan on an UNCONSUMED
+    section only: there the construct would silently drop its counts (the
+    probe built no table, so no extractor gate ever saw it), and it
+    refuses instead, naming the section and the line, exactly as a
+    consumed section's own refusal would. The count vocabulary is the
+    summary's own — `_is_count_cell` for header words (D75's containment
+    check), `_reads_as_count_row` for body rows (D38's deformed-count
+    shape, D60's demotion included) — no new words. An INTACT header over
+    a separator is never judged here: the probe built that table and
+    D84's gates already decided it. A misaligned or backtick-broken row
+    is untrustworthy and decides nothing (D77)."""
+    def cells_of(line: str) -> list[str] | None:
+        if not re.search(r"(?<!\\)\|", line):
+            return None
+        cells, _ = _split_row(line, first_line)
+        return cells
+
+    def body_after(index: int) -> list[list[str]]:
+        rows: list[list[str]] = []
+        j = index
+        while j < len(lines):
+            line = lines[j]
+            if not line.strip():
+                break
+            row = cells_of(line)
+            if row is None or len(row) < 2:
+                break
+            rows.append(row)
+            j += 1
+        return rows
+
+    i = 0
+    while i < len(lines):
+        cells = cells_of(lines[i])
+        if cells is None:
+            i += 1
+            continue
+        if i + 1 < len(lines) and _is_separator_line(lines[i + 1]):
+            body = body_after(i + 2)
+            columns = len(cells_of(lines[i + 1]) or [])
+            if len(cells) < 2 and columns == 2 and (
+                # D47's collapsed header: the probe built no table, so no
+                # extractor gate ever saw this attempt. Count intent is a
+                # count word in the collapsed header cell(s), or a body
+                # row aligned to the separator's two columns that reads as
+                # a count row.
+                any(_is_count_cell(cell) for cell in cells)
+                or any(
+                    _reads_as_count_row(row[0], row[1])
+                    for row in body
+                    if len(row) == 2
+                )
+            ):
+                return (
+                    f"section '{section}': a count table at line {first_line + i} "
+                    f"cannot be read — its header collapsed to one cell "
+                    f"'{cells[0]}' over a two-column separator — counts are never "
+                    "silently dropped: refusing"
+                )
+            i = i + 2 + len(body)
+            continue
+        if len(cells) == 2:
+            # No separator: a two-column run of pipe lines — GFM builds no
+            # table from it, the probe sees nothing, and a count word in a
+            # header cell or a count row in the run means counts sit here
+            # unread.
+            run = body_after(i + 1)
+            if run and (
+                any(_is_count_cell(cell) for cell in cells)
+                or any(
+                    _reads_as_count_row(row[0], row[1])
+                    for row in run
+                    if len(row) == 2
+                )
+            ):
+                return (
+                    f"section '{section}': a count table at line {first_line + i} "
+                    f"cannot be read — its header "
+                    f"'{' | '.join(cells)}' has no separator row — counts are "
+                    "never silently dropped: refusing"
+                )
+        i += 1
+    return None
+
+
+def _extract_tables(
+    text: str,
+    first_line: int = 1,
+    *,
+    row_lines: bool = False,
+    refuse: bool = True,
+) -> list[dict[str, Any]]:
     """Extract markdown pipe tables. ``first_line`` is the 1-based line number
     of ``text``'s first line within the original input, so a refused row can
-    name its line. A row shorter than its header is REFUSED, not dropped — a
-    half-filled map is the failure this module exists to prevent."""
-    tables: list[dict[str, list[str]]] = []
+    name its line. D61: with ``row_lines`` set, each table dict also carries
+    ``row_lines`` — the 1-based input line of every body row, in row order —
+    so a refusal raised OUTSIDE this function (a duplicate count row, a
+    manifest anti-pattern row with no category) can still name its line; the
+    default shape stays exactly ``headers`` + ``rows`` (D40). A body row may omit the leading pipe (GFM). D5/D67: the table
+    ends at a blank line, at prose, or a new heading — prose is a line
+    that is not ROW-SHAPED: a line with no unescaped ``|``, or one whose
+    pipe never forms a second cell (a pipe inside a code span, a stray
+    mark), is prose and ends the table with no error and no row. A
+    row-shaped line (it splits into >=2 cells, leading pipe optional) is
+    a row candidate — aligned it is returned, misaligned it raises
+    ``PathwayMapError`` naming the line and both cell counts; a
+    misaligned row is never let through as prose. The parser either
+    returns every row of a table or raises — it never returns part of
+    one. D17: the unbalanced-backtick
+    refusal fires only where the line is already a confirmed header (the
+    separator matched) or a confirmed body row — never during header
+    detection, so pipe-bearing prose with a stray backtick does not abort
+    the parse. D47: "confirmed header" includes a header the backtick
+    collapsed to fewer than two cells — the separator still matched, so
+    the refusal fires and the table is never silently dropped. D77: with
+    ``refuse=False`` — the consumption probe ``parse_manifest_text`` runs
+    before it decides a section is read at all — every malformation below
+    is SKIPPED instead of raised: the probe never refuses, and a consumed
+    section is re-parsed with refusals on."""
+    # D51: the accumulator is annotated against this function's return —
+    # the dict's values include `rows: list[list[str]]`, so a narrower
+    # value type would be a lie.
+    tables: list[dict[str, Any]] = []
     lines = text.split("\n")
     i = 0
     while i < len(lines):
@@ -638,34 +1417,125 @@ def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, list[str]]
         if "|" not in header_line:
             i += 1
             continue
-        cells = _split_row(header_line)
+        cells, backtick_refusal = _split_row(header_line, first_line + i)
+        sep_line = lines[i + 1] if i + 1 < len(lines) else ""
+        next_is_separator = _is_separator_line(sep_line)
+        if backtick_refusal is not None and next_is_separator:
+            # D17/D47: the separator matched, so this line IS a table
+            # header — only now is the unbalanced-backtick refusal decided.
+            # A prose line above a non-separator line was skipped untouched,
+            # and the refusal holds even when the stray backtick collapsed
+            # the header to fewer than two cells (D47): the header refuses,
+            # it never silently drops the table and every row under it.
+            # D77 probe: skipped, not raised — the probe decides nothing
+            # about malformations; the strict re-parse raises it.
+            if refuse:
+                raise PathwayMapError(backtick_refusal)
         if len(cells) < 2:
             i += 1
             continue
-        sep_line = lines[i + 1] if i + 1 < len(lines) else ""
-        if not re.match(r"^\s*\|?[\s\-:|]+\|?\s*$", sep_line) or "-" not in sep_line:
+        if not next_is_separator:
             i += 1
             continue
         rows: list[list[str]] = []
+        row_line_numbers: list[int] = []
         j = i + 2
-        while j < len(lines) and "|" in lines[j]:
-            row = _split_row(lines[j])
-            if len(row) < len(cells):
-                raise PathwayMapError(
-                    f"table row at line {first_line + j} has {len(row)} cells but its "
-                    f"header has {len(cells)} — refusing short row, first cell: '{row[0]}'"
-                )
+        # D5/D67: the body ends at a blank line (above), at a line with no
+        # unescaped pipe, and — D67 — at any line that is not ROW-SHAPED: a
+        # pipe that never forms a second cell (a pipe inside a code span, a
+        # stray mark) is prose, and prose ends the table with no error and
+        # no row. A row-shaped line (it splits into >=2 cells; the leading
+        # pipe is optional, GFM) is a row candidate: aligned it is
+        # returned, misaligned it is REFUSED naming the line and both
+        # counts. The refusal never widens past row-shaped lines, and a
+        # misaligned row is never let through as prose.
+        while j < len(lines):
+            line = lines[j]
+            if not line.strip():
+                break
+            row, backtick_refusal = _split_row(line, first_line + j)
+            if not re.search(r"(?<!\\)\|", line):
+                break  # no unescaped pipe — prose, ends the table
+            if len(row) < 2:
+                break  # D67: not row-shaped — prose, ends the table
+            if backtick_refusal is not None:
+                # D17: this line is a confirmed row (the table was
+                # established by header + separator), so the refusal fires
+                # — an unterminated code span swallows the row's remaining
+                # pipes, which makes the cell count untrustworthy; the
+                # backtick is the defect to name. D77 probe: the row is
+                # skipped — its cells are untrustworthy, so it decides
+                # nothing about the section's shapes.
+                if refuse:
+                    raise PathwayMapError(backtick_refusal)
+                j += 1
+                continue
+            if len(row) != len(cells):
+                if refuse:
+                    raise PathwayMapError(
+                        f"table row at line {first_line + j} has {len(row)} cells but its "
+                        f"header has {len(cells)} — refusing misaligned row, first cell: '{row[0]}'"
+                    )
+                # D77 probe: the misaligned row is skipped — it decides
+                # nothing about the section's shapes.
+                j += 1
+                continue
             rows.append(row)
+            row_line_numbers.append(first_line + j)
             j += 1
-        tables.append({"headers": [c.strip() for c in cells], "rows": rows})
+        headers = [c.strip() for c in cells]
+        # D38: a two-column table whose rows are COUNT rows — a count label
+        # in the first cell (D7's label set) and a parseable count in the
+        # second — but whose header is not a recognised count-table header
+        # must REFUSE naming the header row, never return every count as
+        # None. The header vocabulary is fixed (D24), so the only
+        # correction available is to the feed: it fixes the header, the
+        # consumer never receives nulls. A row whose second cell has no
+        # integer parses as None and is not a count row — arbitrary
+        # two-column tables (| id | status |, | method | path |) stay
+        # outside the refusal. A row whose cell is two bare integers
+        # raises through `_count_from_cell` on its own — the ambiguity is
+        # refused wherever the cell sits.
+        if refuse:
+            deformed = _deformed_count_row(headers, rows)
+            if deformed is not None:
+                row, label_index, count_index = deformed
+                raise PathwayMapError(
+                    f"table header at line {first_line + i} is "
+                    f"'{' | '.join(headers)}' — its rows read like count "
+                    f"rows (count label '{row[label_index]}' with a numeric count) "
+                    "but the header is not a recognised count-table "
+                    "header (accepted orders: a category word first and "
+                    "a count word second, or a count word first and a "
+                    "category word second; accepted category words: "
+                    f"{_CATEGORY_WORDS_TEXT}; accepted count words: "
+                    f"{_COUNT_WORDS_TEXT}) — refusing rather than "
+                    "returning nulls"
+                )
+        table: dict[str, Any] = {
+            "headers": [c.strip() for c in cells],
+            "rows": rows,
+        }
+        if row_lines:
+            table["row_lines"] = row_line_numbers
+        tables.append(table)
         i = j
     return tables
 
 
-def _split_row(line: str) -> list[str]:
+def _split_row(line: str, lineno: int) -> tuple[list[str], str | None]:
     """Split a table row into cells. A ``|`` inside a backtick code span and
     an escaped ``\\|`` never split — otherwise a cell like `` `a || b` ``
-    shifts every later column or gets the row silently dropped."""
+    shifts every later column or gets the row silently dropped.
+
+    D17: this function NEVER raises. A line is not yet known to be a table
+    when header detection calls it, and a prose line can carry a pipe and
+    an odd number of backticks — refusing there would abort the whole
+    document on one typo in an appendix. A cell with an ODD backtick count
+    is flagged instead: the second return value carries the ready-made
+    refusal message (``None`` when every cell is balanced), and the caller
+    raises it only once it has established the line is a table header or
+    row."""
     text = line.strip()
     if text.startswith("|"):
         text = text[1:]
@@ -674,6 +1544,18 @@ def _split_row(line: str) -> list[str]:
     cells: list[str] = []
     buf: list[str] = []
     in_code = False
+    refusal: str | None = None
+
+    def cell_done() -> None:
+        nonlocal refusal
+        cell = "".join(buf).strip()
+        if refusal is None and cell.count("`") % 2 == 1:
+            refusal = (
+                f"table line {lineno} has an unbalanced backtick in cell "
+                f"'{cell}' — refusing"
+            )
+        cells.append(cell)
+
     i = 0
     while i < len(text):
         ch = text[i]
@@ -685,11 +1567,11 @@ def _split_row(line: str) -> list[str]:
             buf.append("|")
             i += 2
         elif ch == "|" and not in_code:
-            cells.append("".join(buf).strip())
+            cell_done()
             buf = []
             i += 1
         else:
             buf.append(ch)
             i += 1
-    cells.append("".join(buf).strip())
-    return cells
+    cell_done()
+    return cells, refusal

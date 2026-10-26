@@ -7,12 +7,15 @@ output. No network, no Playwright — this module is pure parsing.
 
 from __future__ import annotations
 
+import ast
 import json
+import re
 import traceback
 from pathlib import Path
 
 import pytest
 
+from capturd.shots import pathway_map
 from capturd.shots.pathway_map import (
     PathwayMapError,
     load_pathway_map,
@@ -141,6 +144,624 @@ def test_summary_counts_come_from_cells_not_prose():
     assert sample["summary"]["pluginsCount"] == 0
 
 
+def test_summary_ignores_pathway_rows():
+    # D24: counts come from count TABLES only (two columns, category word
+    # then count word) — a pathway row shaped `| p1 | WIRED | 3 |` lives in
+    # a three-column table, which is never a count table, so it must never
+    # set summary["wired"] = 3. And with no count table anywhere, every
+    # count stays None.
+    text = "\n".join([
+        "# Pathway Manifest — row shape",
+        "",
+        "## Summary Counts",
+        "",
+        "| Category | Count |",
+        "|---|---|",
+        "| **WIRED** | 2 |",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status | wired |",
+        "|---|---|---|",
+        "| p1 | WIRED | 3 |",
+    ])
+    parsed = parse_manifest_text(text)
+    assert parsed["summary"]["wired"] == 2
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+    no_summary = "\n".join([
+        "# Pathway Manifest — no summary section",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+    ])
+    bare = parse_manifest_text(no_summary)
+    assert all(v is None for v in bare["summary"].values())
+
+
+def test_accounting_heading_is_not_a_summary_section():
+    # D24: the heading never mattered — this stray two-cell pipe table
+    # (`| WIRED | 3 |` over a separator, no body rows) is not a count table
+    # under ANY heading: its headers ("WIRED", "3") are not a category word
+    # followed by a count word. No counts, no error.
+    text = "\n".join([
+        "# Pathway Manifest — accounting heading",
+        "",
+        "## Accounting",
+        "",
+        "| WIRED | 3 |",
+        "|---|---|",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+    ])
+    parsed = parse_manifest_text(text)
+    assert parsed["summary"]["wired"] is None
+    assert all(v is None for v in parsed["summary"].values())
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+
+
+def test_totals_heading_is_a_summary_section():
+    # D24: `## Totals` yields its counts because its table has the count-
+    # table header shape (`| Category | Count |`) — not because of the
+    # heading. The heading name is decorative.
+    text = "\n".join([
+        "# Pathway Manifest — totals heading",
+        "",
+        "## Totals",
+        "",
+        "| Category | Count |",
+        "|---|---|",
+        "| **WIRED** | 2 |",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+    ])
+    parsed = parse_manifest_text(text)
+    assert parsed["summary"]["wired"] == 2
+    assert parsed["summary"]["pathwaysTotal"] is None
+
+
+def test_three_column_table_under_summary_heading_sets_no_counts():
+    # D7: the summary heading gate alone is not enough — a count row must be
+    # exactly two cells (`| <LABEL> | <N> |`). A three-column pathway table
+    # under ## Summary has `| p1 | WIRED | 3 |` rows: WIRED sits in the
+    # middle cell, so it must not set summary["wired"] — and the pathways
+    # must still parse.
+    text = "\n".join([
+        "# Pathway Manifest — three columns under summary",
+        "",
+        "## Summary",
+        "",
+        "| id | status | count |",
+        "|---|---|---|",
+        "| p1 | WIRED | 3 |",
+        "| p2 | UNWIRED | 1 |",
+    ])
+    parsed = parse_manifest_text(text)
+    assert parsed["summary"]["wired"] is None
+    assert parsed["summary"]["unwired"] is None
+    assert all(v is None for v in parsed["summary"].values())
+    assert [p["id"] for p in parsed["pathways"]] == ["p1", "p2"]
+
+
+def test_count_table_under_any_heading_is_read():
+    # D24: a count table is its header SHAPE — exactly two columns, a
+    # category word first and a count word second — wherever it sits. A
+    # manifest whose counts live under ## Status Overview or ## Breakdown
+    # must READ its counts, not raise: the section heading no longer
+    # decides anything, so a real feed that parsed yesterday cannot fail
+    # today because its count table sits under a heading outside the old
+    # summary allow-list.
+    for heading in ("Status Overview", "Breakdown", "Distribution", "Summary Counts"):
+        text = "\n".join([
+            "# Pathway Manifest — counts under any heading",
+            "",
+            f"## {heading}",
+            "",
+            "| Category | Count |",
+            "|---|---|",
+            "| **WIRED** | 5 |",
+            "",
+            "## 1. Pathways Table",
+            "",
+            "| id | status |",
+            "|---|---|",
+            "| p1 | WIRED |",
+        ])
+        parsed = parse_manifest_text(text)
+        assert parsed["summary"]["wired"] == 5, heading
+        assert [p["id"] for p in parsed["pathways"]] == ["p1"], heading
+
+
+def test_bold_header_is_still_a_count_table():
+    # D31: header cells are matched after removing markdown emphasis —
+    # `*`, `_`, backticks and whitespace are stripped from both header
+    # cells before the word-set comparison, so a bold, italic or code-span
+    # header is still the count-table shape. This is a REGRESSION guard:
+    # the old row-regex read these counts; a verbatim header comparison
+    # silently drops every one of them — and a silent drop is the one
+    # thing this module must never do.
+    for header_row, label in (
+        ("| **Category** | **Count** |", "bold"),
+        ("| _Category_ | _Count_ |", "italic"),
+        ("| `Category` | `Count` |", "code span"),
+    ):
+        text = "\n".join([
+            "# Pathway Manifest — emphasised count header",
+            "",
+            "## Status Overview",
+            "",
+            header_row,
+            "|---|---|",
+            "| **WIRED** | 2 |",
+            "| **TOTAL PATHWAYS** | 3 |",
+            "",
+            "## 1. Pathways Table",
+            "",
+            "| id | status |",
+            "|---|---|",
+            "| p1 | WIRED |",
+        ])
+        parsed = parse_manifest_text(text)
+        assert parsed["summary"]["wired"] == 2, label
+        assert parsed["summary"]["pathwaysTotal"] == 3, label
+        assert [p["id"] for p in parsed["pathways"]] == ["p1"], label
+
+
+def test_bold_italic_count_row_is_counted():
+    # D41: `_COUNT_ROW_RE`'s hand-rolled `\*{0,2}` cannot match a
+    # bold-ITALIC label — `***WIRED***` is three asterisks per side — so
+    # that count was silently dropped inside the very path that refuses
+    # silent drops. Emphasis is stripped from the row label before the
+    # label set is matched (the D31 approach), so one, two or three
+    # asterisks — and underscores and code spans — all read as the label.
+    for row_label, label in (
+        ("***WIRED***", "bold-italic"),
+        ("*WIRED*", "italic"),
+        ("**WIRED**", "bold"),
+        ("_WIRED_", "underscore"),
+        ("`WIRED`", "code span"),
+        ("WIRED", "bare"),
+    ):
+        text = "\n".join([
+            "# Pathway Manifest — emphasised count row",
+            "",
+            "## Status Overview",
+            "",
+            "| Category | Count |",
+            "|---|---|",
+            f"| {row_label} | 4 |",
+            "",
+            "## 1. Pathways Table",
+            "",
+            "| id | status |",
+            "|---|---|",
+            "| p1 | WIRED |",
+        ])
+        parsed = parse_manifest_text(text)
+        assert parsed["summary"]["wired"] == 4, label
+        assert [p["id"] for p in parsed["pathways"]] == ["p1"], label
+
+
+def test_multi_word_count_headers_are_recognised():
+    # D75: emphasis is stripped; whitespace is not. D31's strip removed
+    # internal spaces too, so a multi-word count header — | Total Count |,
+    # | Path Count |, | Wired Count | — collapsed to one unrecognised token
+    # and D38 then refused a feed that parsed the day before. Header cells
+    # lose *, _ and backticks only, runs of whitespace collapse to one
+    # space, and the words are matched by PHRASE CONTAINMENT: a header cell
+    # is a count cell when it contains a count word as a word, and a
+    # category cell when it contains a category word as a word. Edge case 2
+    # rides at the bottom: a header neither of whose cells carries a count
+    # or category word still refuses over count rows — D38 stands.
+    documents = [
+        (
+            "| Category Name | Total Count |",
+            ["| WIRED | 5 |", "| TOTAL PATHWAYS | 7 |"],
+            {"wired": 5, "pathwaysTotal": 7},
+            "multi-word count and category cells",
+        ),
+        (
+            "| Status | Wired Count |",
+            ["| WIRED | 3 |"],
+            {"wired": 3},
+            "wired count",
+        ),
+        (
+            "| Category | Path Count |",
+            ["| TOTAL PATHWAYS | 4 |"],
+            {"pathwaysTotal": 4},
+            "path count",
+        ),
+        (
+            "| Category Name | Metric Value |",
+            ["| WIRED | 5 |"],
+            {"wired": 5},
+            "metric value",
+        ),
+        (
+            "| **Category Name** | **Total Count** |",
+            ["| **WIRED** | 5 |"],
+            {"wired": 5},
+            "emphasis on a multi-word header",
+        ),
+        (
+            "| Total Count | Category Name |",
+            ["| 5 | WIRED |"],
+            {"wired": 5},
+            "multi-word count cell first (D59's reversed order)",
+        ),
+    ]
+    for header_row, count_rows, expected, label in documents:
+        text = "\n".join([
+            "# Pathway Manifest — multi-word count header",
+            "",
+            "## Summary Counts",
+            "",
+            header_row,
+            "|---|---|",
+            *count_rows,
+            "",
+            "## 1. Pathways Table",
+            "",
+            "| id | status |",
+            "|---|---|",
+            "| p1 | WIRED |",
+        ])
+        parsed = parse_manifest_text(text)
+        for key, value in expected.items():
+            assert parsed["summary"][key] == value, (label, key)
+        assert [p["id"] for p in parsed["pathways"]] == ["p1"], label
+
+    # D75 does not widen recognition to nonsense: a header neither of whose
+    # cells carries a count or category word still refuses over count rows
+    # (D38, unchanged — the refusal names the header).
+    thing_text = "\n".join([
+        "# Pathway Manifest — unrecognised header still refuses",  # line 1
+        "",                                                     # line 2
+        "## Status Overview",                                   # line 3
+        "",                                                     # line 4
+        "| Thing | Blah |",                                     # line 5
+        "|---|---|",                                            # line 6
+        "| WIRED | 5 |",                                        # line 7
+        "",                                                     # line 8
+        "## 1. Pathways Table",                                 # line 9
+        "",                                                     # line 10
+        "| id | status |",                                      # line 11
+        "|---|---|",                                            # line 12
+        "| p1 | WIRED |",                                       # line 13
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(thing_text)
+    message = str(excinfo.value)
+    assert "Thing" in message
+    assert "Blah" in message
+
+
+def test_three_column_table_is_not_a_count_table():
+    # D24: a count table has EXACTLY two columns. A three-column table —
+    # `| Category | Count | Notes |`, wherever it sits — sets no counts and
+    # raises nothing.
+    for heading in ("Notes", "Summary"):
+        text = "\n".join([
+            "# Pathway Manifest — three columns",
+            "",
+            f"## {heading}",
+            "",
+            "| Category | Count | Notes |",
+            "|---|---|---|",
+            "| WIRED | 5 | headline figure |",
+            "",
+            "## 1. Pathways Table",
+            "",
+            "| id | status |",
+            "|---|---|",
+            "| p1 | WIRED |",
+        ])
+        parsed = parse_manifest_text(text)
+        assert all(v is None for v in parsed["summary"].values()), heading
+        assert [p["id"] for p in parsed["pathways"]] == ["p1"], heading
+
+
+def test_two_column_pathway_table_is_not_a_count_table():
+    # D24: `| id | status |` is two columns but NOT a count table — its
+    # second header is not a count word. Its pathway rows set no counts,
+    # wherever the table sits; beside it, a table whose header shape says
+    # "counts" (category word first, count word second) does feed the
+    # summary — the contrast pins the shape rule, not the heading.
+    text = "\n".join([
+        "# Pathway Manifest — two-column pathway table",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+        "| p2 | UNWIRED |",
+        "",
+        "## Status Overview",
+        "",
+        "| Category | Count |",
+        "|---|---|",
+        "| **TOTAL PATHWAYS** | 2 |",
+        "| **WIRED** | 1 |",
+    ])
+    parsed = parse_manifest_text(text)
+    assert parsed["summary"]["pathwaysTotal"] == 2
+    assert parsed["summary"]["wired"] == 1
+    assert parsed["summary"]["unwired"] is None
+    assert [p["id"] for p in parsed["pathways"]] == ["p1", "p2"]
+
+
+def test_unrecognised_count_header_refuses_and_wider_vocabulary_reads():
+    # D38: an unrecognised count-table header REFUSES — it never returns
+    # nulls. Three pinned behaviours:
+    #
+    # 1. The header vocabulary is wider: `metric(s)`, `value(s)`,
+    #    `number`, `amount`, `qty` count as count words and `metric(s)`,
+    #    `measure`, `item` as category words, so `| Metric | Value |`
+    #    READS its counts instead of silently dropping every row.
+    # 2. A two-column table whose rows are count rows (a count label in
+    #    the first cell, a parseable count in the second) but whose
+    #    header is not a recognised count-table header raises
+    #    PathwayMapError naming the header — the feed owner fixes the
+    #    header; the consumer never receives nulls.
+    # 3. A two-column table whose rows are NOT count labels raises
+    #    nothing — the refusal stays inside D38's rule and does not
+    #    widen to arbitrary two-column tables.
+    # Case 1: the wider vocabulary reads its counts.
+    metric_text = "\n".join([
+        "# Pathway Manifest — metric header",        # line 1
+        "",                                          # line 2
+        "## Status Overview",                        # line 3
+        "",                                          # line 4
+        "| Metric | Value |",                        # line 5
+        "|---|---|",                                 # line 6
+        "| WIRED | 5 |",                             # line 7
+        "",                                          # line 8
+        "## 1. Pathways Table",                      # line 9
+        "",                                          # line 10
+        "| id | status |",                           # line 11
+        "|---|---|",                                 # line 12
+        "| p1 | WIRED |",                            # line 13
+    ])
+    parsed = parse_manifest_text(metric_text)
+    assert parsed["summary"]["wired"] == 5
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+
+    # Case 2: an unrecognised header over count rows refuses, naming the
+    # header row — never a silent all-None summary.
+    thing_text = "\n".join([
+        "# Pathway Manifest — unrecognised count header",  # line 1
+        "",                                                # line 2
+        "## Status Overview",                              # line 3
+        "",                                                # line 4
+        "| Thing | Blah |",                                # line 5
+        "|---|---|",                                       # line 6
+        "| WIRED | 5 |",                                   # line 7
+        "",                                                # line 8
+        "## 1. Pathways Table",                            # line 9
+        "",                                                # line 10
+        "| id | status |",                                 # line 11
+        "|---|---|",                                       # line 12
+        "| p1 | WIRED |",                                  # line 13
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(thing_text)
+    message = str(excinfo.value)
+    assert "Thing" in message
+    assert "Blah" in message
+
+    # Case 3: non-count-label rows raise nothing — the refusal needs BOTH
+    # a count label and a parseable count, not just a numeric second cell.
+    plain_text = "\n".join([
+        "# Pathway Manifest — plain two-column table",  # line 1
+        "",                                             # line 2
+        "## Notes",                                     # line 3
+        "",                                             # line 4
+        "| Thing | Blah |",                             # line 5
+        "|---|---|",                                    # line 6
+        "| alpha | 7 |",                                # line 7 — numeric, not a label
+        "| beta | gamma |",                             # line 8
+        "",                                             # line 9
+        "## 1. Pathways Table",                         # line 10
+        "",                                             # line 11
+        "| id | status |",                              # line 12
+        "|---|---|",                                    # line 13
+        "| p1 | WIRED |",                               # line 14
+    ])
+    parsed = parse_manifest_text(plain_text)
+    assert all(v is None for v in parsed["summary"].values())
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+
+
+def test_unrecognised_header_error_names_the_vocabulary():
+    # D48: the D38 refusal names the vocabulary it accepts, so a feed
+    # owner fixes the header in one read instead of guessing. The message
+    # must state the accepted count words and category words (asserted
+    # against the module's own word sets — at least two of each, matched
+    # on word boundaries so prose like "count label" cannot fake a hit)
+    # and name the offending header.
+    text = "\n".join([
+        "# Pathway Manifest — unrecognised count header",  # line 1
+        "",                                                # line 2
+        "## Status Overview",                              # line 3
+        "",                                                # line 4
+        "| Thing | Blah |",                                # line 5
+        "|---|---|",                                       # line 6
+        "| WIRED | 5 |",                                   # line 7
+        "",                                                # line 8
+        "## 1. Pathways Table",                            # line 9
+        "",                                                # line 10
+        "| id | status |",                                 # line 11
+        "|---|---|",                                       # line 12
+        "| p1 | WIRED |",                                  # line 13
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(text)
+    message = str(excinfo.value)
+    assert "Thing" in message
+    assert "Blah" in message
+
+    def named(words: frozenset[str]) -> list[str]:
+        return [w for w in words if re.search(rf"\b{re.escape(w)}\b", message)]
+
+    assert len(named(pathway_map._COUNT_WORDS)) >= 2, message
+    assert len(named(pathway_map._CATEGORY_WORDS)) >= 2, message
+
+
+def test_tables_have_no_first_row_field():
+    # D40: the table dict carries no `first_row` key. It was added to every
+    # table dict and read by nobody — dead data whose line-number contract
+    # invites a future consumer to rely on something unmaintained. The
+    # table dict is internal to `_extract_tables` (never returned to
+    # callers), so this test reaches into the private extractor to pin the
+    # exact shape: `headers` and `rows`, nothing else.
+    text = "\n".join([
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+    ])
+    tables = pathway_map._extract_tables(text)
+    assert len(tables) == 1
+    assert set(tables[0]) == {"headers", "rows"}
+    assert "first_row" not in tables[0]
+    assert tables[0]["headers"] == ["id", "status"]
+    assert tables[0]["rows"] == [["p1", "WIRED"]]
+
+
+def test_aligned_rows_parse_and_misaligned_rows_refuse():
+    # D78 (rewrites D51's source-text assertions): the claims are asserted
+    # from observable output only — aligned rows survive intact end to end
+    # (dropping the dead short-row fill changed nothing for a well-formed
+    # table) and a misaligned row refuses naming its line and both cell
+    # counts. No source text, no AST.
+    text = "\n".join([
+        "# Pathway Manifest — aligned rows",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status | trigger |",
+        "|---|---|---|",
+        "| p1 | WIRED | onClick |",
+    ])
+    parsed = parse_manifest_text(text)
+    assert parsed["pathways"][0]["trigger"] == "onClick"
+
+    misaligned = "\n".join([
+        "# Pathway Manifest — misaligned row",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status | trigger |",
+        "|---|---|---|",
+        "| p1 | WIRED |",
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(misaligned)
+    message = str(excinfo.value)
+    assert "line 7" in message
+    assert "2 cells" in message
+    assert "header has 3" in message
+
+
+def test_extractor_behaviour_is_asserted_not_source():
+    # D78: tests assert behaviour, not source. The two D51/D69-era
+    # assertions that read the module's source text and AST (inspect's
+    # source reader applied to the module, and the ast-walk over an
+    # extractor's stored locals) are deleted — this guard keeps them
+    # deleted, and the assertions below pin the same claims from
+    # observable output only: each extractor returns the documented
+    # values for one table. The banned patterns are assembled by
+    # concatenation so this guard cannot trip over its own text.
+    source = Path(__file__).read_text(encoding="utf-8")
+    for banned in ("inspect." + "getsource", "ast." + "parse(inspect."):
+        assert banned not in source, banned
+
+    # One document, six extractors, every returned value asserted.
+    text = "\n".join([
+        "# Pathway Manifest — every extractor, one document",  # line 1
+        "",                                                    # line 2
+        "## Summary Counts",                                   # line 3
+        "",                                                    # line 4
+        "| Category | Count |",                                # line 5
+        "|---|---|",                                           # line 6
+        "| Total Pathways | 1 |",                              # line 7
+        "| WIRED | 1 |",                                       # line 8
+        "",                                                    # line 9
+        "## 1. Pathways Table",                                # line 10
+        "",                                                    # line 11
+        "| id | status | handler |",                           # line 12
+        "|---|---|---|",                                       # line 13
+        "| p1 | WIRED | startCapture |",                       # line 14
+        "",                                                    # line 15
+        "## 2. Routes Table",                                  # line 16
+        "",                                                    # line 17
+        "| Method | Path | Handler file:line |",               # line 18
+        "|---|---|---|",                                       # line 19
+        "| GET | /setup | api.py:956 |",                       # line 20
+        "",                                                    # line 21
+        "## 3. Plugins",                                       # line 22
+        "",                                                    # line 23
+        "| Name | Kind |",                                     # line 24
+        "|---|---|",                                           # line 25
+        "| rested-capture | core |",                           # line 26
+        "",                                                    # line 27
+        "## 4. Suspicious Calls",                              # line 28
+        "",                                                    # line 29
+        "| Call | Where |",                                    # line 30
+        "|---|---|",                                           # line 31
+        "| fetch(url) | A.jsx:1 |",                            # line 32
+        "",                                                    # line 33
+        "## 5. Anti-patterns",                                 # line 34
+        "",                                                    # line 35
+        "| Category | Count | File | Line | Quote |",          # line 36
+        "|---|---|---|---|---|",                               # line 37
+        "| duplicate-fetch | 3 | hub.ts | 88 | fetch(url) |",  # line 38
+    ])
+    parsed = parse_manifest_text(text)
+    # Summary extractor: the eight count keys, counts from the count table.
+    assert parsed["summary"] == {
+        "pathwaysTotal": 1, "wired": 1, "mocked": None, "unwired": None,
+        "incomplete": None, "unclear": None, "routesCount": None,
+        "pluginsCount": None,
+    }
+    # Pathways extractor.
+    assert parsed["pathways"] == [{
+        "id": "p1", "location": "", "trigger": "", "selector": "",
+        "declaredIntent": "", "handler": "startCapture",
+        "downstreamCall": "", "expectedSideEffect": "", "evidence": "",
+        "status": "WIRED", "rawStatus": "WIRED", "unwiredFlag": False,
+    }]
+    # Routes extractor.
+    assert parsed["routes"] == [{
+        "method": "GET", "path": "/setup", "handler": "api.py:956",
+        "raw": {"method": "GET", "path": "/setup",
+                "handler file:line": "api.py:956"},
+    }]
+    # Plugins extractor.
+    assert parsed["plugins"] == [
+        {"name": "rested-capture",
+         "raw": {"name": "rested-capture", "kind": "core"}},
+    ]
+    # Suspicious extractor.
+    assert parsed["suspicious"] == [{"call": "fetch(url)", "where": "A.jsx:1"}]
+    # Anti-patterns extractor.
+    assert parsed["antiPatterns"] == [{
+        "category": "duplicate-fetch", "count": 3, "file": "hub.ts",
+        "line": "88", "quote": "fetch(url)",
+    }]
+
+
 def test_both_flavours_return_the_same_key_set():
     # One shape for both flavours: identical top-level keys, with `flavour`
     # saying which produced it; summary and metadata carry the same keys too.
@@ -162,6 +783,1077 @@ def test_both_flavours_return_the_same_key_set():
     assert manifest["metadata"]["version"] is None
     assert manifest["metadata"]["repo"] is None
     assert manifest["metadata"]["manifest_found"] is None
+
+
+def test_prose_with_pipe_after_a_table_is_refused():
+    # D5 supersedes the D2 prose escape: a pipe-bearing line inside a table
+    # body must align with the header or be refused. The parser cannot tell
+    # pipe-bearing prose from a misaligned row, and calling it prose is what
+    # silently dropped every row after it — here a 2-cell line follows a
+    # nine-column table. The table ends only at a line with no unescaped
+    # pipe, a blank line, or a new heading; pipe-bearing prose after a
+    # table needs a blank line between.
+    text = "\n".join([
+        "# Pathway Manifest — prose after table",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | location | trigger | declared_intent | handler | downstream_call | evidence | status | unwired flag |",
+        "|---|---|---|---|---|---|---|---|---|",
+        "| p1 | A.jsx:1 | onClick | Launch capture | startCapture | POST /api/captures | A.jsx:1 | WIRED |  |",
+        "see a | b above for the wiring notes",
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(text)
+    message = str(excinfo.value)
+    assert "line 8" in message
+    assert "2 cells" in message
+    assert "header has 9" in message
+
+
+def test_table_without_leading_pipes_parses():
+    # D2': GFM lets a table row omit the leading pipe. Such a row is
+    # parsed, never silently dropped — a table parsing to zero rows beside
+    # a pipe-bearing line is exactly the silent drop this module prevents.
+    text = "\n".join([
+        "# Pathway Manifest — no leading pipes",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "id | status | trigger",
+        "---|---|---",
+        "p1 | WIRED | ok",
+    ])
+    parsed = parse_manifest_text(text)
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+    assert parsed["pathways"][0]["status"] == "WIRED"
+    assert parsed["pathways"][0]["trigger"] == "ok"
+
+
+def test_misaligned_row_is_refused():
+    # D2': a pipe-bearing row that cannot be aligned with its header is
+    # REFUSED naming the line — never dropped, never a zero-row table.
+    text = "\n".join([
+        "# Pathway Manifest — misaligned row",      # line 1
+        "",                                         # line 2
+        "## 1. Pathways Table",                     # line 3
+        "",                                         # line 4
+        "| id | status | trigger |",                # line 5
+        "|---|---|---|",                            # line 6
+        "p1 | WIRED",                               # line 7 — 2 cells vs 3
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(text)
+    message = str(excinfo.value)
+    assert "line 7" in message
+    assert "p1" in message
+
+
+def test_misaligned_row_mid_table_is_refused():
+    # D5: a pipe-bearing row in the MIDDLE of a table that cannot be aligned
+    # is refused, naming the line and both cell counts. The old parser broke
+    # at such a row and silently skipped every row after it — a truncation,
+    # not a parse: the parser returns every row of a table or raises.
+    text = "\n".join([
+        "# Pathway Manifest — mid-table misalignment",  # line 1
+        "",                                             # line 2
+        "## 1. Pathways Table",                         # line 3
+        "",                                             # line 4
+        "id | status",                                  # line 5
+        "---|---",                                      # line 6
+        "p1 | WIRED",                                   # line 7
+        "p2 | WIRED | extra",                           # line 8 — 3 cells vs 2
+        "p3 | WIRED",                                   # line 9
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(text)
+    message = str(excinfo.value)
+    assert "line 8" in message
+    assert "3 cells" in message
+    assert "header has 2" in message
+    # The same refusal when the row does carry its leading pipe.
+    piped = "\n".join([
+        "# Pathway Manifest — mid-table misalignment",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+        "| p2 | WIRED | extra |",
+        "| p3 | WIRED |",
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(piped)
+    assert "line 8" in str(excinfo.value)
+
+
+def test_misaligned_row_mid_table_does_not_lose_trailing_rows():
+    # The same table as above: the old parser returned a SUCCESSFUL parse of
+    # [p1] — nothing refused, and p3 silently absent. D5: every row of a
+    # table or a refusal, so a misaligned mid-table row can never leave a
+    # successful partial parse behind; and when the row is repaired, p3 must
+    # be present in the successful parse.
+    text = "\n".join([
+        "# Pathway Manifest — trailing row",  # line 1
+        "",                                   # line 2
+        "## 1. Pathways Table",               # line 3
+        "",                                   # line 4
+        "id | status",                        # line 5
+        "---|---",                            # line 6
+        "p1 | WIRED",                         # line 7
+        "p2 | WIRED | extra",                 # line 8 — 3 cells vs 2
+        "p3 | WIRED",                         # line 9
+    ])
+    with pytest.raises(PathwayMapError):
+        parse_manifest_text(text)
+    repaired = "\n".join([
+        "# Pathway Manifest — trailing row",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "id | status",
+        "---|---",
+        "p1 | WIRED",
+        "p3 | WIRED",
+    ])
+    assert [p["id"] for p in parse_manifest_text(repaired)["pathways"]] == ["p1", "p3"]
+
+
+def test_duplicate_pathway_id_is_refused():
+    # D3: a repeated id is REFUSED, not silently dropped — a map that says
+    # the same pathway twice is ambiguous and must not half-parse.
+    text = "\n".join([
+        "# Pathway Manifest — duplicate id",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| dup-pathway | WIRED |",
+        "| dup-pathway | MOCKED |",
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(text)
+    assert "dup-pathway" in str(excinfo.value)
+
+
+def test_overlong_pathway_id_is_refused():
+    # D3: an id longer than 200 characters is REFUSED, naming the length and
+    # the first 40 characters — not silently dropped.
+    long_id = "long-" + "x" * 196  # 201 characters
+    text = "\n".join([
+        "# Pathway Manifest — overlong id",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        f"| {long_id} | WIRED |",
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(text)
+    message = str(excinfo.value)
+    assert "201" in message
+    assert long_id[:40] in message
+
+
+def test_every_manifest_fixture_parses():
+    # D3': the duplicate/over-long id refusals must be proven safe for the
+    # inputs we ship — every manifest fixture in the repo parses without
+    # raising, so the refusal cannot be blamed for breaking a real input.
+    # D6: the test asserts counts, not just non-emptiness — a total, silent
+    # loss of a fixture's summary block must fail the suite. EVERY *.md
+    # fixture here carries a `## Summary Counts` table (none lacks one); the
+    # map lists the counts each fixture's table actually declares, and all
+    # of them must come out non-None. A fixture added later must join the
+    # map — an unlisted fixture fails below instead of silently skipping
+    # the count assertion.
+    manifests = sorted(FIXTURES.glob("*.md"))
+    assert manifests, "no manifest fixtures found under capture-foundations"
+    declared_counts = {
+        "pathway-manifest-boolean-columns.md": (
+            "pathwaysTotal", "wired", "unwired", "routesCount", "pluginsCount",
+        ),
+        "pathway-manifest-full.md": ("pathwaysTotal", "wired"),
+        "pathway-manifest-hardening.md": ("pathwaysTotal", "wired", "unwired", "mocked"),
+        "pathway-manifest-sample.md": (
+            "pathwaysTotal", "wired", "unwired", "routesCount", "pluginsCount",
+        ),
+        "single-pathway-manifest.md": ("pathwaysTotal", "wired"),
+    }
+    for path in manifests:
+        assert path.name in declared_counts, (
+            f"{path.name} is not in the D6 count map — say in this test's "
+            "comment whether it carries a summary table"
+        )
+        parsed = parse_manifest_md(path)
+        assert parsed["flavour"] == "manifest"
+        assert parsed["pathways"], f"{path.name} parsed to zero pathways"
+        for key in declared_counts[path.name]:
+            assert parsed["summary"][key] is not None, (
+                f"{path.name} lost its summary count '{key}' — a summary "
+                "block must never be silently dropped"
+            )
+
+
+def test_every_fixture_populates_every_key_main_populated():
+    # D76: D66's "one table, one extractor" is withdrawn — main's claiming
+    # returns. Each extractor claims a table by its OWN heading and header
+    # shape, and more than one extractor may read the same table: that is
+    # main's behaviour, not a data loss. D66 emptied keys main populated —
+    # a count-shaped table under a suspicious heading fed the summary on
+    # main and feeds it again here, WHILE the same table still feeds the
+    # suspicious extractor. D86 narrows the anti-pattern intersection: a
+    # count-shaped table under ## 2. Anti-patterns populates the summary
+    # and fabricates NO records — records require the record shape, the
+    # heading alone is not one. The D63 single-parse-per-section
+    # optimisation stays.
+    #
+    # Part 1 — the summary keys D66 emptied, restored (main populated the
+    # summary from these tables; D66 leaves them all-None); the
+    # anti-pattern half is re-scoped by D86:
+    anti_text = "\n".join([
+        "# Pathway Manifest — one table, two readers",   # line 1
+        "",                                           # line 2
+        "## 1. Pathways Table",                       # line 3
+        "",                                           # line 4
+        "| id | status |",                            # line 5
+        "|---|---|",                                  # line 6
+        "| p1 | WIRED |",                             # line 7
+        "",                                           # line 8
+        "## 2. Anti-patterns",                        # line 9
+        "",                                           # line 10
+        "| Category | Count |",                       # line 11
+        "|---|---|",                                  # line 12
+        "| WIRED | 5 |",                              # line 13
+    ])
+    parsed = parse_manifest_text(anti_text)
+    # D86: no record is fabricated from summary rows — the count-shaped
+    # table populates the summary only.
+    assert parsed["antiPatterns"] == []
+    assert parsed["summary"]["wired"] == 5
+
+    suspicious_text = anti_text.replace("## 2. Anti-patterns", "## Suspicious Calls")
+    parsed = parse_manifest_text(suspicious_text)
+    assert parsed["suspicious"] == [{"category": "WIRED", "count": "5"}]
+    assert parsed["summary"]["wired"] == 5
+
+    # The brief's own shape: a count table under ## Summary sets the
+    # summary while the SAME document still populates antiPatterns from
+    # its own anti-pattern table — no key main populated is empty.
+    both_text = "\n".join([
+        "# Pathway Manifest — summary and anti-patterns together",
+        "",
+        "## Summary",
+        "",
+        "| Category | Count |",
+        "|---|---|",
+        "| WIRED | 5 |",
+        "",
+        "## 2. Anti-patterns",
+        "",
+        "| Anti-Pattern | Count |",
+        "|---|---|",
+        "| duplicate-fetch | 3 |",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+    ])
+    parsed = parse_manifest_text(both_text)
+    assert parsed["summary"]["wired"] == 5
+    assert parsed["antiPatterns"] == [
+        {"category": "duplicate-fetch", "count": 3, "file": "", "line": "",
+         "quote": ""},
+    ]
+
+    # Part 2 — the fixture-level comparison: for EVERY shipped fixture,
+    # routes, plugins, suspicious, summary and pathways each equal what the
+    # fixture's own content implies — the exact values main produces,
+    # written out. A fixture test that only checked pathways is how D66's
+    # loss slipped through. A fixture added later must join the map.
+    expected = {
+        "pathway-manifest-boolean-columns.md": {
+            "summary": {"pathwaysTotal": 3, "wired": 1, "mocked": None,
+                        "unwired": 2, "incomplete": None, "unclear": None,
+                        "routesCount": 1, "pluginsCount": 0},
+            "pathways": [("boolean-yes", "WIRED"), ("boolean-no", "UNWIRED"),
+                         ("unwired-flagged", "UNWIRED")],
+            "routes": [],
+            "plugins": [],
+            "suspicious": [],
+            "antiPatterns": [],
+        },
+        "pathway-manifest-full.md": {
+            "summary": {"pathwaysTotal": 1, "wired": 1, "mocked": None,
+                        "unwired": None, "incomplete": None, "unclear": None,
+                        "routesCount": None, "pluginsCount": None},
+            "pathways": [("capture-start", "WIRED")],
+            "routes": [("POST", "/api/rested-captures/jobs")],
+            "plugins": ["rested-capture", "vault-sync"],
+            "suspicious": [
+                {"call": "`eval(`", "location": "RestedCaptureView.jsx:101",
+                 "why it is risky": "dynamic code execution"},
+                {"call": "`fetch(BASE + \"/catalog\")`",
+                 "location": "CatalogView.jsx:243",
+                 "why it is risky": "URL built from input"},
+            ],
+            "antiPatterns": [("duplicate-fetch", 3), ("console-log-noise", 12),
+                             ("dead-export", None)],
+        },
+        "pathway-manifest-hardening.md": {
+            "summary": {"pathwaysTotal": 4, "wired": 2, "mocked": 1,
+                        "unwired": 1, "incomplete": None, "unclear": None,
+                        "routesCount": None, "pluginsCount": None},
+            "pathways": [("capture-start", "WIRED"),
+                         ("catalog-search", "UNWIRED"),
+                         ("export-rows", "MOCKED"),
+                         ("settings-open", "WIRED")],
+            "routes": [("GET", "/api/captures"), ("", "/api/catalog")],
+            "plugins": [],
+            "suspicious": [],
+            "antiPatterns": [],
+        },
+        "pathway-manifest-sample.md": {
+            "summary": {"pathwaysTotal": 3, "wired": 2, "mocked": None,
+                        "unwired": 1, "incomplete": None, "unclear": None,
+                        "routesCount": 2, "pluginsCount": 0},
+            "pathways": [("capture-start", "WIRED"),
+                         ("capture-job-poll", "WIRED"),
+                         ("catalog-search", "UNWIRED")],
+            "routes": [("GET", "/setup"),
+                       ("POST", "/api/rested-captures/jobs")],
+            "plugins": [],
+            "suspicious": [],
+            "antiPatterns": [],
+        },
+        "sample-verifier-map.json": {
+            "summary": {"pathwaysTotal": 2, "wired": None, "mocked": None,
+                        "unwired": None, "incomplete": None, "unclear": None,
+                        "routesCount": None, "pluginsCount": None},
+            "pathways": [("route-not-found-_api_state", "UNWIRED"),
+                         ("route-not-found-_api_control", "UNWIRED")],
+            "routes": [("", "/api/state"), ("POST", "/api/control")],
+            "plugins": [],
+            "suspicious": [],
+            "antiPatterns": [],
+        },
+        "single-pathway-manifest.md": {
+            "summary": {"pathwaysTotal": 1, "wired": 1, "mocked": None,
+                        "unwired": None, "incomplete": None, "unclear": None,
+                        "routesCount": None, "pluginsCount": None},
+            "pathways": [("home", "WIRED")],
+            "routes": [],
+            "plugins": [],
+            "suspicious": [],
+            "antiPatterns": [],
+        },
+    }
+    # D88: the REQUIRED fixtures are asserted present and compared — the
+    # exact iterdir() set is never asserted, so a stray file in the
+    # directory (a .DS_Store, an editor swap file) cannot fail the suite
+    # for a reason unrelated to pathway parsing. A fixture added later
+    # must still join the maps: test_every_manifest_fixture_parses
+    # asserts every *.md in the directory is mapped.
+    for name in expected:
+        assert (FIXTURES / name).is_file(), (
+            f"{name} is missing from capture-foundations — the fixture "
+            "comparison has nothing to compare"
+        )
+    for name, want in expected.items():
+        path = FIXTURES / name
+        parsed = (parse_verifier_json(path) if path.suffix == ".json"
+                  else parse_manifest_md(path))
+        assert parsed["summary"] == want["summary"], name
+        assert [(p["id"], p["status"]) for p in parsed["pathways"]] == want["pathways"], name
+        assert [(r["method"], r["path"]) for r in parsed["routes"]] == want["routes"], name
+        assert [p["name"] for p in parsed["plugins"]] == want["plugins"], name
+        assert parsed["suspicious"] == want["suspicious"], name
+        assert [(a["category"], a["count"])
+                for a in parsed["antiPatterns"]] == want["antiPatterns"], name
+
+
+def test_zero_count_is_kept():
+    # D4: a count cell of "0" is 0 — not None. An empty count cell stays
+    # None; a real zero is a real count.
+    text = "\n".join([
+        "# Pathway Manifest — zero count",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+        "",
+        "## 2. Anti-patterns",
+        "",
+        "| Category | Count | File | Line | Quote |",
+        "|---|---|---|---|---|",
+        "| zero-hits | 0 | hub.ts | 88 | `export const unusedHelper` |",
+        "| no-count |  | hub.ts | 89 | `export const otherHelper` |",
+    ])
+    parsed = parse_manifest_text(text)
+    counts = {a["category"]: a["count"] for a in parsed["antiPatterns"]}
+    assert counts["zero-hits"] == 0
+    # A missing/empty count stays None.
+    assert counts["no-count"] is None
+
+
+def test_decimal_count_reads_the_integer_part():
+    # D4: "3.5" reads as 3 — the first integer run, not a digit-strip that
+    # would glue "3" and "5" into 35.
+    text = "\n".join([
+        "# Pathway Manifest — decimal count",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+        "",
+        "## 2. Anti-patterns",
+        "",
+        "| Category | Count | File | Line | Quote |",
+        "|---|---|---|---|---|",
+        "| decimal-hits | 3.5 | hub.ts | 88 | `export const unusedHelper` |",
+    ])
+    parsed = parse_manifest_text(text)
+    assert parsed["antiPatterns"][0]["count"] == 3
+
+
+def test_summary_decimal_count_reads_the_integer_part():
+    # D25: one parser for every count — the summary path parses its count
+    # cell through `_count_from_cell`, exactly like an anti-pattern entry,
+    # so `| WIRED | 3.5 |` yields 3 in the summary as it does in an
+    # anti-pattern entry (D4): never 35, never None, never a refused row.
+    text = "\n".join([
+        "# Pathway Manifest — decimal summary count",
+        "",
+        "## Summary Counts",
+        "",
+        "| Category | Count |",
+        "|---|---|",
+        "| **WIRED** | 3.5 |",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+        "",
+        "## 2. Anti-patterns",
+        "",
+        "| Category | Count | File | Line | Quote |",
+        "|---|---|---|---|---|",
+        "| decimal-hits | 3.5 | hub.ts | 88 | `export const unusedHelper` |",
+    ])
+    parsed = parse_manifest_text(text)
+    assert parsed["summary"]["wired"] == 3
+    assert parsed["antiPatterns"][0]["count"] == 3
+
+
+def test_range_and_annotation_read_the_leading_integer():
+    # D32: a cell's count is its LEADING integer, unless the cell is two
+    # bare integers. A range ("3-5") or an annotation ("3 of 5",
+    # "3 (of 5)", "3+") in a count-shaped table must read its leading
+    # integer, exactly as the old row-regex did — refusing the whole
+    # document over one annotated cell is an abort, not a parse. D26 is
+    # not weakened: two BARE integers ("2 5") are still refused, and a
+    # cell with no integer at all is still None.
+    for cell, expected in (
+        ("3-5", 3),
+        ("3 of 5", 3),
+        ("3 (of 5)", 3),
+        ("3+", 3),
+    ):
+        text = "\n".join([
+            "# Pathway Manifest — annotated summary count",
+            "",
+            "## Summary Counts",
+            "",
+            "| Category | Count |",
+            "|---|---|",
+            f"| **WIRED** | {cell} |",
+            "",
+            "## 1. Pathways Table",
+            "",
+            "| id | status |",
+            "|---|---|",
+            "| p1 | WIRED |",
+        ])
+        parsed = parse_manifest_text(text)
+        assert parsed["summary"]["wired"] == expected, cell
+        # One parser for every count: the same grammar at the anti-pattern
+        # count site.
+        anti_text = "\n".join([
+            "# Pathway Manifest — annotated anti-pattern count",
+            "",
+            "## 1. Pathways Table",
+            "",
+            "| id | status |",
+            "|---|---|",
+            "| p1 | WIRED |",
+            "",
+            "## 2. Anti-patterns",
+            "",
+            "| Category | Count | File | Line | Quote |",
+            "|---|---|---|---|---|",
+            f"| annotation-hits | {cell} | hub.ts | 88 | `export const x` |",
+        ])
+        anti = parse_manifest_text(anti_text)
+        assert anti["antiPatterns"][0]["count"] == expected, cell
+
+    # The verifier flavour rides the same parser too.
+    verifier = parse_verifier_json_text(json.dumps({
+        "antiPatterns": [{"category": "r", "count": "3 of 5"}],
+        "checks": {"api-wiring": {"findings": [{"id": "f1", "path": "/api/x"}]}},
+    }))
+    assert verifier["antiPatterns"][0]["count"] == 3
+
+    # A cell with no integer at all is None — a count-table cell with no
+    # number is not a count (unchanged).
+    none_text = "\n".join([
+        "# Pathway Manifest — digit-less count cell",
+        "",
+        "## Summary Counts",
+        "",
+        "| Category | Count |",
+        "|---|---|",
+        "| **WIRED** | n/a |",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+    ])
+    assert parse_manifest_text(none_text)["summary"]["wired"] is None
+
+    # Two bare integers are still refused — D26 stands (also asserted
+    # unchanged in test_cell_with_two_integer_runs_is_refused).
+    bare_text = "\n".join([
+        "# Pathway Manifest — two bare integers",
+        "",
+        "## Summary Counts",
+        "",
+        "| Category | Count |",
+        "|---|---|",
+        "| **WIRED** | 2 5 |",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(bare_text)
+    assert "2 5" in str(excinfo.value)
+
+
+def test_verifier_integer_zero_count_is_kept():
+    # D18: an integer zero is a real count. The verifier flavour carries the
+    # same anti-pattern shape as the manifest flavour, and a count that
+    # arrives as a JSON value is parsed with `raw is None` as the ONLY
+    # "absent" test — `0 or ""` is the bug that swallowed a JSON `0` into
+    # None while the manifest flavour kept the string cell "0" as 0. The two
+    # flavours must agree on the same input value.
+    text = json.dumps({
+        "antiPatterns": [{"category": "x", "count": 0}],
+        "checks": {"api-wiring": {"findings": [{"id": "f1", "path": "/api/x"}]}},
+    })
+    parsed = parse_verifier_json_text(text)
+    assert parsed["flavour"] == "verifier"
+    assert parsed["antiPatterns"] == [
+        {"category": "x", "count": 0, "file": "", "line": "", "quote": ""},
+    ]
+
+
+def test_verifier_anti_patterns_must_be_a_list():
+    # D21: a non-list `antiPatterns` is refused by name. A dict yields its
+    # keys and a string its characters, so either shape would silently
+    # parse to garbage (or zero entries) instead of refusing. The refusal
+    # must name the field AND the type it got.
+    for payload, type_name in (({}, "dict"), ("x", "str")):
+        text = json.dumps({
+            "antiPatterns": payload,
+            "checks": {"api-wiring": {"findings": [{"id": "f1", "path": "/api/x"}]}},
+        })
+        with pytest.raises(PathwayMapError) as excinfo:
+            parse_verifier_json_text(text)
+        message = str(excinfo.value)
+        assert "antiPatterns" in message, f"refusal must name the field: {message}"
+        assert type_name in message, (
+            f"refusal must name the type it got ({type_name}): {message}"
+        )
+
+
+def test_verifier_anti_pattern_entry_must_be_a_mapping():
+    # D22: a non-dict entry in `antiPatterns` is REFUSED, not skipped.
+    # Skipping returns a shorter array than the feed declared with no
+    # signal — the silent drop this module exists to prevent. The refusal
+    # names the offending entry's index and type.
+    for entries, index, type_name in (
+        (["fine", 42], 0, "str"),
+        ([{"category": "ok"}, 42], 1, "int"),
+    ):
+        text = json.dumps({
+            "antiPatterns": entries,
+            "checks": {"api-wiring": {"findings": [{"id": "f1", "path": "/api/x"}]}},
+        })
+        with pytest.raises(PathwayMapError) as excinfo:
+            parse_verifier_json_text(text)
+        message = str(excinfo.value)
+        assert f"index {index}" in message, (
+            f"refusal must name the entry's index ({index}): {message}"
+        )
+        assert type_name in message, (
+            f"refusal must name the entry's type ({type_name}): {message}"
+        )
+
+
+def test_anti_pattern_entry_without_category_is_refused():
+    # D27: a mapping entry with no usable category is REFUSED, not skipped
+    # — mirroring D22 — so the returned array can never be shorter than
+    # what the feed declared. The refusal names the entry's index. A
+    # falsy-but-present category (0, "") is no category at all.
+    for entries, index in (
+        ([{"category": 0}], 0),
+        ([{"type": ""}], 0),
+        ([{"category": "ok"}, {"count": 3}], 1),
+    ):
+        text = json.dumps({
+            "antiPatterns": entries,
+            "checks": {"api-wiring": {"findings": [{"id": "f1", "path": "/api/x"}]}},
+        })
+        with pytest.raises(PathwayMapError) as excinfo:
+            parse_verifier_json_text(text)
+        message = str(excinfo.value)
+        assert f"index {index}" in message, (
+            f"refusal must name the entry's index ({index}): {message}"
+        )
+        assert "category" in message, (
+            f"refusal must name the missing thing (category): {message}"
+        )
+
+
+def test_verifier_anti_patterns_round_trip():
+    # D23: the verifier's own `antiPatterns` array is parsed into the
+    # returned map. The key is part of the returned shape and the feed
+    # declares the data, so returning [] would be the drop. A well-formed
+    # entry lands in `antiPatterns` with its fields intact, through the
+    # same normaliser the manifest flavour uses.
+    text = json.dumps({
+        "antiPatterns": [{
+            "category": "mocked-net",
+            "count": 3,
+            "file": "hub.ts",
+            "line": 88,
+            "quote": "fetch('/api/x').then(mock)",
+        }],
+        "checks": {"api-wiring": {"findings": [{"id": "f1", "path": "/api/x"}]}},
+    })
+    parsed = parse_verifier_json_text(text)
+    assert parsed["flavour"] == "verifier"
+    assert parsed["antiPatterns"] == [{
+        "category": "mocked-net",
+        "count": 3,
+        "file": "hub.ts",
+        "line": "88",
+        "quote": "fetch('/api/x').then(mock)",
+    }]
+
+
+def test_zero_line_and_file_survive_normalisation():
+    # D39: `line` and `file` keep a real zero. `str(entry.get(key) or "")`
+    # collapses an integer 0 into "" — the same falsy collapse D18 fixed
+    # for `count` — so a feed that says line 0 or file 0 (a synthetic
+    # "no real location" marker) silently loses the value. Absence is
+    # decided by `is None`, never truthiness: a present zero round-trips
+    # as "0", and an absent key stays "".
+    text = json.dumps({
+        "antiPatterns": [
+            {"category": "zeroed", "line": 0, "file": 0},
+            {"category": "absent"},
+            {"category": "real", "line": 88, "file": "hub.ts"},
+        ],
+        "checks": {"api-wiring": {"findings": [{"id": "f1", "path": "/api/x"}]}},
+    })
+    parsed = parse_verifier_json_text(text)
+    entries = {a["category"]: a for a in parsed["antiPatterns"]}
+    assert entries["zeroed"]["line"] == "0"
+    assert entries["zeroed"]["file"] == "0"
+    assert entries["absent"]["line"] == ""
+    assert entries["absent"]["file"] == ""
+    assert entries["real"]["line"] == "88"
+    assert entries["real"]["file"] == "hub.ts"
+
+
+def test_comma_formatted_count_is_read_whole_or_refused():
+    # D19, decided: READ WHOLE — `,` and spaces are stripped before taking
+    # the first integer run, so "1,234" is 1234: never the truncated first
+    # run 1, and never a silent None. Both count sites agree: the summary
+    # count row and the anti-pattern count cell (whose "1,234" used to read
+    # 1, understating the count returned to callers).
+    summary_text = "\n".join([
+        "# Pathway Manifest — grouped count",
+        "",
+        "## Summary Counts",
+        "",
+        "| Category | Count |",
+        "|---|---|",
+        "| **WIRED** | 1,234 |",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+    ])
+    parsed = parse_manifest_text(summary_text)
+    assert parsed["summary"]["wired"] == 1234
+    anti_text = "\n".join([
+        "# Pathway Manifest — grouped anti-pattern count",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+        "",
+        "## 2. Anti-patterns",
+        "",
+        "| Category | Count | File | Line | Quote |",
+        "|---|---|---|---|---|",
+        "| comma-hits | 1,234 | hub.ts | 88 | `export const x` |",
+    ])
+    anti = parse_manifest_text(anti_text)
+    assert anti["antiPatterns"][0]["count"] == 1234
+    # The verifier flavour rides the same count parser: a grouped STRING
+    # count in the JSON entry is read whole too.
+    verifier_text = json.dumps({
+        "antiPatterns": [{"category": "y", "count": "2,468"}],
+        "checks": {"api-wiring": {"findings": [{"id": "f1", "path": "/api/x"}]}},
+    })
+    verifier = parse_verifier_json_text(verifier_text)
+    assert verifier["antiPatterns"][0]["count"] == 2468
+
+
+def test_cell_with_two_integer_runs_is_refused():
+    # D26: `,` and the non-breaking space are grouping separators INSIDE
+    # one number; a plain space between digits is NOT grouping — two
+    # independent integer runs are two numbers and must be REFUSED naming
+    # the cell, never glued into one ("2 5" is not 25). Grouping is
+    # intact: "1,234" is still 1234 at every count site (D19).
+    summary_text = "\n".join([
+        "# Pathway Manifest — two integer runs",
+        "",
+        "## Summary Counts",
+        "",
+        "| Category | Count |",
+        "|---|---|",
+        "| **WIRED** | 2 5 |",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(summary_text)
+    assert "2 5" in str(excinfo.value)
+
+    anti_text = "\n".join([
+        "# Pathway Manifest — two integer runs in an anti-pattern",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+        "",
+        "## 2. Anti-patterns",
+        "",
+        "| Category | Count | File | Line | Quote |",
+        "|---|---|---|---|---|",
+        "| two-runs | 2 5 | hub.ts | 88 | `export const x` |",
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(anti_text)
+    assert "2 5" in str(excinfo.value)
+
+    # Grouping is intact: "1,234" reads whole at both count sites.
+    assert parse_manifest_text(
+        summary_text.replace("2 5", "1,234")
+    )["summary"]["wired"] == 1234
+    assert parse_manifest_text(
+        anti_text.replace("2 5", "1,234")
+    )["antiPatterns"][0]["count"] == 1234
+
+
+def test_nbsp_grouping_and_verifier_two_run_refusal():
+    # D50: the two count paths the suite never exercised.
+    # 1. The non-breaking space is a grouping separator INSIDE one number
+    #    (named in the D19 grammar) — "1\u00a0234" reads 1234, never the
+    #    truncated first run and never a silent None.
+    # 2. Two bare integers refused through the VERIFIER path —
+    #    parse_verifier_json_text with {"count": "2 5"} — naming the
+    #    cell, not only through the manifest summary (D26).
+    nbsp_text = "\n".join([
+        "# Pathway Manifest — nbsp-grouped count",
+        "",
+        "## Summary Counts",
+        "",
+        "| Category | Count |",
+        "|---|---|",
+        "| **WIRED** | 1\u00a0234 |",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+    ])
+    parsed = parse_manifest_text(nbsp_text)
+    assert parsed["summary"]["wired"] == 1234
+
+    verifier_text = json.dumps({
+        "antiPatterns": [{"category": "z", "count": "2 5"}],
+        "checks": {"api-wiring": {"findings": [{"id": "f1", "path": "/api/x"}]}},
+    })
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_verifier_json_text(verifier_text)
+    message = str(excinfo.value)
+    assert "2 5" in message
+    assert "two bare integers" in message
+
+
+def test_prose_line_with_pipe_and_one_backtick_does_not_abort():
+    # D17: a refusal is decided once the line is KNOWN to be a table, never
+    # during header detection. A prose line in a Notes section that carries a
+    # pipe and an odd number of backticks is not a table — it must be skipped
+    # like any other non-table line, not abort the parse. One typo in an
+    # appendix must never refuse the whole document.
+    text = "\n".join([
+        "# Pathway Manifest — stray backtick in prose",   # line 1
+        "",                                               # line 2
+        "## 1. Pathways Table",                           # line 3
+        "",                                               # line 4
+        "| id | trigger | status |",                      # line 5
+        "|---|---|---|",                                  # line 6
+        "| p1 | onClick | WIRED |",                       # line 7
+        "",                                               # line 8
+        "## 2. Notes",                                    # line 9
+        "",                                               # line 10
+        "Trigger: click | handler: `startCapture",        # line 11
+    ])
+    parsed = parse_manifest_text(text)
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+
+
+def test_table_row_with_unbalanced_backtick_is_still_refused():
+    # D17's other half, committed as the guard: moving the refusal out of
+    # header detection must not re-open the silent swallow. A real table ROW
+    # with one stray backtick is still refused, naming the line and the cell.
+    text = "\n".join([
+        "# Pathway Manifest — stray backtick in a row",   # line 1
+        "",                                               # line 2
+        "## 1. Pathways Table",                           # line 3
+        "",                                               # line 4
+        "| id | trigger | status |",                      # line 5
+        "|---|---|---|",                                  # line 6
+        "| p1 | onClick | WIRED |",                       # line 7
+        "| p2 | `onClick | WIRED |",                      # line 8 — stray backtick
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(text)
+    message = str(excinfo.value)
+    assert "line 8" in message
+    assert "onClick" in message
+
+
+def test_unbalanced_backtick_is_refused():
+    # D5: a cell with an opening backtick and no closer must REFUSE — an
+    # unterminated code span would otherwise swallow the rest of the row's
+    # pipes, silently shifting or dropping every later column. The refusal
+    # names the line and the cell.
+    text = "\n".join([
+        "# Pathway Manifest — unbalanced backtick",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | trigger | status |",
+        "|---|---|---|",
+        "| p1 | `onClick | WIRED |",
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(text)
+    message = str(excinfo.value)
+    assert "line 7" in message
+    assert "onClick" in message
+
+
+def test_unbalanced_backtick_in_header_is_refused():
+    # D37: the header-level unbalanced-backtick refusal gets a test of its
+    # own. A header cell with an odd backtick count opens a code span that
+    # swallows the row's remaining pipes — the header collapses to two
+    # cells, but the separator line still matches, so the line IS a
+    # confirmed table header and the refusal must fire, naming the line.
+    # Every previous backtick test used a body row; this pins the header
+    # half of the same refusal.
+    text = "\n".join([
+        "# Pathway Manifest — unbalanced backtick in a header",  # line 1
+        "",                                                     # line 2
+        "## 1. Pathways Table",                                 # line 3
+        "",                                                     # line 4
+        "| id | `trigger | status |",                           # line 5 — odd backtick
+        "|---|---|---|",                                        # line 6
+        "| p1 | onClick | WIRED |",                             # line 7
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(text)
+    message = str(excinfo.value)
+    assert "line 5" in message
+    assert "trigger" in message
+
+
+def test_collapsed_header_with_a_separator_refuses():
+    # D47: a header whose stray backtick collapses it to fewer than two
+    # cells short-circuits at `len(cells) < 2` BEFORE the backtick refusal
+    # is inspected — the whole table and every row under it vanish with no
+    # error, the exact silent drop this PR exists to close. The separator
+    # following proves the line IS a table header, so the same refusal as
+    # the >=2-cell case fires, naming the line. D77: the malformed table
+    # lives under ## Summary — a section the summary extractor reads —
+    # because in a section no extractor reads the same table would be
+    # ignored, not refused.
+    text = "\n".join([
+        "# Pathway Manifest — collapsed header",    # line 1
+        "",                                        # line 2
+        "## 1. Pathways Table",                    # line 3
+        "",                                        # line 4
+        "| id | status |",                         # line 5
+        "|---|---|",                               # line 6
+        "| p1 | WIRED |",                          # line 7
+        "",                                        # line 8
+        "## Summary",                              # line 9
+        "",                                        # line 10
+        "| `a | b |",                              # line 11 — collapses to one cell
+        "|---|---|",                               # line 12
+        "| r1 | 5 |",                              # line 13
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(text)
+    message = str(excinfo.value)
+    assert "line 11" in message
+    assert "unbalanced backtick" in message
+
+
+def test_collapsed_header_without_a_separator_is_not_a_table():
+    # D47's other half: the refusal fires only where the line is KNOWN to
+    # be a table header — a separator follows. `| `a | b |` with no
+    # separator after it is not a table: it is skipped like any other
+    # non-table line, with no refusal, and the document still parses.
+    text = "\n".join([
+        "# Pathway Manifest — stray backtick, no separator",  # line 1
+        "",                                                   # line 2
+        "## Notes",                                           # line 3
+        "",                                                   # line 4
+        "| `a | b |",                                         # line 5 — no separator below
+        "",                                                   # line 6
+        "## 1. Pathways Table",                               # line 7
+        "",                                                   # line 8
+        "| id | status |",                                    # line 9
+        "|---|---|",                                          # line 10
+        "| p1 | WIRED |",                                     # line 11
+    ])
+    parsed = parse_manifest_text(text)
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+
+
+def test_unknown_wired_token_is_unclear():
+    # D6: the wired column's own polarity — a token outside
+    # yes|true|✔|wired / no|false|✗|unwired is UNCLEAR, with the raw cell
+    # kept in rawStatus.
+    text = "\n".join([
+        "# Pathway Manifest — wired maybe",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | trigger | wired |",
+        "|---|---|---|",
+        "| p1 | onClick | maybe |",
+    ])
+    row = parse_manifest_text(text)["pathways"][0]
+    assert row["status"] == "UNCLEAR"
+    assert row["rawStatus"] == "maybe"
+
+
+def test_unknown_unwired_token_is_unclear():
+    # D6: the unwired column's inverted polarity — a token outside
+    # yes|true|⚠ / no|false is UNCLEAR and does not set the flag.
+    text = "\n".join([
+        "# Pathway Manifest — unwired maybe",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | trigger | unwired |",
+        "|---|---|---|",
+        "| p1 | onClick | maybe |",
+    ])
+    row = parse_manifest_text(text)["pathways"][0]
+    assert row["status"] == "UNCLEAR"
+    assert row["rawStatus"] == "maybe"
+    assert row["unwiredFlag"] is False
+
+
+def test_stray_file_in_the_fixtures_directory_does_not_fail_the_suite():
+    # D88: a stray file in the fixtures directory must not fail the suite —
+    # the fixture comparison asserts the REQUIRED fixtures are present and
+    # each has its expected values, never the exact iterdir() set. The two
+    # fixture-consuming tests are run as-is with the stray in place.
+    stray = FIXTURES / "stray-notes.txt"
+    stray.write_text("a stray file — not a fixture\n", encoding="utf-8")
+    try:
+        test_every_manifest_fixture_parses()
+        test_every_fixture_populates_every_key_main_populated()
+    finally:
+        stray.unlink(missing_ok=True)
+
+
+def test_permission_error_becomes_pathway_map_error(tmp_path, monkeypatch):
+    # D6/D88: an OSError on read (PermissionError) becomes PathwayMapError
+    # with no host path anywhere in the rendered exception chain — the
+    # branch raises `from None`, so the OS error (which names the path) is
+    # gone. D88: the deny is SCOPED to this manifest's read — patching
+    # Path.read_text wholesale blinds every other read for the whole
+    # test; the deny delegates to the real read_text everywhere else, and
+    # the test proves the scoping.
+    manifest = tmp_path / "manifest.md"
+    manifest.write_text("# Pathway Manifest\n", encoding="utf-8")
+    neighbour = tmp_path / "neighbour.md"
+    neighbour.write_text("# Neighbour\n", encoding="utf-8")
+    real_read_text = Path.read_text
+
+    def deny(self, *args, **kwargs):
+        if self == manifest:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", deny)
+    # The deny is scoped: another file in the same directory still reads.
+    assert neighbour.read_text(encoding="utf-8") == "# Neighbour\n"
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_md(manifest)
+    rendered = "".join(traceback.format_exception(
+        type(excinfo.value), excinfo.value, excinfo.value.__traceback__,
+    ))
+    assert str(tmp_path) not in rendered
+    assert excinfo.value.__cause__ is None
 
 
 def test_verifier_with_no_checks_is_refused():
@@ -326,8 +2018,9 @@ def test_full_manifest_extracts_plugins_suspicious_and_anti_patterns():
 
 
 def test_verifier_raw_keeps_the_source_text():
-    # D8 now refuses an empty-checks verifier, so the raw-text property is
-    # codified on the smallest map that still parses (one finding, one route).
+    # The verifier's no-pathways/no-routes refusal keeps an empty-checks
+    # map out, so the raw-text property is codified on the smallest map
+    # that still parses (one finding, one route).
     text = '{"checks": {"api-wiring": {"findings": [{"id": "f1", "path": "/api/x"}]}}}'
     parsed = parse_verifier_json_text(text)
     assert parsed["raw"] == text
@@ -502,3 +2195,998 @@ def test_file_field_is_basename_never_a_host_path(tmp_path):
     dumped = json.dumps(from_left)
     assert str(left) not in dumped
     assert str(right) not in dumped
+
+
+def test_refusals_are_a_structured_list():
+    # D49: the refusals are data, not prose. The module defines REFUSALS —
+    # a non-empty tuple of short names — and D79 writes the list out in
+    # the module docstring BY HAND (nothing renders it at import); this
+    # test asserts structure (every name appears in the docstring, the
+    # list is non-empty), never the wording of any entry, so rewording
+    # cannot go red and dropping a refusal cannot slip through unnoticed.
+    # Replaces the D33 substring test, which pinned ten literal phrases
+    # and went red on any rewording without protecting anything.
+    refusals = pathway_map.REFUSALS
+    assert isinstance(refusals, tuple)
+    assert refusals, "REFUSALS must be non-empty"
+    doc = pathway_map.__doc__ or ""
+    for name in refusals:
+        assert name in doc, f"module docstring must still name refusal: {name}"
+
+
+def test_count_table_recognised_in_either_column_order():
+    # D59: a count table is recognised in either column order — `| Count |
+    # Category |` over `| 5 | WIRED |` rows is the same header shape as
+    # `| Category | Count |` and yields the same counts; the unrecognised-
+    # header refusal lists BOTH accepted orders, because the shape check
+    # now recognises both.
+    normal_text = "\n".join([
+        "# Pathway Manifest — either column order",  # line 1
+        "",                                         # line 2
+        "## Status Overview",                       # line 3
+        "",                                         # line 4
+        "| Category | Count |",                     # line 5
+        "|---|---|",                                # line 6
+        "| **WIRED** | 5 |",                        # line 7
+        "| **TOTAL PATHWAYS** | 7 |",               # line 8
+        "",                                         # line 9
+        "## 1. Pathways Table",                     # line 10
+        "",                                         # line 11
+        "| id | status |",                          # line 12
+        "|---|---|",                                # line 13
+        "| p1 | WIRED |",                           # line 14
+    ])
+    reversed_text = "\n".join([
+        "# Pathway Manifest — either column order",
+        "",
+        "## Status Overview",
+        "",
+        "| Count | Category |",
+        "|---|---|",
+        "| 5 | **WIRED** |",
+        "| 7 | **TOTAL PATHWAYS** |",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+    ])
+    expected = {
+        "pathwaysTotal": 7, "wired": 5, "mocked": None, "unwired": None,
+        "incomplete": None, "unclear": None, "routesCount": None,
+        "pluginsCount": None,
+    }
+    assert parse_manifest_text(normal_text)["summary"] == expected
+    # Same data, columns reversed: the same counts — never an all-None
+    # summary with no error.
+    assert parse_manifest_text(reversed_text)["summary"] == expected
+
+    # The unrecognised-header refusal names both accepted orders...
+    thing_text = "\n".join([
+        "# Pathway Manifest — unrecognised count header",  # line 1
+        "",                                               # line 2
+        "## Status Overview",                             # line 3
+        "",                                               # line 4
+        "| Thing | Blah |",                               # line 5
+        "|---|---|",                                      # line 6
+        "| WIRED | 5 |",                                  # line 7
+        "",                                               # line 8
+        "## 1. Pathways Table",                           # line 9
+        "",                                               # line 10
+        "| id | status |",                                # line 11
+        "|---|---|",                                      # line 12
+        "| p1 | WIRED |",                                 # line 13
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(thing_text)
+    message = str(excinfo.value)
+    assert "category word first" in message
+    assert "count word first" in message
+
+
+def test_detection_never_aborts_on_an_unrelated_cell():
+    # D60: during DETECTION, a cell that refuses means "this is not a count
+    # row" — the refusal is caught and the row skipped, so an unrelated
+    # two-column table can never abort the whole document. The refusal
+    # itself still fires where a count is genuinely being read (a real
+    # count table's row, an anti-pattern count cell).
+    unrelated_text = "\n".join([
+        "# Pathway Manifest — unrelated two-column table",  # line 1
+        "",                                               # line 2
+        "## Notes",                                       # line 3
+        "",                                               # line 4
+        "| Thing | Blah |",                               # line 5
+        "|---|---|",                                      # line 6
+        "| foo | 2 5 |",                                  # line 7
+        "",                                               # line 8
+        "## 1. Pathways Table",                           # line 9
+        "",                                               # line 10
+        "| id | status |",                                # line 11
+        "|---|---|",                                      # line 12
+        "| p1 | WIRED |",                                 # line 13
+    ])
+    parsed = parse_manifest_text(unrelated_text)
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+    assert all(v is None for v in parsed["summary"].values())
+
+    # The refusing cell beside a count LABEL under an unrecognised header:
+    # the detection probe reaches `_count_from_cell` there, and the
+    # two-bare-integers refusal escaping detection kills the whole parse.
+    # A cell that refuses is not a count — the document must still parse.
+    labelled_text = unrelated_text.replace("| foo | 2 5 |", "| WIRED | 2 5 |")
+    parsed = parse_manifest_text(labelled_text)
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+    assert all(v is None for v in parsed["summary"].values())
+
+    # The same refusing cell inside a REAL count table still refuses —
+    # there the count is genuinely being read (D26 stands).
+    real_count_text = "\n".join([
+        "# Pathway Manifest — refusing cell in a real count table",
+        "",
+        "## Summary Counts",
+        "",
+        "| Category | Count |",
+        "|---|---|",
+        "| **WIRED** | 2 5 |",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(real_count_text)
+    assert "2 5" in str(excinfo.value)
+
+
+def test_duplicate_count_rows_refuse():
+    # D61/D87: two rows setting the same summary key refuse when the
+    # values CONFLICT — the rows disagree about a fact and the ambiguity
+    # is real. D87: identical duplicates are not ambiguous and collapse
+    # (one fact stated twice) —
+    # test_identical_duplicate_counts_collapse_conflicting_ones_refuse
+    # pins that half. The refusal names the key and both line numbers,
+    # mirroring the duplicate-pathway-id refusal; keeping the last row
+    # silently is exactly the half-fill this module refuses.
+    dup_conflict_text = "\n".join([
+        "# Pathway Manifest — duplicate count rows",  # line 1
+        "",                                         # line 2
+        "## Summary Counts",                        # line 3
+        "",                                         # line 4
+        "| Category | Count |",                     # line 5
+        "|---|---|",                                # line 6
+        "| **WIRED** | 5 |",                        # line 7
+        "| **WIRED** | 7 |",                        # line 8 — conflicts
+        "",                                         # line 9
+        "## 1. Pathways Table",                     # line 10
+        "",                                         # line 11
+        "| id | status |",                          # line 12
+        "|---|---|",                                # line 13
+        "| p1 | WIRED |",                           # line 14
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(dup_conflict_text)
+    message = str(excinfo.value)
+    assert "wired" in message
+    assert "line 7" in message
+    assert "line 8" in message
+
+
+def test_normalise_anti_pattern_docstring_matches_behaviour():
+    # D62: the documentation says "only an absent key becomes ''", but the
+    # behaviour is wider: a PRESENT None also becomes "" — None is not a
+    # value (D39's `is None` check treats it as absent). The docs must
+    # state the None case, not hide it.
+    # Behaviour first, through the public parse: a JSON null in the feed
+    # round-trips as "".
+    text = json.dumps({
+        "antiPatterns": [{"category": "nulled", "file": None, "line": None}],
+        "checks": {"api-wiring": {"findings": [{"id": "f1", "path": "/api/x"}]}},
+    })
+    parsed = parse_verifier_json_text(text)
+    assert parsed["antiPatterns"] == [
+        {"category": "nulled", "count": None, "file": "", "line": "", "quote": ""},
+    ]
+    # The docstring itself must name the None case — None becoming the
+    # empty string, not only the absent key.
+    doc = pathway_map._normalise_anti_pattern.__doc__ or ""
+    assert re.search(r"None[^.]*becomes[^.]*''", doc), (
+        "_normalise_anti_pattern's docstring must state that a present None "
+        "becomes '' (like an absent key) — it currently claims only the "
+        "absent-key case"
+    )
+
+
+def test_section_body_is_table_parsed_once(monkeypatch):
+    # D63: each section body is table-parsed ONCE for the extractors and the
+    # parsed tables are shared by every extractor — `_extract_summary` alone
+    # reparsed each section body, so a section was parsed up to six times.
+    # Proven with a counter, not a clock. D77: a section may be probed once
+    # more, refusal-free, BEFORE the extractors read it — the probe decides
+    # whether an extractor reads the section at all and is no extractor's
+    # re-parse; the bound is at most two `_extract_tables` calls per section
+    # for a fixture document.
+    raw = (FIXTURES / "pathway-manifest-sample.md").read_text(encoding="utf-8")
+    sections = pathway_map._split_sections(raw)
+    assert len(sections) > 1, "the fixture must have several sections"
+    calls = {"n": 0}
+    real = pathway_map._extract_tables
+
+    def counting(*args, **kwargs):
+        calls["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(pathway_map, "_extract_tables", counting)
+    parsed = parse_manifest_text(raw)
+    assert calls["n"] <= 2 * len(sections), (
+        f"_extract_tables called {calls['n']} times for {len(sections)} "
+        "sections — each section body must be table-parsed at most once for "
+        "the extractors plus one D77 refusal-free probe, the parsed tables "
+        "shared by every extractor"
+    )
+    # The parse itself is unchanged.
+    assert [p["id"] for p in parsed["pathways"]] == [
+        "capture-start", "capture-job-poll", "catalog-search",
+    ]
+
+
+def test_manifest_anti_pattern_row_without_category_refuses():
+    # D64: the flavours must agree — a declared anti-pattern with no usable
+    # category is REFUSED in both. The verifier entry refuses by index
+    # (D27); the manifest row refuses by its line. A silently skipped row
+    # returns a shorter array than the feed declared with no signal.
+    manifest_text = "\n".join([
+        "# Pathway Manifest — anti-pattern row without category",  # line 1
+        "",                                                      # line 2
+        "## 1. Pathways Table",                                  # line 3
+        "",                                                      # line 4
+        "| id | status |",                                       # line 5
+        "|---|---|",                                             # line 6
+        "| p1 | WIRED |",                                        # line 7
+        "",                                                      # line 8
+        "## 2. Anti-patterns",                                   # line 9
+        "",                                                      # line 10
+        "| Category | Count | File | Line | Quote |",             # line 11
+        "|---|---|---|---|---|",                                 # line 12
+        "| real-find | 3 | hub.ts | 88 | `export const x` |",     # line 13
+        "|  | 5 | hub.ts | 89 | `export const y` |",              # line 14 — no category
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(manifest_text)
+    message = str(excinfo.value)
+    assert "line 14" in message
+    assert "category" in message
+
+    # The verifier flavour already refuses such an entry by index (D27) —
+    # both flavours agree on the same input value.
+    verifier_text = json.dumps({
+        "antiPatterns": [{"category": "ok"}, {"count": 3}],
+        "checks": {"api-wiring": {"findings": [{"id": "f1", "path": "/api/x"}]}},
+    })
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_verifier_json_text(verifier_text)
+    assert "index 1" in str(excinfo.value)
+
+
+def test_reversed_order_probe_refuses_an_unrecognised_header():
+    # D65: the D38 unrecognised-header probe reads rows as (label, count)
+    # in the NORMAL column order only, so a REVERSED count table (count
+    # word first) under an unrecognised category header drops every count
+    # with no signal — the parse "succeeds" with an all-None summary.
+    # D59 taught the header SHAPE both orders; the probe must try both
+    # orders too, and the refusal names the header while its message lists
+    # both accepted orders.
+    text = "\n".join([
+        "# Pathway Manifest — reversed probe",       # line 1
+        "",                                         # line 2
+        "## Status Overview",                       # line 3
+        "",                                         # line 4
+        "| Count | Blah |",                         # line 5
+        "|---|---|",                                # line 6
+        "| 5 | **WIRED** |",                        # line 7 — count first
+        "",                                         # line 8
+        "## 1. Pathways Table",                     # line 9
+        "",                                         # line 10
+        "| id | status |",                          # line 11
+        "|---|---|",                                # line 12
+        "| p1 | WIRED |",                           # line 13
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(text)
+    message = str(excinfo.value)
+    assert "Count | Blah" in message          # names the offending header
+    assert "line 5" in message                # names the header row's line
+    assert "category word first" in message   # both accepted orders listed
+    assert "count word first" in message
+
+
+def test_more_than_one_extractor_may_read_the_same_table():
+    # D76: D66's exclusivity is withdrawn — main's rule returns. Each
+    # extractor claims a table by its OWN heading and header shape, and
+    # MORE THAN ONE extractor may read the same table: a count-shaped
+    # table (| Category | Count |) whose rows are count rows feeds BOTH
+    # the summary and the suspicious extractor under a suspicious heading.
+    # D86 narrows one intersection: under ## 2. Anti-patterns the
+    # count-shaped table feeds the summary ONLY — records are never
+    # fabricated from summary rows, so the anti-pattern reader there needs
+    # the record shape, not merely the heading.
+    # (Amends the D66 test, which pinned the withdrawn one-extractor rule;
+    # the restored assertions are a superset of what main populated.)
+    anti_text = "\n".join([
+        "# Pathway Manifest — one table, two readers",       # line 1
+        "",                                             # line 2
+        "## 1. Pathways Table",                         # line 3
+        "",                                             # line 4
+        "| id | status |",                              # line 5
+        "|---|---|",                                    # line 6
+        "| p1 | WIRED |",                               # line 7
+        "",                                             # line 8
+        "## 2. Anti-patterns",                          # line 9
+        "",                                             # line 10
+        "| Category | Count |",                         # line 11
+        "|---|---|",                                    # line 12
+        "| WIRED | 5 |",                                # line 13
+    ])
+    parsed = parse_manifest_text(anti_text)
+    # D86: the anti-pattern reader needs the record shape, not merely the
+    # heading — a count-shaped table under ## 2. Anti-patterns feeds the
+    # summary (D76's restoration stands) and fabricates NO antiPatterns
+    # entries; the summary extractor is its only reader now.
+    assert parsed["antiPatterns"] == []
+    assert parsed["summary"]["wired"] == 5
+
+    # Under ## Summary no heading-specific extractor matches, so only the
+    # summary extractor reads the count table — the anti-pattern and
+    # suspicious arrays stay empty.
+    summary_text = anti_text.replace("## 2. Anti-patterns", "## Summary")
+    parsed = parse_manifest_text(summary_text)
+    assert parsed["summary"]["wired"] == 5
+    assert parsed["antiPatterns"] == []
+    assert parsed["suspicious"] == []
+
+    # The same through the suspicious extractor: a count-shaped table
+    # under a suspicious heading feeds the suspicious array AND the
+    # summary — both keys populated, exactly as on main.
+    suspicious_text = anti_text.replace("## 2. Anti-patterns", "## Suspicious Calls")
+    parsed = parse_manifest_text(suspicious_text)
+    assert parsed["suspicious"] == [{"category": "WIRED", "count": "5"}]
+    assert parsed["summary"]["wired"] == 5
+
+
+def test_prose_ends_a_table_and_only_a_misaligned_row_refuses():
+    # D67: prose ends a table; only a row-shaped line that cannot align
+    # refuses. Three shapes:
+    #
+    #   * a row candidate — a line whose first non-space character is `|`
+    #     that splits into >=2 cells — that cannot align still refuses,
+    #     naming its line number (unchanged);
+    #   * a prose line that does not start with `|` and carries no pipe
+    #     ends the table — no error, no row;
+    #   * a line whose pipe never forms a second cell (a pipe inside a
+    #     code span) is not row-shaped and does not start with `|`: it is
+    #     prose too. Today such a legend line directly under a table is
+    #     REFUSED as a misaligned row, which breaks legends that used to
+    #     parse.
+    # A misaligned row is never let through as prose — the refusal stays
+    # exactly as wide as row-shaped lines.
+    misaligned_text = "\n".join([
+        "# Pathway Manifest — row candidate misaligned",  # line 1
+        "",                                             # line 2
+        "## 1. Pathways Table",                         # line 3
+        "",                                             # line 4
+        "| id | status |",                              # line 5
+        "|---|---|",                                    # line 6
+        "| p1 | WIRED |",                               # line 7
+        "| p2 | WIRED | extra |",                       # line 8 — 3 cells vs 2
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(misaligned_text)
+    message = str(excinfo.value)
+    assert "line 8" in message
+    assert "3 cells" in message
+    assert "header has 2" in message
+
+    prose_text = "\n".join([
+        "# Pathway Manifest — prose after the table",   # line 1
+        "",                                             # line 2
+        "## 1. Pathways Table",                         # line 3
+        "",                                             # line 4
+        "| id | status |",                              # line 5
+        "|---|---|",                                    # line 6
+        "| p1 | WIRED |",                               # line 7
+        "Total pathways: 1, all wired.",                # line 8 — prose, no pipe
+    ])
+    parsed = parse_manifest_text(prose_text)
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+
+    legend_text = "\n".join([
+        "# Pathway Manifest — legend under the table",  # line 1
+        "",                                             # line 2
+        "## 1. Pathways Table",                         # line 3
+        "",                                             # line 4
+        "| id | status |",                              # line 5
+        "|---|---|",                                    # line 6
+        "| p1 | WIRED |",                               # line 7
+        "the flags are `WIRED | MOCKED` here",          # line 8 — pipe in a code span
+    ])
+    parsed = parse_manifest_text(legend_text)
+    # The legend is prose: the table ends, the legend is no row, no error.
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+
+
+def test_malformed_tables_outside_a_consumed_section_are_ignored():
+    # D77: a refusal fires only where an extractor is reading. `## Notes`
+    # is free prose no extractor reads: the malformed table below is
+    # shapeless (`| Thing | Blah |`) and its rows are no count rows, so no
+    # extractor reads it — the misaligned row there is IGNORED and the
+    # document parses to its real values. The SAME malformed table under
+    # `## Summary` — a section the summary extractor reads — still refuses
+    # with the same message as before D77. An unbalanced backtick in an
+    # `## Appendix` table is ignored the same way. (A count-SHAPED table
+    # under Notes is a different case: the summary extractor reads count
+    # tables wherever they sit, D24, so that refusal is kept.)
+    notes_text = "\n".join([
+        "# Pathway Manifest — malformed table under Notes",  # line 1
+        "",                                                # line 2
+        "## Summary Counts",                               # line 3
+        "",                                                # line 4
+        "| Category | Count |",                            # line 5
+        "|---|---|",                                       # line 6
+        "| **WIRED** | 2 |",                               # line 7
+        "",                                                # line 8
+        "## 1. Pathways Table",                            # line 9
+        "",                                                # line 10
+        "| id | status |",                                 # line 11
+        "|---|---|",                                       # line 12
+        "| p1 | WIRED |",                                  # line 13
+        "",                                                # line 14
+        "## Notes",                                        # line 15
+        "",                                                # line 16
+        "| Thing | Blah |",                                # line 17
+        "|---|---|",                                       # line 18
+        "| alpha | 5 | extra |",                           # line 19 — misaligned
+    ])
+    parsed = parse_manifest_text(notes_text)
+    assert parsed["summary"]["wired"] == 2
+    assert all(
+        v is None for k, v in parsed["summary"].items() if k != "wired"
+    )
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+
+    # The same malformed table under ## Summary still refuses, same message.
+    summary_text = notes_text.replace("## Notes", "## Summary")
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(summary_text)
+    message = str(excinfo.value)
+    assert "line 19" in message
+    assert "3 cells" in message
+    assert "header has 2" in message
+
+    # An unbalanced backtick in an ## Appendix table is ignored too: the
+    # appendix table is shapeless with no count rows, so no extractor
+    # reads the section and the document parses.
+    appendix_text = "\n".join([
+        "# Pathway Manifest — unbalanced backtick in Appendix",  # line 1
+        "",                                                      # line 2
+        "## 1. Pathways Table",                                  # line 3
+        "",                                                      # line 4
+        "| id | status |",                                       # line 5
+        "|---|---|",                                             # line 6
+        "| p1 | WIRED |",                                        # line 7
+        "",                                                      # line 8
+        "## Appendix",                                           # line 9
+        "",                                                      # line 10
+        "| Thing | Blah |",                                      # line 11
+        "|---|---|",                                             # line 12
+        "| alpha | `beta | gamma |",                             # line 13
+    ])
+    parsed = parse_manifest_text(appendix_text)
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+
+
+def test_section_consumption_is_derived_from_the_extractors():
+    # D84: ONE source of truth — `_section_is_consumed` must not
+    # re-implement the extractors' gates. Pinned BOTH ways over every
+    # section of every manifest fixture and of a purpose-built document:
+    #
+    #   * a section the rule calls UNCONSUMED is one every extractor
+    #     returns nothing from — its probe tables feed no extractor, so
+    #     nothing in it can be silently dropped;
+    #   * a section the rule calls CONSUMED is one at least one extractor
+    #     reads — returns data from its probe tables, or refuses on them,
+    #     or whose heading names one of the manifest's declared structures
+    #     (the extractors' own heading vocabulary plus the summary,
+    #     pathway and route section names — D77's strictness policy, whose
+    #     refusal behaviour is pinned by the ## Summary branch above and
+    #     not re-stated here).
+    #
+    # The drift this catches: the rule's pathways branch missed the `rank`
+    # column check the pathways extractor has, so a `| rank | id | status |`
+    # table under a neutral heading was "consumed" by the rule while no
+    # extractor read it — a table the rule refused on but nothing parsed.
+    def extractor_reads(heading: str | None, tables: list[dict]) -> bool:
+        """The extractors' own verdict: does one of them read this
+        section — return data from its tables, or refuse on them?"""
+        sections = [({"heading": heading}, tables)]
+        try:
+            summary = pathway_map._extract_summary(sections)
+        except PathwayMapError:
+            return True
+        if any(value is not None for value in summary.values()):
+            return True
+        for extract in (
+            pathway_map._extract_pathways,
+            pathway_map._extract_routes,
+            pathway_map._extract_plugins,
+            pathway_map._extract_suspicious,
+            pathway_map._extract_anti_patterns,
+        ):
+            try:
+                if extract(sections):
+                    return True
+            except PathwayMapError:
+                return True
+        return False
+
+    def extractors_return_nothing(heading: str | None, tables: list[dict]) -> bool:
+        sections = [({"heading": heading}, tables)]
+        summary = pathway_map._extract_summary(sections)
+        if any(value is not None for value in summary.values()):
+            return False
+        for extract in (pathway_map._extract_pathways,
+                        pathway_map._extract_routes,
+                        pathway_map._extract_plugins,
+                        pathway_map._extract_suspicious,
+                        pathway_map._extract_anti_patterns):
+            if extract(sections):
+                return False
+        return True
+
+    documents: list[tuple[str, str]] = []
+    for fixture in sorted(FIXTURES.glob("*.md")):
+        documents.append((fixture.name, fixture.read_text(encoding="utf-8")))
+    documents.append(("purpose-built", "\n".join([
+        "# Pathway Manifest — consumption equivalence",   # line 1
+        "",                                               # line 2
+        "## Summary Counts",                              # line 3
+        "",                                               # line 4
+        "| Category | Count |",                           # line 5
+        "|---|---|",                                      # line 6
+        "| **WIRED** | 2 |",                              # line 7
+        "",                                               # line 8
+        "## 1. Pathways Table",                           # line 9
+        "",                                               # line 10
+        "| id | status |",                                # line 11
+        "|---|---|",                                      # line 12
+        "| p1 | WIRED |",                                 # line 13
+        "",                                               # line 14
+        "## Routes",                                      # line 15
+        "",                                               # line 16
+        "| path | method |",                              # line 17
+        "|---|---|",                                      # line 18
+        "| /api/x | GET |",                               # line 19
+        "",                                               # line 20
+        "## Endpoint Inventory",                          # line 21
+        "",                                               # line 22
+        "| path | handler |",                             # line 23
+        "|---|---|",                                      # line 24
+        "| /api/y | api.py:1 |",                          # line 25
+        "",                                               # line 26
+        "## Coverage",                                    # line 27
+        "",                                               # line 28
+        "| id | status |",                                # line 29
+        "|---|---|",                                      # line 30
+        "| p2 | MOCKED |",                                # line 31
+        "",                                               # line 32
+        "## Comparison",                                  # line 33
+        "",                                               # line 34
+        "| rank | id | status |",                         # line 35
+        "|---|---|---|",                                  # line 36
+        "| 1 | p3 | WIRED |",                             # line 37
+        "",                                               # line 38
+        "## Notes",                                       # line 39
+        "",                                               # line 40
+        "| Thing | Blah |",                               # line 41
+        "|---|---|",                                      # line 42
+        "| alpha | beta |",                               # line 43
+        "",                                               # line 44
+        "## Plugins",                                     # line 45
+        "",                                               # line 46
+        "| Name | Kind |",                                # line 47
+        "|---|---|",                                      # line 48
+        "| rested | core plugin |",                       # line 49
+        "",                                               # line 50
+        "## Suspicious Calls",                            # line 51
+        "",                                               # line 52
+        "| Call | Location |",                            # line 53
+        "|---|---|",                                      # line 54
+        "| `eval(` | view.jsx:1 |",                       # line 55
+        "",                                               # line 56
+        "## 2. Anti-patterns",                            # line 57
+        "",                                               # line 58
+        "| Category | Count | File | Line | Quote |",     # line 59
+        "|---|---|---|---|---|",                          # line 60
+        "| duplicate-fetch | 3 | hub.ts | 88 | `fetch(x)` |",  # line 61
+    ])))
+    for name, raw in documents:
+        for sec in pathway_map._split_sections(raw):
+            heading = sec["heading"]
+            probe = pathway_map._extract_tables(
+                "\n".join(sec["body"]), sec["start"] + 1, refuse=False,
+                row_lines=True,
+            )
+            consumed = pathway_map._section_is_consumed(heading, probe)
+            if consumed:
+                assert (
+                    extractor_reads(heading, probe)
+                    or pathway_map._CONSUMED_SECTION_RE.search(str(heading or ""))
+                ), (
+                    f"{name}: section {heading!r} is consumed by the rule but no "
+                    "extractor reads it — the rule re-implements the extractors' "
+                    "gates instead of deriving from them (D84)"
+                )
+            else:
+                assert extractors_return_nothing(heading, probe), (
+                    f"{name}: section {heading!r} is unconsumed by the rule but an "
+                    "extractor returns data from its tables — a silent drop (D84)"
+                )
+
+
+def test_routes_table_in_an_unconsumed_section_is_ignored_and_in_its_own_section_is_read():
+    # D84 (the routes branch of the consumption rule, Apollo's HIGH):
+    # the branch reads a routes-shaped table under a heading no extractor
+    # gate names — and it must not read a near-miss: a malformed table
+    # whose headers do not match the routes gate stays unconsumed under
+    # ## Notes, its misaligned row ignored, the document parsing (D77).
+    near_miss = "\n".join([
+        "# Pathway Manifest — routes near-miss under Notes",  # line 1
+        "",                                                   # line 2
+        "## 1. Pathways Table",                               # line 3
+        "",                                                   # line 4
+        "| id | status |",                                    # line 5
+        "|---|---|",                                          # line 6
+        "| p1 | WIRED |",                                     # line 7
+        "",                                                   # line 8
+        "## Notes",                                           # line 9
+        "",                                                   # line 10
+        "| Path name | Method |",                             # line 11 — not ^path$
+        "|---|---|",                                          # line 12
+        "| /api/x | GET | extra |",                           # line 13 — misaligned
+    ])
+    parsed = parse_manifest_text(near_miss)
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+    assert parsed["routes"] == []  # ignored, not read and not refused
+
+    # The real routes table under its own section is still read — and so
+    # is one under a heading no gate names, which is what the branch is
+    # FOR (a regression here silently drops the routes).
+    own_section = "\n".join([
+        "# Pathway Manifest — routes in their own section",  # line 1
+        "",                                                  # line 2
+        "## Routes",                                         # line 3
+        "",                                                  # line 4
+        "| path | method |",                                 # line 5
+        "|---|---|",                                         # line 6
+        "| /api/x | GET |",                                  # line 7
+    ])
+    parsed = parse_manifest_text(own_section)
+    assert [(r["method"], r["path"]) for r in parsed["routes"]] == [
+        ("GET", "/api/x"),
+    ]
+
+    parsed = parse_manifest_text(own_section.replace("## Routes", "## Flows"))
+    assert [(r["method"], r["path"]) for r in parsed["routes"]] == [
+        ("GET", "/api/x"),
+    ]
+
+
+def test_pathways_table_in_an_unconsumed_section_is_ignored_and_in_its_own_section_is_read():
+    # D84 (the pathways branch): a pathways table under its own section is
+    # read, one under a heading no gate names is read by the branch, and
+    # the branch must not read a near-miss (an `identifier` header the
+    # has_id anchor rejects) nor a table under a heading the pathways
+    # extractor itself excludes — Apollo's negative case.
+    near_miss = "\n".join([
+        "# Pathway Manifest — pathways near-miss under Notes",  # line 1
+        "",                                                     # line 2
+        "## 1. Pathways Table",                                 # line 3
+        "",                                                     # line 4
+        "| id | status |",                                      # line 5
+        "|---|---|",                                            # line 6
+        "| p1 | WIRED |",                                       # line 7
+        "",                                                     # line 8
+        "## Notes",                                             # line 9
+        "",                                                     # line 10
+        "| Identifier | Status |",                              # line 11 — not ^id$
+        "|---|---|",                                            # line 12
+        "| p9 | WIRED | extra |",                               # line 13 — misaligned
+    ])
+    parsed = parse_manifest_text(near_miss)
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+
+    # The real pathways table under its own section, and under a heading
+    # no gate names, is still read.
+    own_section = "\n".join([
+        "# Pathway Manifest — pathways in their own section",  # line 1
+        "",                                                    # line 2
+        "## Pathways",                                         # line 3
+        "",                                                    # line 4
+        "| id | status |",                                     # line 5
+        "|---|---|",                                           # line 6
+        "| p1 | WIRED |",                                      # line 7
+    ])
+    parsed = parse_manifest_text(own_section)
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+
+    parsed = parse_manifest_text(own_section.replace("## Pathways", "## Flows"))
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+
+    # Under a heading the pathways extractor itself excludes, the same
+    # table is NOT extracted — ignored, not refused (Apollo's negative).
+    excluded = "\n".join([
+        "# Pathway Manifest — pathways under an excluded heading",  # line 1
+        "",                                                         # line 2
+        "## Open Questions",                                        # line 3
+        "",                                                         # line 4
+        "| id | status |",                                          # line 5
+        "|---|---|",                                                # line 6
+        "| p1 | WIRED |",                                           # line 7
+    ])
+    probed = [
+        (sec, pathway_map._extract_tables(
+            "\n".join(sec["body"]), sec["start"] + 1, refuse=False,
+            row_lines=True,
+        ))
+        for sec in pathway_map._split_sections(excluded)
+    ]
+    assert pathway_map._extract_pathways(probed) == []
+
+
+def test_count_shaped_tables_never_silently_drop():
+    # D85: a table that is count-shaped by intent — two columns, a count
+    # word in a header cell, or a row that reads as a count row — must
+    # never be silently ignored because it sits under a heading no
+    # extractor reads or its header collapsed. A collapsed header over a
+    # separator and a two-column table with no separator both REFUSE,
+    # naming the section and the line, exactly as a consumed section's own
+    # refusal would; a shapeless table with no count anywhere under the
+    # same heading still parses (D77 stands).
+    collapsed = "\n".join([
+        "# Pathway Manifest — collapsed count header under Notes",  # line 1
+        "",                                                         # line 2
+        "## 1. Pathways Table",                                     # line 3
+        "",                                                         # line 4
+        "| id | status |",                                          # line 5
+        "|---|---|",                                                # line 6
+        "| p1 | WIRED |",                                           # line 7
+        "",                                                         # line 8
+        "## Notes",                                                 # line 9
+        "",                                                         # line 10
+        "| Category `Count |",                                      # line 11 — collapsed
+        "|---|---|",                                                # line 12
+        "| WIRED | 3 |",                                            # line 13
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(collapsed)
+    message = str(excinfo.value)
+    assert "Notes" in message    # names the section
+    assert "line 11" in message  # names the line
+    assert "count" in message    # names why: counts sit here unread
+
+    noseparator = "\n".join([
+        "# Pathway Manifest — count table without a separator",  # line 1
+        "",                                                      # line 2
+        "## 1. Pathways Table",                                  # line 3
+        "",                                                      # line 4
+        "| id | status |",                                       # line 5
+        "|---|---|",                                             # line 6
+        "| p1 | WIRED |",                                        # line 7
+        "",                                                      # line 8
+        "## Appendix",                                           # line 9
+        "",                                                      # line 10
+        "| Category | Count |",                                  # line 11
+        "| WIRED | 3 |",                                         # line 12 — no separator
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(noseparator)
+    message = str(excinfo.value)
+    assert "Appendix" in message
+    assert "line 11" in message
+
+    # D77 stands: a shapeless table with no count anywhere under the same
+    # heading still parses.
+    shapeless = "\n".join([
+        "# Pathway Manifest — shapeless table under Notes",  # line 1
+        "",                                                  # line 2
+        "## 1. Pathways Table",                              # line 3
+        "",                                                  # line 4
+        "| id | status |",                                   # line 5
+        "|---|---|",                                         # line 6
+        "| p1 | WIRED |",                                    # line 7
+        "",                                                  # line 8
+        "## Notes",                                          # line 9
+        "",                                                  # line 10
+        "| Thing | Blah |",                                  # line 11
+        "|---|---|",                                         # line 12
+        "| alpha | beta |",                                  # line 13
+    ])
+    parsed = parse_manifest_text(shapeless)
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+    assert all(value is None for value in parsed["summary"].values())
+
+
+def test_anti_pattern_records_are_never_fabricated():
+    # D86: a record is never fabricated — a count-shaped table under an
+    # anti-patterns heading is the summary extractor's (D24: its rows are
+    # summary rows wherever the table sits); the heading alone fabricates
+    # no antiPatterns entries from them. The real anti-pattern table in
+    # the same document still yields its records (D68's shapes keep their
+    # reading).
+    text = "\n".join([
+        "# Pathway Manifest — counts under anti-patterns",   # line 1
+        "",                                                  # line 2
+        "## 1. Pathways Table",                              # line 3
+        "",                                                  # line 4
+        "| id | status |",                                   # line 5
+        "|---|---|",                                         # line 6
+        "| p1 | WIRED |",                                    # line 7
+        "",                                                  # line 8
+        "## 2. Anti-patterns",                               # line 9
+        "",                                                  # line 10
+        "| Category | Count |",                              # line 11 — count-shaped
+        "|---|---|",                                         # line 12
+        "| WIRED | 5 |",                                     # line 13
+        "",                                                  # line 14
+        "| Category | Count | File | Line | Quote |",        # line 15 — real shape
+        "|---|---|---|---|---|",                             # line 16
+        "| duplicate-fetch | 3 | hub.ts | 88 | `fetch(x)` |",  # line 17
+    ])
+    parsed = parse_manifest_text(text)
+    assert parsed["summary"]["wired"] == 5  # D76's restoration stands
+    assert parsed["antiPatterns"] == [
+        {"category": "duplicate-fetch", "count": 3, "file": "hub.ts",
+         "line": "88", "quote": "`fetch(x)`"},
+    ]
+
+
+def test_identical_duplicate_counts_collapse_conflicting_ones_refuse():
+    # D87 (amends D61): identical duplicate count rows are not ambiguous —
+    # one count named twice is the same fact stated twice — and they
+    # collapse. Conflicting duplicates still refuse: there the rows
+    # disagree about a fact and the ambiguity is real. The refusal names
+    # the key and both line numbers, mirroring the duplicate-pathway-id
+    # refusal.
+    identical = "\n".join([
+        "# Pathway Manifest — identical duplicate count rows",  # line 1
+        "",                                                     # line 2
+        "## Summary Counts",                                    # line 3
+        "",                                                     # line 4
+        "| Category | Count |",                                 # line 5
+        "|---|---|",                                            # line 6
+        "| **WIRED** | 5 |",                                    # line 7
+        "| **WIRED** | 5 |",                                    # line 8 — same value
+        "",                                                     # line 9
+        "## 1. Pathways Table",                                 # line 10
+        "",                                                     # line 11
+        "| id | status |",                                      # line 12
+        "|---|---|",                                            # line 13
+        "| p1 | WIRED |",                                       # line 14
+    ])
+    parsed = parse_manifest_text(identical)
+    assert parsed["summary"]["wired"] == 5
+
+    conflict = identical.replace(
+        "| **WIRED** | 5 |\n| **WIRED** | 5 |",
+        "| **WIRED** | 5 |\n| **WIRED** | 7 |",
+    )
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(conflict)
+    message = str(excinfo.value)
+    assert "wired" in message
+    assert "line 7" in message
+    assert "line 8" in message
+
+
+def test_anti_pattern_category_aliases_normalise():
+    # D68: the category aliases (`anti-pattern`, `pattern`) land in the
+    # canonical `category` field. The verifier flavour routes every
+    # declared entry through the shared normaliser, and the manifest
+    # flavour builds its entries from the table's headers — the aliases
+    # must land in both, on the same input value (D18).
+    verifier_text = json.dumps({
+        "antiPatterns": [
+            {"anti-pattern": "duplicate-fetch", "count": 3},
+            {"pattern": "console-noise"},
+        ],
+        "checks": {"api-wiring": {"findings": [{"id": "f1", "path": "/api/x"}]}},
+    })
+    parsed = parse_verifier_json_text(verifier_text)
+    assert [a["category"] for a in parsed["antiPatterns"]] == [
+        "duplicate-fetch", "console-noise",
+    ]
+    assert parsed["antiPatterns"][0]["count"] == 3
+
+    manifest_text = "\n".join([
+        "# Pathway Manifest — category aliases",      # line 1
+        "",                                           # line 2
+        "## 1. Pathways Table",                       # line 3
+        "",                                           # line 4
+        "| id | status |",                            # line 5
+        "|---|---|",                                  # line 6
+        "| p1 | WIRED |",                             # line 7
+        "",                                           # line 8
+        "## 2. Anti-patterns",                        # line 9
+        "",                                           # line 10
+        "| Anti-Pattern | Count |",                   # line 11
+        "|---|---|",                                  # line 12
+        "| dup-fetch | 3 |",                          # line 13
+    ])
+    assert parse_manifest_text(manifest_text)["antiPatterns"] == [
+        {"category": "dup-fetch", "count": 3, "file": "", "line": "", "quote": ""},
+    ]
+
+
+def test_anti_pattern_quote_aliases_normalise():
+    # D68: the quote aliases (`snippet`, `code`) land in the canonical
+    # `quote` field — the same normaliser serves both flavours, so the
+    # aliases land in both on the same input value (D18).
+    verifier_text = json.dumps({
+        "antiPatterns": [
+            {"category": "duplicate-fetch", "snippet": "fetch(url)"},
+            {"category": "console-noise", "code": "console.log(x)"},
+        ],
+        "checks": {"api-wiring": {"findings": [{"id": "f1", "path": "/api/x"}]}},
+    })
+    parsed = parse_verifier_json_text(verifier_text)
+    assert [a["quote"] for a in parsed["antiPatterns"]] == [
+        "fetch(url)", "console.log(x)",
+    ]
+
+    for header, quote in (("| Category | Snippet |", "fetch(url)"),
+                          ("| Category | Code |", "console.log(x)")):
+        manifest_text = "\n".join([
+            "# Pathway Manifest — quote aliases",      # line 1
+            "",                                       # line 2
+            "## 1. Pathways Table",                   # line 3
+            "",                                       # line 4
+            "| id | status |",                        # line 5
+            "|---|---|",                              # line 6
+            "| p1 | WIRED |",                         # line 7
+            "",                                       # line 8
+            "## 2. Anti-patterns",                    # line 9
+            "",                                       # line 10
+            header,                                   # line 11
+            "|---|---|",                              # line 12
+            f"| dup-fetch | {quote} |",               # line 13
+        ])
+        assert parse_manifest_text(manifest_text)["antiPatterns"] == [
+            {"category": "dup-fetch", "count": None, "file": "", "line": "",
+             "quote": quote},
+        ]
+
+
+def test_docstring_is_static_and_refusals_are_text():
+    # D79: the module docstring is static — nothing appends the refusal
+    # list to `__doc__` at import (under `python -OO` that mutation
+    # replaced the whole docstring with the list alone). REFUSALS stays a
+    # module constant and the docstring states the list as text in the
+    # source module, so the two can be compared line for line: importing
+    # the module must not change `__doc__` away from the docstring found
+    # in the source file.
+    source = Path(pathway_map.__file__).read_text(encoding="utf-8")
+    # The docstring AS FOUND in the source file — the raw string literal,
+    # not ast.get_docstring's cleaned copy (which strips the trailing
+    # newline and would never equal the module's own ``__doc__``).
+    raw_docstring = ast.parse(source).body[0].value.value
+    assert raw_docstring, "the source module must carry a docstring"
+    # Importing the module did not change the docstring. (Under
+    # ``python -OO`` there is no module ``__doc__`` at all — stripped at
+    # compile time, nothing to mutate; the text-in-source assertion below
+    # is the D79 guarantee that still holds.)
+    if pathway_map.__doc__ is not None:
+        assert pathway_map.__doc__ == raw_docstring
+    # Every refusal entry appears in the docstring as text.
+    for refusal in pathway_map.REFUSALS:
+        assert refusal in raw_docstring, refusal
