@@ -83,7 +83,23 @@ inside a section no extractor reads is never silently dropped: it
 refuses naming the section and the line, exactly as a consumed section's
 own refusal would. The count vocabulary is the summary's own (count
 words in header cells, count rows in the body); a shapeless table with
-no count anywhere still parses untouched (D77).
+no count anywhere still parses untouched (D77). D89: the symmetry runs
+in the safe direction — the same scan runs in a CONSUMED section too,
+after the strict parse: a count-shaped construct the parser cannot
+build refuses there exactly as D85 refuses it in an unconsumed one —
+never an all-None summary with no error, which is a silent drop: the
+caller cannot tell "no counts" from "counts I could not read". The
+scan fires only where no table was built, so no refusal that fires
+today is displaced. D105: a fenced code region (``` or ~~~) is PROSE —
+no line inside one is ever table-parsed, counted or refused, in any
+section, and the scan skips it too: a manifest that shows a
+table-shaped example inside a code fence parses with that block
+contributing nothing, while the same construct outside the fence still
+refuses (D85/D89) or counts (D24). D106: the scan is the LAST refusal
+in the parse — it runs only after every strict parse and every
+extractor has had its refusal — so for every construct that refused
+before D89 the refusal that fires is the strict parser's own, same
+class and same message: a scan that cannot pre-empt cannot displace.
 
 Refusals — every one of these constructs raises ``PathwayMapError``
 rather than half-fill. The list is data (``REFUSALS`` below, D49) and
@@ -116,6 +132,7 @@ nulls. The list, written out:
 * an unrecognised count-table header over count rows
 * a count cell of two bare integers
 * a conflicting count row
+* a truncated row_lines list
 """
 
 from __future__ import annotations
@@ -156,6 +173,7 @@ REFUSALS: tuple[str, ...] = (
     "an unrecognised count-table header over count rows",
     "a count cell of two bare integers",
     "a conflicting count row",
+    "a truncated row_lines list",
 )
 
 _ROUTE_METHOD_RE = re.compile(
@@ -413,21 +431,17 @@ def parse_manifest_text(raw: str, source: str = "<pasted manifest>") -> dict[str
         body = "\n".join(sec["body"])
         probe = _extract_tables(body, sec["start"] + 1, refuse=False)
         if _section_is_consumed(sec["heading"], probe):
-            parsed_sections.append(
-                (sec, _extract_tables(body, sec["start"] + 1, row_lines=True))
-            )
+            # The strict parse raises here, before anything else in the
+            # document can refuse — the misaligned-row, unbalanced-backtick
+            # and unrecognised-count-header refusals are the strict
+            # parser's own and fire first (D106).
+            tables = _extract_tables(body, sec["start"] + 1, row_lines=True)
+            parsed_sections.append((sec, tables))
         else:
-            # D85: a count-shaped-by-intent construct the parser cannot
-            # build (a collapsed header over a separator, a two-column run
-            # of pipe lines with no separator) never silently drops its
-            # counts in a section no extractor reads — refuse, naming the
-            # section and the line, exactly as a consumed section's own
-            # refusal would. A shapeless table with no count anywhere
-            # still parses untouched (D77).
-            section_name = str(sec["heading"]) if sec["heading"] else "(document top)"
-            refusal = _count_intent_refusal(sec["body"], sec["start"] + 1, section_name)
-            if refusal is not None:
-                raise PathwayMapError(refusal)
+            # An unconsumed section contributes no tables and its
+            # malformed rows are ignored, not refused (D77) — its
+            # unbuildable count constructs are the scan's business, and
+            # the scan runs last (D106, below).
             parsed_sections.append((sec, []))
     parsed = {
         "raw": raw,
@@ -456,6 +470,29 @@ def parse_manifest_text(raw: str, source: str = "<pasted manifest>") -> dict[str
             "text does not look like a pathway manifest — no pathways or routes "
             "table found (expected markdown headings and pipe tables)"
         )
+    # D85/D89's scan, run LAST (D106): D85's symmetry in the safe
+    # direction — the scan covers EVERY section, consumed or not. A
+    # count-shaped construct the table parser cannot build (a two-column
+    # run of pipe lines with no separator, or a header collapsed to fewer
+    # than two cells over a two-column separator) built no table, so no
+    # extractor gate ever saw it and its counts would read as all-None —
+    # the silent drop D85 forbids. It refuses here, naming the section
+    # and the line, exactly as a consumed section's own strict refusal
+    # would. Running it after EVERY strict parse and every extractor (and
+    # the no-pathways check above) pins the ordering invariant: for every
+    # construct that refused before D89 — a misaligned row, an
+    # unbalanced backtick, an unrecognised count header, a
+    # duplicate/conflicting count — the refusal that fires is the strict
+    # parser's own, same class and same message; a scan that cannot
+    # pre-empt cannot displace. The scan judges only constructs the
+    # table parser cannot build, so it changes no read any extractor
+    # makes, and a document with no other defect still refuses here
+    # (D85/D89 stand).
+    for sec in sections:
+        section_name = str(sec["heading"]) if sec["heading"] else "(document top)"
+        refusal = _count_intent_refusal(sec["body"], sec["start"] + 1, section_name)
+        if refusal is not None:
+            raise PathwayMapError(refusal)
     return parsed
 
 
@@ -807,34 +844,62 @@ def _status_from_finding(check_name: str, finding: dict[str, Any]) -> str:
     return "UNCLEAR"
 
 
-def _split_sections(raw: str) -> list[dict[str, Any]]:
-    """Split into heading sections. Heading matches inside a fenced code
-    block (``` or ~~~) are ignored — a ``# comment`` in a fence must not
-    carve out a phantom section and gut the table above it. Each section
-    carries ``start``: the 0-based index of its first body line in ``raw``,
-    so a refused table row can name its line number in the input."""
-    lines = raw.split("\n")
-    sections: list[dict[str, Any]] = []
-    current: dict[str, Any] | None = None
-    open_fence: str | None = None  # the opening marker, e.g. "```" or "~~~"
+# D105: the one fence rule, shared by `_split_sections` (a heading inside
+# a fence never splits a section), `_extract_tables` and
+# `_count_intent_refusal` (no line inside a fence is ever table-parsed,
+# counted or refused). The rule is GFM's, as `_split_sections` has always
+# applied it: a fence opens with a run of at least three backticks or
+# tildes (optionally indented, an info string may follow) and closes with
+# a bare run of the SAME marker at least as long; an unclosed fence runs
+# to the end of the text.
+_FENCE_OPEN_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+
+
+def _fence_mask(lines: list[str]) -> list[bool]:
+    """D105: True for every line inside a fenced code region — the opening
+    and closing marker lines included, an unclosed fence running to the
+    end. One source of truth for every reader of a section body (the
+    section splitter, the table parser and the count-intent scan), so the
+    three can never disagree about where a fence sits and a fenced block
+    is prose to all of them alike."""
+    mask = [False] * len(lines)
+    open_fence: str | None = None
     for idx, line in enumerate(lines):
-        fence_match = re.match(r"^\s*(`{3,}|~{3,})", line)
         if open_fence is None:
+            fence_match = _FENCE_OPEN_RE.match(line)
             if fence_match:
                 open_fence = fence_match.group(1)
-            else:
-                match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
-                if match:
-                    if current:
-                        sections.append(current)
-                    current = {"heading": match.group(2).strip(), "level": len(match.group(1)), "body": [], "start": idx + 1}
-                    continue
+                mask[idx] = True
         else:
+            mask[idx] = True
             # A closing fence is a bare run of the same marker, at least as
-            # long as the opening one; fenced lines stay in the body.
+            # long as the opening one.
             stripped = line.strip()
             if stripped and set(stripped) == {open_fence[0]} and len(stripped) >= len(open_fence):
                 open_fence = None
+    return mask
+
+
+def _split_sections(raw: str) -> list[dict[str, Any]]:
+    """Split into heading sections. D105: heading matches inside a fenced
+    code block (``` or ~~~) are ignored — a ``# comment`` in a fence must
+    not carve out a phantom section and gut the table above it — via the
+    one fence rule `_fence_mask` also serves to `_extract_tables` and the
+    count-intent scan. Each section carries ``start``: the 0-based index
+    of its first body line in ``raw``, so a refused table row can name
+    its line number in the input."""
+    lines = raw.split("\n")
+    mask = _fence_mask(lines)
+    sections: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    for idx, line in enumerate(lines):
+        if not mask[idx]:
+            match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+            if match:
+                if current:
+                    sections.append(current)
+                current = {"heading": match.group(2).strip(), "level": len(match.group(1)), "body": [], "start": idx + 1}
+                continue
         if current is not None:
             current["body"].append(line)
         else:
@@ -844,6 +909,34 @@ def _split_sections(raw: str) -> list[dict[str, Any]]:
     return sections
 
 
+def _row_reference(row_lines: list[int] | None, row_position: int) -> str:
+    """D90/D107: the one total read of a table's row lines. The key exists
+    only when `_extract_tables` ran with ``row_lines=True`` — the manifest's
+    strict parse always does (D61), so no production caller reaches the
+    extractors without it — but the extractors must not ASSUME it: when
+    the key is absent the reference is the row's 1-based position within
+    the table, honestly named as a row (D90; the D107 test asserts that
+    output, not merely its execution). A ``KeyError`` is never raised,
+    and a line number is never fabricated where none was parsed. D107: a
+    list that IS present but has no entry for the referenced row
+    disagrees with the table's own rows — a misalignment inside the
+    table dict, the same class of defect as a misaligned row — and
+    refuses with a named message instead of silently downgrading to a
+    row reference: line data that exists but disagrees is a lie, and
+    this module refuses rather than half-fill. (Before D90 the same
+    shape raised IndexError — the named refusal restores a loud failure,
+    it does not invent one.)"""
+    if row_lines is None:
+        return f"row {row_position + 1}"
+    if row_position >= len(row_lines):
+        raise PathwayMapError(
+            f"table row {row_position + 1} has no entry in its row_lines "
+            f"list ({len(row_lines)} entries) — refusing a truncated "
+            "row_lines list"
+        )
+    return f"line {row_lines[row_position]}"
+
+
 def _extract_summary(parsed_sections: _ParsedSections) -> dict[str, Any]:
     summary: dict[str, Any] = {key: None for key in _SUMMARY_COUNT_KEYS}
     # D61/D87: the summary is one document-wide object; a second row
@@ -851,7 +944,7 @@ def _extract_summary(parsed_sections: _ParsedSections) -> dict[str, Any]:
     # values CONFLICT (the ambiguity is the conflict, not the value).
     # Identical duplicates are not ambiguous — they collapse (D87): one
     # count named twice is the same fact stated twice.
-    line_and_value_by_count_key: dict[str, tuple[int, int]] = {}
+    line_and_value_by_count_key: dict[str, tuple[str, int]] = {}
     # D69: the section heading decides nothing here (D24) — only the tables
     # matter, so the loop binds no `sec` local at all.
     for _, tables in parsed_sections:
@@ -868,7 +961,9 @@ def _extract_summary(parsed_sections: _ParsedSections) -> dict[str, Any]:
             if order is None:
                 continue
             label_index, count_index = order
-            row_lines = table["row_lines"]
+            # D90: the key is used when present and honestly degraded when
+            # absent — never a KeyError.
+            row_lines: list[int] | None = table.get("row_lines")
             # Counts come from the table's CELLS only, never from prose.
             # The row label decides WHICH count the row sets (D7); which
             # cell carries the label is the header's column order (D59).
@@ -901,18 +996,19 @@ def _extract_summary(parsed_sections: _ParsedSections) -> dict[str, Any]:
                     summary_key = "routesCount"
                 else:
                     summary_key = "pluginsCount"
-                row_line = row_lines[row_position]
+                row_line = _row_reference(row_lines, row_position)
                 first_set = line_and_value_by_count_key.get(summary_key)
                 if first_set is not None:
                     first_line, first_value = first_set
                     if val != first_value:
                         # D61/D87: refuse, never keep-the-last — two rows
                         # that disagree about the same count are a real
-                        # ambiguity.
+                        # ambiguity. The reference is the input line when
+                        # row lines were parsed, else the table row (D90).
                         raise PathwayMapError(
-                            f"count row at line {row_line} sets summary key "
+                            f"count row at {row_line} sets summary key "
                             f"'{summary_key}' to {val} — already set to "
-                            f"{first_value} at line {first_line} — refusing a "
+                            f"{first_value} at {first_line} — refusing a "
                             "conflicting count row"
                         )
                     # D87: identical duplicate — collapse, never refuse.
@@ -1249,7 +1345,9 @@ def _extract_anti_patterns(parsed_sections: _ParsedSections) -> list[dict[str, A
             if not _anti_patterns_reads(heading, table):
                 continue
             headers = [h.lower() for h in table["headers"]]
-            row_lines = table["row_lines"]
+            # D90: the key is used when present and honestly degraded when
+            # absent — never a KeyError.
+            row_lines: list[int] | None = table.get("row_lines")
             for row_position, row in enumerate(table["rows"]):
                 entry: dict[str, str] = {}
                 for i, header in enumerate(headers):
@@ -1265,8 +1363,9 @@ def _extract_anti_patterns(parsed_sections: _ParsedSections) -> list[dict[str, A
                     # returned array with no signal. The refusal names the
                     # row's line.
                     raise PathwayMapError(
-                        "manifest anti-pattern table row at line "
-                        f"{row_lines[row_position]} has no usable category "
+                        "manifest anti-pattern table row at "
+                        f"{_row_reference(row_lines, row_position)} has no "
+                        "usable category "
                         "(category/type/anti-pattern/pattern all missing or "
                         "empty) — refusing"
                     )
@@ -1284,20 +1383,27 @@ def _is_separator_line(line: str) -> bool:
 
 
 def _count_intent_refusal(lines: list[str], first_line: int, section: str) -> str | None:
-    """D85: the refusal for a count-shaped-by-intent table construct the
-    table parser cannot build — a collapsed header over a separator, or a
-    two-column run of pipe lines with no separator — inside a section no
-    extractor reads. `parse_manifest_text` runs this scan on an UNCONSUMED
-    section only: there the construct would silently drop its counts (the
-    probe built no table, so no extractor gate ever saw it), and it
-    refuses instead, naming the section and the line, exactly as a
-    consumed section's own refusal would. The count vocabulary is the
+    """D85/D89: the refusal for a count-shaped-by-intent table construct
+    the table parser cannot build — a collapsed header over a separator,
+    or a two-column run of pipe lines with no separator.
+    `parse_manifest_text` runs this scan on EVERY section — after every
+    strict parse and every extractor has had its refusal (D106), so it is
+    the LAST refusal and can never pre-empt one — and no line inside a
+    fenced code region is ever judged (D105: a fenced block is prose). In
+    an UNCONSUMED section the construct would silently drop its counts (the
+    probe built no table, so no extractor gate ever saw it); in a
+    CONSUMED section the strict parse built no table for it either, so
+    the extractors would read all-None counts with no error (D89 — the
+    same silent drop in the sections that matter most). It refuses
+    instead, naming the section and the line, in both alike. The count
+    vocabulary is the
     summary's own — `_is_count_cell` for header words (D75's containment
     check), `_reads_as_count_row` for body rows (D38's deformed-count
     shape, D60's demotion included) — no new words. An INTACT header over
-    a separator is never judged here: the probe built that table and
-    D84's gates already decided it. A misaligned or backtick-broken row
-    is untrustworthy and decides nothing (D77)."""
+    a separator is never judged here: the probe (unconsumed) or the
+    strict parse (consumed) built that table and D84's gates already
+    decided it. A misaligned or backtick-broken row is untrustworthy and
+    decides nothing (D77)."""
     def cells_of(line: str) -> list[str] | None:
         if not re.search(r"(?<!\\)\|", line):
             return None
@@ -1308,6 +1414,8 @@ def _count_intent_refusal(lines: list[str], first_line: int, section: str) -> st
         rows: list[list[str]] = []
         j = index
         while j < len(lines):
+            if mask[j]:
+                break  # D105: a fenced line is prose — it ends the run
             line = lines[j]
             if not line.strip():
                 break
@@ -1318,13 +1426,21 @@ def _count_intent_refusal(lines: list[str], first_line: int, section: str) -> st
             j += 1
         return rows
 
+    mask = _fence_mask(lines)  # D105: no fenced line is ever judged
     i = 0
     while i < len(lines):
+        if mask[i]:
+            i += 1
+            continue
         cells = cells_of(lines[i])
         if cells is None:
             i += 1
             continue
-        if i + 1 < len(lines) and _is_separator_line(lines[i + 1]):
+        if (
+            i + 1 < len(lines)
+            and not mask[i + 1]
+            and _is_separator_line(lines[i + 1])
+        ):
             body = body_after(i + 2)
             columns = len(cells_of(lines[i + 1]) or [])
             if len(cells) < 2 and columns == 2 and (
@@ -1411,15 +1527,26 @@ def _extract_tables(
     # value type would be a lie.
     tables: list[dict[str, Any]] = []
     lines = text.split("\n")
+    # D105: a fenced code region is prose — no line inside one (the fence
+    # markers included) is ever a header, a separator or a row; a fenced
+    # line inside a table body ends the table the way any prose line does.
+    mask = _fence_mask(lines)
     i = 0
     while i < len(lines):
+        if mask[i]:
+            i += 1
+            continue
         header_line = lines[i]
         if "|" not in header_line:
             i += 1
             continue
         cells, backtick_refusal = _split_row(header_line, first_line + i)
         sep_line = lines[i + 1] if i + 1 < len(lines) else ""
-        next_is_separator = _is_separator_line(sep_line)
+        next_is_separator = (
+            i + 1 < len(lines)
+            and not mask[i + 1]
+            and _is_separator_line(sep_line)
+        )
         if backtick_refusal is not None and next_is_separator:
             # D17/D47: the separator matched, so this line IS a table
             # header — only now is the unbalanced-backtick refusal decided.
@@ -1451,6 +1578,8 @@ def _extract_tables(
         # misaligned row is never let through as prose.
         while j < len(lines):
             line = lines[j]
+            if mask[j]:
+                break  # D105: a fenced line is prose — it ends the table
             if not line.strip():
                 break
             row, backtick_refusal = _split_row(line, first_line + j)
