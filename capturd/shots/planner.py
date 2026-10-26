@@ -334,7 +334,59 @@ def _scan_ident(text: str) -> tuple[str, str]:
 
 
 _TAG_RE = re.compile(r"^(\*|[a-zA-Z][a-zA-Z0-9-]*)")
-_ATTR_RE = re.compile(r'^([\w-]+)="(.*)"$', re.DOTALL)
+
+
+def _scan_bracketed(text: str) -> Optional[tuple[str, str]]:
+    """Split ``[decl]rest`` at the bracket closing the attribute selector.
+
+    Escape-aware (D11): a ``]`` inside the quoted value does not close the
+    bracket, and a backslash escapes the next character inside the string —
+    the same discipline as :func:`_scan_ident`. ``[attr="a]"]`` therefore
+    splits after the final ``]``, where the old ``rest.find("]")`` split
+    inside the value. ``None`` when the bracket is unterminated.
+    """
+    if not text.startswith("["):
+        return None
+    escaped = False
+    in_quotes = False
+    for index in range(1, len(text)):
+        char = text[index]
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == '"':
+            in_quotes = not in_quotes
+        elif char == "]" and not in_quotes:
+            return text[1:index], text[index + 1:]
+    return None
+
+
+def _parse_attr_decl(decl: str) -> Optional[tuple[str, str]]:
+    """Parse ``name="escaped value"`` escape-aware (D11) -> ``(name, raw)``.
+
+    The value runs to the first *unescaped* quote and nothing may follow it —
+    never a greedy ``(.*)`` backtracking to the last quote. ``raw`` keeps its
+    CSS escapes; :func:`_css_unescape` reads it back, so the round trip is
+    exact. ``None`` for anything that is not exactly this shape.
+    """
+    match = re.match(r'^([\w-]+)="', decl)
+    if match is None:
+        return None
+    raw = decl[match.end():]
+    escaped = False
+    for index, char in enumerate(raw):
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == '"':
+            if index != len(raw) - 1:
+                return None  # junk after the closing quote -> unparseable
+            return match.group(1), raw[:index]
+    return None  # unterminated value
+
+
 _NTH_PREFIX = ":nth-of-type("
 _LEADING_DIGIT_RE = re.compile(r"^(-?)([0-9])")
 
@@ -353,15 +405,17 @@ def _match_simple(node: _Node, part: str) -> bool:
             return False
 
     while rest.startswith("["):
-        close = rest.find("]")
-        if close < 0:
+        # D11: escape-aware bracket split and value parse — never
+        # rest.find("]") (which splits inside a value) nor a greedy (.*).
+        split = _scan_bracketed(rest)
+        if split is None:
             return False
-        inner = rest[1:close]
-        rest = rest[close + 1:]
-        attr_match = _ATTR_RE.match(inner)
-        if not attr_match:
+        decl, rest = split
+        parsed = _parse_attr_decl(decl)
+        if parsed is None:
             return False
-        if node.attrs.get(attr_match.group(1)) != _css_unescape(attr_match.group(2)):
+        name, raw_value = parsed
+        if node.attrs.get(name) != _css_unescape(raw_value):
             return False
 
     nth: Optional[int] = None
