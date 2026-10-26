@@ -219,6 +219,20 @@ def _href_artifact(value: Optional[str]) -> str:
     return (value or "").split("?", 1)[0]
 
 
+def _keyword_value(node: _Node, name: str) -> str:
+    """Value of a keyword attribute, folded to lowercase (D21).
+
+    HTML says ``role``, ``type`` and every ``aria-*`` keyword value are
+    ASCII-case-insensitive: ``<input TYPE="Submit">``, ``role="TAB"`` and
+    ``aria-hidden="TRUE"`` must read exactly as their lowercase forms — an
+    inversion here silently plans dead controls or drops live ones. Free-text
+    values (``aria-label`` and friends) are labels, never keywords: they keep
+    their case. A missing attribute reads as "".
+    """
+    value = node.attrs.get(name)
+    return value.lower() if value is not None else ""
+
+
 # ---------------------------------------------------------------------------
 # Unique selectors (planner.js uniqueSelector / queryCount)
 # ---------------------------------------------------------------------------
@@ -724,7 +738,7 @@ def _is_visible(node: _Node) -> bool:
     while current is not None and current.tag != "#root":
         if "hidden" in current.attrs:
             return False
-        if current.attrs.get("aria-hidden") == "true":
+        if _keyword_value(current, "aria-hidden") == "true":
             return False
         if _style_declares(current, "display", "none"):
             return False
@@ -772,7 +786,7 @@ def _is_disabled(node: _Node) -> bool:
     if node.tag in ("button", "input", "select", "textarea", "optgroup", "option", "fieldset"):
         if "disabled" in node.attrs:
             return True
-    if node.attrs.get("aria-disabled") == "true":
+    if _keyword_value(node, "aria-disabled") == "true":
         return True
     if "disabled" in _classes(node):
         return True
@@ -837,7 +851,9 @@ def _hint_match(node: _Node, hint: str) -> bool:
         inner = hint[1:-1]
         name, _, value = inner.partition("=")
         value = value.strip().strip("'\"")
-        return node.attrs.get(name.strip()) == value
+        # D21: keyword values compare case-insensitively ("role='navigation'"
+        # reads role="NAVIGATION" too).
+        return _keyword_value(node, name.strip()) == value.lower()
     return node.tag == hint
 
 
@@ -857,7 +873,7 @@ def _in_control_sweep(node: _Node) -> bool:
     attrs = node.attrs
     if tag == "button":
         return True
-    if tag == "input" and attrs.get("type") in ("button", "submit"):
+    if tag == "input" and _keyword_value(node, "type") in ("button", "submit"):
         return True
     if tag == "a" and "href" in attrs:
         return True
@@ -867,7 +883,7 @@ def _in_control_sweep(node: _Node) -> bool:
         for container in ("nav", "aside", "header")
     ):
         return True
-    if attrs.get("role") in ("button", "link"):
+    if _keyword_value(node, "role") in ("button", "link"):
         return True
     for attr in (
         "aria-controls", "aria-expanded", "aria-current", "aria-haspopup",
@@ -894,7 +910,8 @@ def _classify_sweep(node: _Node) -> Optional[ControlKind]:
     """Priority-ordered classification chain; first match wins (planner.js)."""
     attrs = node.attrs
     tag = node.tag
-    role = attrs.get("role", "")
+    # D21: keyword values read folded to lowercase ("role="TAB"" is "tab").
+    role = _keyword_value(node, "role")
     aria_expanded = attrs.get("aria-expanded")
     aria_current = attrs.get("aria-current")
     aria_has_popup = attrs.get("aria-haspopup")
@@ -947,7 +964,7 @@ def classify_control(node: Optional[Node]) -> tuple[ControlKind, bool]:
     """Classify one node: ``(kind, is_navigation)``. ``NONE`` for non-controls."""
     if node is None or node.tag == "#root":
         return ControlKind.NONE, False
-    if node.attrs.get("role") == "tab":
+    if _keyword_value(node, "role") == "tab":
         return ControlKind.TAB, _in_navigation(node)
     if node.tag == "summary":
         return ControlKind.ACCORDION, _in_navigation(node)
@@ -1132,9 +1149,9 @@ def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
 
     index = _PlanIndex(root)
     nodes = index.nodes
-    tabs = [n for n in nodes if n.attrs.get("role") == "tab"]
+    tabs = [n for n in nodes if _keyword_value(n, "role") == "tab"]
     summaries = [n for n in nodes if n.tag == "summary"]
-    swept = [n for n in nodes if n.attrs.get("role") != "tab" and n.tag != "summary" and _in_control_sweep(n)]
+    swept = [n for n in nodes if _keyword_value(n, "role") != "tab" and n.tag != "summary" and _in_control_sweep(n)]
 
     candidates: list[Candidate] = []
     # D8: one candidate per node — the dedupe key is the selector (which the
