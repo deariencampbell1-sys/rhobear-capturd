@@ -43,7 +43,10 @@ only in a PR body: a misaligned row (a row whose cell count differs
 from its header's, named with its line number); pipe-bearing prose
 immediately after a table, which the parser cannot tell from a
 misaligned row — put a blank line between; a duplicate ``id`` or an
-over-long ``id`` (over 200 characters); an unbalanced backtick in a confirmed table header or row; a verifier
+over-long ``id`` (over 200 characters); an unbalanced backtick in a
+confirmed table header or row — including a header the backtick
+collapsed to fewer than two cells: that header refuses too, it never
+silently drops the table (D47); a verifier
 ``antiPatterns`` value that is not a list; an anti-pattern entry that is
 not a mapping; an anti-pattern entry with no usable category; a two-column
 table whose rows are count rows (a count label with a numeric count) but
@@ -888,7 +891,9 @@ def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, Any]]:
     refusal fires only where the line is already a confirmed header (the
     separator matched) or a confirmed body row — never during header
     detection, so pipe-bearing prose with a stray backtick does not abort
-    the parse."""
+    the parse. D47: "confirmed header" includes a header the backtick
+    collapsed to fewer than two cells — the separator still matched, so
+    the refusal fires and the table is never silently dropped."""
     tables: list[dict[str, list[str]]] = []
     lines = text.split("\n")
     i = 0
@@ -898,18 +903,24 @@ def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, Any]]:
             i += 1
             continue
         cells, backtick_refusal = _split_row(header_line, first_line + i)
+        sep_line = lines[i + 1] if i + 1 < len(lines) else ""
+        next_is_separator = (
+            bool(re.match(r"^\s*\|?[\s\-:|]+\|?\s*$", sep_line)) and "-" in sep_line
+        )
+        if backtick_refusal is not None and next_is_separator:
+            # D17/D47: the separator matched, so this line IS a table
+            # header — only now is the unbalanced-backtick refusal decided.
+            # A prose line above a non-separator line was skipped untouched,
+            # and the refusal holds even when the stray backtick collapsed
+            # the header to fewer than two cells (D47): the header refuses,
+            # it never silently drops the table and every row under it.
+            raise PathwayMapError(backtick_refusal)
         if len(cells) < 2:
             i += 1
             continue
-        sep_line = lines[i + 1] if i + 1 < len(lines) else ""
-        if not re.match(r"^\s*\|?[\s\-:|]+\|?\s*$", sep_line) or "-" not in sep_line:
+        if not next_is_separator:
             i += 1
             continue
-        if backtick_refusal is not None:
-            # D17: the separator matched, so this line IS a table header —
-            # only now is the unbalanced-backtick refusal decided. A prose
-            # line above a non-separator line was skipped untouched.
-            raise PathwayMapError(backtick_refusal)
         rows: list[list[str]] = []
         j = i + 2
         # D5: the body ends only at a blank line, a line with no unescaped
