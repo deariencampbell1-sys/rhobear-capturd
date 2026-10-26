@@ -926,16 +926,27 @@ def _is_disabled(node: _Node) -> bool:
     ``<fieldset>`` is interactive — those controls are not disabled by that
     fieldset (a second legend's subtree, and everything else in the fieldset,
     still is).
+
+    D54: the inheritance is decided by the NEAREST explicit ``aria-disabled``
+    value on the ancestor chain — an explicit ``aria-disabled="false"``
+    overrides an inherited ``true`` and re-enables the subtree, where the old
+    walk dropped anything under any ancestor saying "true". The nearest
+    value decides aria-disabled only; a disabled ``<fieldset>`` still
+    disables the control whatever the aria values say.
     """
     if node.tag in ("button", "input", "select", "textarea", "optgroup", "option", "fieldset"):
         if "disabled" in node.attrs:
             return True
     if "disabled" in _classes(node):
         return True
+    aria_decided = False
     for ancestor in _ancestors_inclusive(node):
-        # D34: aria-disabled is inherited down the ancestor chain.
-        if _keyword_value(ancestor, "aria-disabled") == "true":
-            return True
+        # D34: aria-disabled is inherited down the ancestor chain. D54: the
+        # nearest explicit value wins — "false" stops the inheritance.
+        if not aria_decided and "aria-disabled" in ancestor.attrs:
+            aria_decided = True
+            if _keyword_value(ancestor, "aria-disabled") == "true":
+                return True
         if ancestor.tag == "fieldset" and "disabled" in ancestor.attrs:
             if not _in_first_legend(ancestor, node):
                 return True
