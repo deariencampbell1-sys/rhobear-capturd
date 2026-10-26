@@ -35,23 +35,40 @@ so (:func:`named_control_needs_the_page`).
 
 Determinism: the same map plus the same base URL produces the same plan, byte
 for byte. Nothing here embeds host paths — ``pathway_trigger`` is carried with
-host-path-shaped tokens (Windows or POSIX) redacted, and errors name the
-pathway id, never a path.
+host-path-shaped tokens (Windows or POSIX) redacted, errors name the
+pathway id, never a path, and a directory-shaped ``base_url`` is refused
+outright rather than joined into one.
 
 The page read for selector binding goes through the real capture path (a
 Playwright navigation to the target the user pointed at), and every such
 plan-time navigation goes through the capture path's own private-IP / host
 guard — capture's ``_reject_private_url``, the shared :mod:`capturd._net`
-predicate, reused and never re-implemented — so a private/internal target
-refuses the plan with the same error the capture path raises. The read is
-best-effort for reachability: an unreachable page means no selector, not a
-refused plan — reachability is a capture-time fact (a guard refusal is never
-swallowed).
+predicate, reused and never re-implemented — with ONE named exception
+(H1): loopback. Planning against a local dev server is the seam's primary
+use case, so the plan-navigation guard skips loopback (and only loopback,
+IPv4, IPv6 or IPv4-mapped) via ``allow_loopback=True``; every other private,
+link-local, reserved, multicast and unspecified address still refuses the
+plan with the same error the capture path raises — whose default is
+unchanged and still refuses loopback. Every request the browser makes — the
+initial URL, redirects and subresources — is checked by a context route
+guard, and the final URL is re-checked before content is read.
+
+The read is best-effort for reachability: an unreachable page means no
+selector, not a refused plan — reachability is a capture-time fact (a guard
+refusal is never swallowed). Every swallowed read or planning failure emits
+a named ``RuntimeWarning`` diagnostic — the exception class name only, never
+raw exception text, URLs, credentials or host paths. All plan-time reading
+is one batch (one Playwright driver, one browser, one context per
+non-dry-run plan) behind a synchronous entry point: a call from an
+already-running event loop is refused with a named error before anything
+launches.
 """
 
 from __future__ import annotations
 
+import asyncio
 import re
+import warnings
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -94,10 +111,10 @@ _WINDOWS_PATH_RE = re.compile(r"^[a-zA-Z]:[\\/]|^\\\\")
 _HOST_PATH_TOKEN_RE = re.compile(r"[a-zA-Z]:[\\/][^\s\"'`]*|\\\\[^\s\"'`]*")
 # D94: POSIX host paths redact too. A token is a host path when it is an
 # absolute path of two or more segments that is rooted at a well-known host
-# root, or is file-shaped (a dot extension, optional :line[:col]), or is
-# three or more segments deep — a route path (/settings, /api/state) is one
-# or two plain segments and is never redacted. The lookbehind keeps URLs
-# (http://x/y) from being read as paths.
+# root, or is file-shaped (a dot extension, optional :line[:col]). Depth
+# alone is never enough — a route path (/settings, /api/v1/state) is not a
+# host path and stays readable. The lookbehind keeps URLs (http://x/y) from
+# being read as paths.
 _POSIX_PATH_TOKEN_RE = re.compile(r"(?<![\w:./\\])/[^\s\"'`]+")
 _POSIX_HOST_ROOTS = frozenset({
     "home", "users", "user", "root", "tmp", "var", "opt", "mnt", "media",
@@ -113,9 +130,10 @@ def _posix_path_repl(match: re.Match[str]) -> str:
     segments = [seg for seg in token.strip("/").split("/") if seg]
     if len(segments) < 2:
         return token   # a single-segment path is a route, not a host path
+    # Depth alone never makes a host path (a 3-segment route like
+    # /api/v1/state stays readable) — a host root or a file suffix does.
     if (
         segments[0].lower() in _POSIX_HOST_ROOTS
-        or len(segments) >= 3
         or _POSIX_FILE_SUFFIX_RE.search(segments[-1])
     ):
         return "<path>"
@@ -359,30 +377,62 @@ def _match_control(tokens: list[str], candidates: list[Any]) -> Any | None:
     return None
 
 
-def _load_page_html(url: str) -> str:
-    """Read the target page's HTML through the real capture path.
+def _reject_running_loop() -> None:
+    """The synchronous contract: planning drives its own one-shot event loop.
+
+    ``asyncio.run`` cannot be called from a running loop, so a plan invoked
+    from async code is refused with a named error BEFORE anything launches.
+    Dry-run never performs this check.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    raise RestedCaptureError(
+        "pathway planning is synchronous; call it outside an active event loop"
+    )
+
+
+def _load_pages_html(urls: list[str]) -> dict[str, str]:
+    """Read the target pages' HTML through the real capture path — one batch.
 
     D94: every plan-time navigation goes through the SAME private-IP / host
     guard the capture path's network access uses — capture's
     ``_reject_private_url`` (the shared :mod:`capturd._net` predicate, reused
-    here, never re-implemented). A private/internal target raises exactly the
-    error the capture path raises and refuses the plan; a local built-HTML
-    (``file:``) read is not a network surface and is not the guard's business.
+    here, never re-implemented) — with H1's ONE named exception: loopback.
+    ``allow_loopback=True`` lets a map be planned against a local dev server
+    (the seam's primary use case); every other private, link-local, reserved,
+    multicast and unspecified address raises exactly the error the capture
+    path raises and refuses the plan. The capture path's default is unchanged
+    and still refuses loopback.
 
-    Monkeypatchable seam for tests; best-effort at the call site for
-    reachability — but a guard refusal is never swallowed there.
+    M-redirect-SSRF: the guard is not only an entry check. A context ``**/*``
+    route guard checks EVERY request URL — the initial navigation, redirects
+    and subresources — with the same loopback-only policy, and after each
+    ``goto`` the final URL is checked again before any content is read. A
+    refused request is aborted, the FIRST guard error is retained, and it is
+    re-raised from the read — a guard refusal is never swallowed as
+    reachability.
+
+    M-browser-lifecycle: ONE batch read per non-dry-run plan — one Playwright
+    driver, one browser, one context, one page per URL sequential inside it,
+    exactly one ``asyncio.run`` around the whole batch. Pages, context and
+    browser close on every path. A call from an already-running event loop is
+    refused up front (see :func:`_reject_running_loop`).
+
+    Monkeypatchable seam for tests; best-effort per URL for reachability — a
+    per-URL read failure yields ``""`` plus a named ``RuntimeWarning`` (the
+    exception class name only — never raw text, URLs or host paths) — but a
+    guard refusal is never swallowed.
     """
-    parsed = urlparse(url)
-    if parsed.scheme in ("http", "https"):
-        from .capture import _reject_private_url
+    _reject_running_loop()
+    from .capture import _launch_browser, _reject_private_url
 
-        _reject_private_url(url)
+    for url in urls:
+        if urlparse(url).scheme in ("http", "https"):
+            _reject_private_url(url, allow_loopback=True)
 
-    import asyncio
-
-    from .capture import _launch_browser
-
-    async def _read() -> str:
+    async def _read_all() -> dict[str, str]:
         try:
             from playwright.async_api import async_playwright
         except ImportError as exc:  # pragma: no cover - engine dependency
@@ -390,26 +440,67 @@ def _load_page_html(url: str) -> str:
                 "Playwright is not installed. Install engine requirements, then run "
                 "`python -m playwright install chromium` if system Edge is unavailable."
             ) from exc
-        async with async_playwright() as p:
-            browser = await _launch_browser(p, allow_file_access=parsed.scheme == "file")
-            try:
-                page = await browser.new_page()
-                await page.goto(url, wait_until="domcontentloaded", timeout=15000)
-                return await page.content()
-            finally:
-                await browser.close()
 
-    return asyncio.run(_read())
+        html_by_url: dict[str, str] = {}
+        guard_errors: list[RestedCaptureError] = []
+
+        async def _guard_request(route: Any) -> None:
+            try:
+                _reject_private_url(route.request.url, allow_loopback=True)
+            except RestedCaptureError as exc:
+                if not guard_errors:
+                    guard_errors.append(exc)
+                await route.abort()
+                return
+            await route.continue_()
+
+        async with async_playwright() as p:
+            # allow_file_access is false: `file:` bases are refused at
+            # plan_targets_from_map entry, so this reader never needs them.
+            browser = await _launch_browser(p, allow_file_access=False)
+            context = await browser.new_context()
+            try:
+                # Before any page exists: every request, redirects included.
+                await context.route("**/*", _guard_request)
+                for url in urls:
+                    page = await context.new_page()
+                    try:
+                        try:
+                            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                            if guard_errors:
+                                raise guard_errors[0]
+                            _reject_private_url(page.url, allow_loopback=True)
+                            html_by_url[url] = await page.content()
+                        except RestedCaptureError:
+                            raise
+                        except Exception as exc:
+                            if guard_errors:
+                                # A guard refusal is a security fact — never
+                                # the reachability best-effort below.
+                                raise guard_errors[0]
+                            warnings.warn(
+                                "pathway page read failed "
+                                f"({type(exc).__name__}); affected controls stay unbound",
+                                RuntimeWarning,
+                                stacklevel=2,
+                            )
+                            html_by_url[url] = ""
+                    finally:
+                        await page.close()
+                if guard_errors:
+                    raise guard_errors[0]
+            finally:
+                await context.close()
+                await browser.close()
+        return html_by_url
+
+    return asyncio.run(_read_all())
 
 
 def _plan_page(html: str) -> list[Any]:
     from . import planner
 
-    try:
-        return planner.plan_candidates(planner.parse_html(html or "")).candidates
-    except Exception:
-        # A page we cannot plan is a capture-time fact, not a plan refusal.
-        return []
+    return planner.plan_candidates(planner.parse_html(html or "")).candidates
 
 
 # ---------------------------------------------------------------------------
@@ -417,11 +508,29 @@ def _plan_page(html: str) -> list[Any]:
 # ---------------------------------------------------------------------------
 
 
+def _require_http_base(base: str) -> None:
+    """M-directory-base: the base is an absolute http(s) URL with a hostname.
+
+    A bare directory (POSIX or Windows), a ``file:`` URL, a relative path or
+    any other scheme is a HOST PATH base — it would join into a host path and
+    reach shareable plan output verbatim. It is refused with one named error
+    BEFORE any resolution or navigation; the URL itself is never echoed (the
+    "no host paths" promise covers refusals too).
+    """
+    parsed = urlparse(base)
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname:
+        raise RestedCaptureError(
+            "base_url must be an absolute http(s) URL; local directory paths are not allowed"
+        )
+
+
 def plan_targets_from_map(
     pathway_map: dict[str, Any],
     base_url: str,
     *,
     max_targets: int = MAX_TARGETS,
+    viewport_count: int = 1,
+    scheme_count: int = 1,
     dry_run: bool = False,
 ) -> tuple[list[str], list[CaptureTarget]]:
     """Expand a parsed map into unique URLs and one target per capturable
@@ -437,18 +546,29 @@ def plan_targets_from_map(
     would need the page to bind is left unbound (``selector=-``) — whether it
     needs the page is :func:`named_control_needs_the_page`.
 
-    More than ``max_targets`` named pathways is refused before anything is
-    planned, with the service's MAX_TARGETS refusal text verbatim.
+    ``viewport_count`` x ``scheme_count`` is the capture matrix every pathway
+    expands across; ``max_targets`` bounds the EXPANDED target count
+    (pathways x viewports x schemes) and the refusal fires before any
+    navigation. The 1x1 defaults preserve direct-call behavior.
+
+    More than ``max_targets`` expanded targets is refused before anything is
+    planned or navigated, with the service's MAX_TARGETS refusal text verbatim.
     """
     base = str(base_url or "").strip()
     if not base:
         raise RestedCaptureError("base_url is required when feeding a pathway map")
+    _require_http_base(base)
 
     pathways = pathway_map.get("pathways") or []
     if not pathways:
         raise RestedCaptureError("pathway map contains no pathways")
-    if len(pathways) > max_targets:
+    if viewport_count < 1 or scheme_count < 1:
+        raise RestedCaptureError("viewport_count and scheme_count must be positive")
+    if len(pathways) * viewport_count * scheme_count > max_targets:
         raise RestedCaptureError(f"too many capture targets; maximum is {max_targets}")
+    if not dry_run:
+        # The synchronous contract — dry-run never performs this check.
+        _reject_running_loop()
 
     routes = pathway_map.get("routes") or []
     resolved: list[tuple[str, dict[str, Any], list[str]]] = []
@@ -466,18 +586,46 @@ def plan_targets_from_map(
     html_by_url: dict[str, str] = {}
     plans_by_url: dict[str, list[Any]] = {}
 
+    if not dry_run:
+        # M-browser-lifecycle: ONE batch read for the whole plan — the unique
+        # URLs that actually have named-control tokens.
+        needs_page = {url for url, _pathway, tokens in resolved if tokens}
+        read_urls = [url for url in urls if url in needs_page]
+        if read_urls:
+            try:
+                html_by_url.update(_load_pages_html(read_urls))
+            except RestedCaptureError:
+                # D94: a guard refusal is a security fact and refuses the
+                # plan — it is never the reachability best-effort below.
+                raise
+            except Exception as exc:
+                # M-diagnostics: the batch itself failed (no browser, no
+                # Playwright, ...) — warn and keep every read URL unbound.
+                warnings.warn(
+                    "pathway page read failed "
+                    f"({type(exc).__name__}); affected controls stay unbound",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                html_by_url = {url: "" for url in read_urls}
+
     def candidates_for(url: str) -> list[Any]:
         if url not in plans_by_url:
-            if url not in html_by_url:
-                try:
-                    html_by_url[url] = _load_page_html(url)
-                except RestedCaptureError:
-                    # D94: a guard refusal is a security fact and refuses the
-                    # plan — it is never the reachability best-effort below.
-                    raise
-                except Exception:
-                    html_by_url[url] = ""
-            plans_by_url[url] = _plan_page(html_by_url[url])
+            try:
+                plans_by_url[url] = _plan_page(html_by_url.get(url, ""))
+            except RestedCaptureError:
+                raise
+            except Exception as exc:
+                # M-diagnostics: a page we cannot plan is a capture-time fact,
+                # not a plan refusal — but never a silent un-binding. The
+                # exception class name only: never raw text or host paths.
+                warnings.warn(
+                    "pathway page planning failed "
+                    f"({type(exc).__name__}); affected controls stay unbound",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                plans_by_url[url] = []
         return plans_by_url[url]
 
     targets: list[CaptureTarget] = []

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import ipaddress
 import json
 import os
 import re
@@ -348,7 +349,23 @@ def _parse_sitemap_xml(xml_bytes: bytes) -> tuple[list[str], list[str]]:
     return page_urls, sitemap_urls
 
 
-def _reject_private_url(url: str) -> None:
+def _unwrapped_address(ip: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """The address behind *ip* with any IPv4-mapped wrapper removed.
+
+    ``::ffff:127.0.0.1`` is loopback in IPv4 clothing — classify the unwrapped
+    address so the one loopback exception below cannot be bypassed (or, for
+    anything else, widened) through a mapped form. Unparseable input yields
+    ``None`` and is never treated as loopback (fail closed).
+    """
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    mapped = getattr(addr, "ipv4_mapped", None)
+    return mapped if mapped is not None else addr
+
+
+def _reject_private_url(url: str, *, allow_loopback: bool = False) -> None:
     """Raise RestedCaptureError if *url* resolves to a private/internal IP address.
 
     Uses the shared canonical guard in :mod:`capturd._net` (stdlib
@@ -356,6 +373,14 @@ def _reject_private_url(url: str) -> None:
     IPv6-mapped IPv4) so this fetch surface can't drift from the service and
     MCP ones — the hand-rolled copy here used to miss IPv6-mapped IPv4 cloud
     metadata addresses like ``::ffff:169.254.169.254``.
+
+    ``allow_loopback`` is the ONE named exception to the private-range
+    refusal (H1): a plan-time page read against a local dev server is the
+    seam's primary use case, so the pathway page reader opts in and loopback
+    — and only loopback, IPv4 or IPv6 or IPv4-mapped — is skipped. Every
+    other caller (the fetch surface, sitemaps, the service and MCP paths)
+    keeps the default and refuses loopback like any other private address.
+    Every other refusal and error string is unchanged.
     """
     host = urlparse(url).hostname
     if not host:
@@ -367,6 +392,9 @@ def _reject_private_url(url: str) -> None:
     for family, _type, _proto, _canon, sockaddr in addrinfo:
         ip = sockaddr[0]
         if is_private_ip(ip):
+            unwrapped = _unwrapped_address(ip)
+            if allow_loopback and unwrapped is not None and unwrapped.is_loopback:
+                continue
             raise RestedCaptureError(f"url resolves to a private/internal IP ({ip}) — not allowed")
 
 
@@ -853,10 +881,39 @@ def build_capture_plan(payload: dict[str, Any]) -> tuple[list[str], list[Capture
             "provide a manifest or a map, not both — got " + ", ".join(sorted(source_names))
         )
 
+    # Imported here (not at module top) to keep the capture/pathway module
+    # pair free of an import cycle.
+    from .pathway_plan import MAX_TARGETS, plan_targets_from_map
+
+    max_targets = int(payload.get("max_targets") or MAX_TARGETS)
+
+    # The matrix is normalised and validated BEFORE any planning/navigation:
+    # the expanded target ceiling below needs the real viewport and scheme
+    # counts up front, and every current validation message is retained.
+    viewport_ids = payload.get("viewports") or list(DEFAULT_VIEWPORTS)
+    if not isinstance(viewport_ids, list):
+        raise RestedCaptureError("viewports must be a list")
+    viewport_ids = [str(v).strip().lower() for v in viewport_ids if str(v).strip()]
+    if not viewport_ids:
+        raise RestedCaptureError("choose at least one viewport")
+    for viewport_id in viewport_ids:
+        if not DEFAULT_VIEWPORTS.get(viewport_id):
+            raise RestedCaptureError(f"unknown viewport: {viewport_id}")
+
+    schemes = payload.get("schemes") or list(DEFAULT_SCHEMES)
+    if isinstance(schemes, str):
+        schemes = [schemes]
+    if not isinstance(schemes, list):
+        raise RestedCaptureError("schemes must be a list")
+    schemes = [str(s).strip().lower() for s in schemes if str(s).strip()]
+    if not schemes:
+        raise RestedCaptureError("choose at least one color scheme")
+    for scheme in schemes:
+        if scheme not in {"light", "dark", "no-preference"}:
+            raise RestedCaptureError(f"unknown color scheme: {scheme}")
+
     pathway_targets: list[CaptureTarget] | None = None
     if supplied_maps:
-        from .pathway_plan import MAX_TARGETS, plan_targets_from_map
-
         base_url = str(payload.get("base_url") or "").strip()
         if not base_url:
             raise RestedCaptureError("base_url is required when feeding a pathway map")
@@ -869,7 +926,11 @@ def build_capture_plan(payload: dict[str, Any]) -> tuple[list[str], list[Capture
         urls, pathway_targets = plan_targets_from_map(
             pathway_map,
             base_url,
-            max_targets=int(payload.get("max_targets") or MAX_TARGETS),
+            max_targets=max_targets,
+            # M-expanded-targets: the planner refuses the EXPANDED matrix
+            # (pathways x viewports x schemes) before any navigation.
+            viewport_count=len(viewport_ids),
+            scheme_count=len(schemes),
             # D92: a dry-run plan is built with no navigation and no network
             # call — never a page read to bind a named control.
             dry_run=bool(payload.get("dry_run")),
@@ -928,22 +989,6 @@ def build_capture_plan(payload: dict[str, Any]) -> tuple[list[str], list[Capture
         if len(urls) > MAX_URLS:
             raise RestedCaptureError(f"too many URLs; maximum is {MAX_URLS}")
 
-    viewport_ids = payload.get("viewports") or list(DEFAULT_VIEWPORTS)
-    if not isinstance(viewport_ids, list):
-        raise RestedCaptureError("viewports must be a list")
-    viewport_ids = [str(v).strip().lower() for v in viewport_ids if str(v).strip()]
-    if not viewport_ids:
-        raise RestedCaptureError("choose at least one viewport")
-
-    schemes = payload.get("schemes") or list(DEFAULT_SCHEMES)
-    if isinstance(schemes, str):
-        schemes = [schemes]
-    if not isinstance(schemes, list):
-        raise RestedCaptureError("schemes must be a list")
-    schemes = [str(s).strip().lower() for s in schemes if str(s).strip()]
-    if not schemes:
-        raise RestedCaptureError("choose at least one color scheme")
-
     targets: list[CaptureTarget] = []
     if pathway_targets is not None:
         # Map-driven: every pathway target expands across the same
@@ -985,6 +1030,11 @@ def build_capture_plan(payload: dict[str, Any]) -> tuple[list[str], list[Capture
                             scheme=scheme,
                         )
                     )
+
+    # M-expanded-targets: the defensive post-expansion check — the refusal
+    # text says "capture targets", so the ceiling is the TARGET count.
+    if len(targets) > max_targets:
+        raise RestedCaptureError(f"too many capture targets; maximum is {max_targets}")
 
     # The plan says why a pathway is flagged. Status is read by the closed
     # set (WIRED/MOCKED/UNWIRED/INCOMPLETE/UNCLEAR/UNKNOWN), never by

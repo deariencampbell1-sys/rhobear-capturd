@@ -15,6 +15,7 @@ import pytest
 
 from capturd.shots.capture import (
     CaptureTarget,
+    RestedCaptureError,
     build_capture_plan,
     build_quality_summary,
 )
