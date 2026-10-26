@@ -184,6 +184,7 @@ def parse_verifier_json_text(text: str, source: str = "<pasted map>") -> dict[st
 
     pathways: list[dict[str, Any]] = []
     routes: list[dict[str, Any]] = []
+    anti_patterns: list[dict[str, Any]] = []
     seen_route_paths: set[str] = set()
 
     checks = data.get("checks")
@@ -240,6 +241,24 @@ def parse_verifier_json_text(text: str, source: str = "<pasted map>") -> dict[st
                     "raw": finding,
                 })
 
+    # D18: the verifier JSON may carry the anti-patterns array itself — the
+    # rhobear-verifier manifest.js field semantics this module is compatible
+    # with name { ..., antiPatterns[], ... } — and an entry's count arrives
+    # as a JSON value. The entries ride the SAME normaliser as the manifest
+    # flavour, so the two flavours agree on the same input value: an integer
+    # 0 count is a real count (only `raw is None` is absent), never a silent
+    # None. An anti-patterns-only map still parses to nothing a planner can
+    # use: the no-pathways/no-routes refusal below is unchanged.
+    declared_anti_patterns = data.get("antiPatterns")
+    if declared_anti_patterns is not None and not isinstance(declared_anti_patterns, list):
+        raise PathwayMapError("verifier map 'antiPatterns' must be a list")
+    for entry in declared_anti_patterns or []:
+        if not isinstance(entry, dict):
+            continue
+        pattern = _normalise_anti_pattern(entry)
+        if pattern is not None:
+            anti_patterns.append(pattern)
+
     # Key presence decides, not truthiness: a present-but-empty
     # manifest_summary must not be swapped for a differently-shaped summary.
     manifest_summary = data.get("manifest_summary")
@@ -269,7 +288,7 @@ def parse_verifier_json_text(text: str, source: str = "<pasted map>") -> dict[st
         "routes": routes,
         "plugins": [],
         "suspicious": [],
-        "antiPatterns": [],
+        "antiPatterns": anti_patterns,
         "metadata": {
             "file": Path(source).name,
             "version": data.get("version"),
@@ -664,6 +683,43 @@ def _extract_suspicious(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return suspicious
 
 
+def _count_from_cell(raw: Any) -> int | None:
+    """The one count parser for both flavours. D18: ``raw is None`` is the
+    only "absent" test — ``0 or ""`` swallowed a JSON integer ``0`` into
+    None while the manifest flavour kept the string cell "0" as 0, so the
+    two flavours disagreed on the same input value; a real zero is a real
+    count. A string cell keeps D4's semantics: the first integer run
+    ("3.5" reads 3, not 35), no digits at all → None."""
+    if raw is None:
+        return None
+    count_match = re.search(r"\d+", str(raw))
+    return int(count_match.group(0)) if count_match else None
+
+
+def _normalise_anti_pattern(entry: dict[str, Any]) -> dict[str, Any] | None:
+    """One anti-pattern shape for both flavours: the locked 5 keys, with the
+    same category aliases and count parser whether the entry came from a
+    manifest table row or from verifier JSON (D18 — the flavours must agree
+    on the same input value). Returns None for an entry with no category,
+    which both callers skip."""
+    category = str(
+        entry.get("category")
+        or entry.get("type")
+        or entry.get("anti-pattern")
+        or entry.get("pattern")
+        or ""
+    ).strip()
+    if not category:
+        return None
+    return {
+        "category": category,
+        "count": _count_from_cell(entry.get("count")),
+        "file": str(entry.get("file") or ""),
+        "line": str(entry.get("line") or ""),
+        "quote": str(entry.get("quote") or entry.get("snippet") or entry.get("code") or ""),
+    }
+
+
 def _extract_anti_patterns(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
     patterns: list[dict[str, Any]] = []
     for sec in sections:
@@ -677,27 +733,12 @@ def _extract_anti_patterns(sections: list[dict[str, Any]]) -> list[dict[str, Any
                 entry: dict[str, str] = {}
                 for i, header in enumerate(headers):
                     entry[header] = row[i] if i < len(row) else ""
-                cat = (
-                    entry.get("category")
-                    or entry.get("type")
-                    or entry.get("anti-pattern")
-                    or entry.get("pattern")
-                    or ""
-                ).strip()
-                if not cat:
-                    continue
-                # The first integer run only: "0" stays 0 (not None),
-                # "3.5" reads 3 (not 35), and a missing/empty cell stays
-                # None. The old digit-strip glued "3.5" into 35 and then
-                # swallowed a real zero into `or None`.
-                count_match = re.search(r"\d+", str(entry.get("count") or ""))
-                patterns.append({
-                    "category": cat,
-                    "count": int(count_match.group(0)) if count_match else None,
-                    "file": entry.get("file") or "",
-                    "line": entry.get("line") or "",
-                    "quote": entry.get("quote") or entry.get("snippet") or entry.get("code") or "",
-                })
+                # D18: the entry normalisation is shared with the verifier
+                # flavour (one shape, one count parser), so an integer 0
+                # count is a real count in both flavours alike.
+                pattern = _normalise_anti_pattern(entry)
+                if pattern is not None:
+                    patterns.append(pattern)
     return patterns
 
 
