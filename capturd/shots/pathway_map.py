@@ -90,7 +90,16 @@ build refuses there exactly as D85 refuses it in an unconsumed one —
 never an all-None summary with no error, which is a silent drop: the
 caller cannot tell "no counts" from "counts I could not read". The
 scan fires only where no table was built, so no refusal that fires
-today is displaced.
+today is displaced. D105: a fenced code region (``` or ~~~) is PROSE —
+no line inside one is ever table-parsed, counted or refused, in any
+section, and the scan skips it too: a manifest that shows a
+table-shaped example inside a code fence parses with that block
+contributing nothing, while the same construct outside the fence still
+refuses (D85/D89) or counts (D24). D106: the scan is the LAST refusal
+in the parse — it runs only after every strict parse and every
+extractor has had its refusal — so for every construct that refused
+before D89 the refusal that fires is the strict parser's own, same
+class and same message: a scan that cannot pre-empt cannot displace.
 
 Refusals — every one of these constructs raises ``PathwayMapError``
 rather than half-fill. The list is data (``REFUSALS`` below, D49) and
@@ -829,34 +838,62 @@ def _status_from_finding(check_name: str, finding: dict[str, Any]) -> str:
     return "UNCLEAR"
 
 
-def _split_sections(raw: str) -> list[dict[str, Any]]:
-    """Split into heading sections. Heading matches inside a fenced code
-    block (``` or ~~~) are ignored — a ``# comment`` in a fence must not
-    carve out a phantom section and gut the table above it. Each section
-    carries ``start``: the 0-based index of its first body line in ``raw``,
-    so a refused table row can name its line number in the input."""
-    lines = raw.split("\n")
-    sections: list[dict[str, Any]] = []
-    current: dict[str, Any] | None = None
-    open_fence: str | None = None  # the opening marker, e.g. "```" or "~~~"
+# D105: the one fence rule, shared by `_split_sections` (a heading inside
+# a fence never splits a section), `_extract_tables` and
+# `_count_intent_refusal` (no line inside a fence is ever table-parsed,
+# counted or refused). The rule is GFM's, as `_split_sections` has always
+# applied it: a fence opens with a run of at least three backticks or
+# tildes (optionally indented, an info string may follow) and closes with
+# a bare run of the SAME marker at least as long; an unclosed fence runs
+# to the end of the text.
+_FENCE_OPEN_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+
+
+def _fence_mask(lines: list[str]) -> list[bool]:
+    """D105: True for every line inside a fenced code region — the opening
+    and closing marker lines included, an unclosed fence running to the
+    end. One source of truth for every reader of a section body (the
+    section splitter, the table parser and the count-intent scan), so the
+    three can never disagree about where a fence sits and a fenced block
+    is prose to all of them alike."""
+    mask = [False] * len(lines)
+    open_fence: str | None = None
     for idx, line in enumerate(lines):
-        fence_match = re.match(r"^\s*(`{3,}|~{3,})", line)
         if open_fence is None:
+            fence_match = _FENCE_OPEN_RE.match(line)
             if fence_match:
                 open_fence = fence_match.group(1)
-            else:
-                match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
-                if match:
-                    if current:
-                        sections.append(current)
-                    current = {"heading": match.group(2).strip(), "level": len(match.group(1)), "body": [], "start": idx + 1}
-                    continue
+                mask[idx] = True
         else:
+            mask[idx] = True
             # A closing fence is a bare run of the same marker, at least as
-            # long as the opening one; fenced lines stay in the body.
+            # long as the opening one.
             stripped = line.strip()
             if stripped and set(stripped) == {open_fence[0]} and len(stripped) >= len(open_fence):
                 open_fence = None
+    return mask
+
+
+def _split_sections(raw: str) -> list[dict[str, Any]]:
+    """Split into heading sections. D105: heading matches inside a fenced
+    code block (``` or ~~~) are ignored — a ``# comment`` in a fence must
+    not carve out a phantom section and gut the table above it — via the
+    one fence rule `_fence_mask` also serves to `_extract_tables` and the
+    count-intent scan. Each section carries ``start``: the 0-based index
+    of its first body line in ``raw``, so a refused table row can name
+    its line number in the input."""
+    lines = raw.split("\n")
+    mask = _fence_mask(lines)
+    sections: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    for idx, line in enumerate(lines):
+        if not mask[idx]:
+            match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+            if match:
+                if current:
+                    sections.append(current)
+                current = {"heading": match.group(2).strip(), "level": len(match.group(1)), "body": [], "start": idx + 1}
+                continue
         if current is not None:
             current["body"].append(line)
         else:
@@ -1328,8 +1365,11 @@ def _count_intent_refusal(lines: list[str], first_line: int, section: str) -> st
     """D85/D89: the refusal for a count-shaped-by-intent table construct
     the table parser cannot build — a collapsed header over a separator,
     or a two-column run of pipe lines with no separator.
-    `parse_manifest_text` runs this scan on EVERY section. In an
-    UNCONSUMED section the construct would silently drop its counts (the
+    `parse_manifest_text` runs this scan on EVERY section — after every
+    strict parse and every extractor has had its refusal (D106), so it is
+    the LAST refusal and can never pre-empt one — and no line inside a
+    fenced code region is ever judged (D105: a fenced block is prose). In
+    an UNCONSUMED section the construct would silently drop its counts (the
     probe built no table, so no extractor gate ever saw it); in a
     CONSUMED section the strict parse built no table for it either, so
     the extractors would read all-None counts with no error (D89 — the
@@ -1353,6 +1393,8 @@ def _count_intent_refusal(lines: list[str], first_line: int, section: str) -> st
         rows: list[list[str]] = []
         j = index
         while j < len(lines):
+            if mask[j]:
+                break  # D105: a fenced line is prose — it ends the run
             line = lines[j]
             if not line.strip():
                 break
@@ -1363,13 +1405,21 @@ def _count_intent_refusal(lines: list[str], first_line: int, section: str) -> st
             j += 1
         return rows
 
+    mask = _fence_mask(lines)  # D105: no fenced line is ever judged
     i = 0
     while i < len(lines):
+        if mask[i]:
+            i += 1
+            continue
         cells = cells_of(lines[i])
         if cells is None:
             i += 1
             continue
-        if i + 1 < len(lines) and _is_separator_line(lines[i + 1]):
+        if (
+            i + 1 < len(lines)
+            and not mask[i + 1]
+            and _is_separator_line(lines[i + 1])
+        ):
             body = body_after(i + 2)
             columns = len(cells_of(lines[i + 1]) or [])
             if len(cells) < 2 and columns == 2 and (
@@ -1456,15 +1506,26 @@ def _extract_tables(
     # value type would be a lie.
     tables: list[dict[str, Any]] = []
     lines = text.split("\n")
+    # D105: a fenced code region is prose — no line inside one (the fence
+    # markers included) is ever a header, a separator or a row; a fenced
+    # line inside a table body ends the table the way any prose line does.
+    mask = _fence_mask(lines)
     i = 0
     while i < len(lines):
+        if mask[i]:
+            i += 1
+            continue
         header_line = lines[i]
         if "|" not in header_line:
             i += 1
             continue
         cells, backtick_refusal = _split_row(header_line, first_line + i)
         sep_line = lines[i + 1] if i + 1 < len(lines) else ""
-        next_is_separator = _is_separator_line(sep_line)
+        next_is_separator = (
+            i + 1 < len(lines)
+            and not mask[i + 1]
+            and _is_separator_line(sep_line)
+        )
         if backtick_refusal is not None and next_is_separator:
             # D17/D47: the separator matched, so this line IS a table
             # header — only now is the unbalanced-backtick refusal decided.
@@ -1496,6 +1557,8 @@ def _extract_tables(
         # misaligned row is never let through as prose.
         while j < len(lines):
             line = lines[j]
+            if mask[j]:
+                break  # D105: a fenced line is prose — it ends the table
             if not line.strip():
                 break
             row, backtick_refusal = _split_row(line, first_line + j)
