@@ -165,7 +165,11 @@ class _StubManager:
 )
 def test_quality_reason_code_reaches_the_caller_unchanged(monkeypatch, capsys, results, reason_code):
     monkeypatch.setattr(cli, "RestedCaptureManager", lambda: _StubManager(results))
-    exit_code = cli.main(["--urls", "example.com"])
+    # D93: the gate is map-only — a map-driven run is where it decides.
+    exit_code = cli.main([
+        "--pathway-manifest", str(WIRING / "named-control-manifest.md"),
+        "--base-url", "http://base.test",
+    ])
     captured = capsys.readouterr()
     output = captured.out + captured.err
     assert exit_code != 0, "a failing run must exit non-zero"
@@ -181,7 +185,11 @@ def test_quality_gate_passes_a_meaningful_run(monkeypatch, capsys):
         "states": [],
     }]
     monkeypatch.setattr(cli, "RestedCaptureManager", lambda: _StubManager(results))
-    exit_code = cli.main(["--urls", "example.com"])
+    # D93: the gate is map-only — a map-driven run is where it decides.
+    exit_code = cli.main([
+        "--pathway-manifest", str(WIRING / "named-control-manifest.md"),
+        "--base-url", "http://base.test",
+    ])
     assert exit_code == 0
 
 

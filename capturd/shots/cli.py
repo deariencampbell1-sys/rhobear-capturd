@@ -10,9 +10,11 @@ real capture plan comes out — ``--dry-run`` prints that plan with no browser
 and no network call: a ``trigger_selector`` comes only from what the map
 itself names (the ``selector``/``css`` column or a selector-shaped token in
 its ``trigger``), and a named control that would need the page to bind is
-reported unbound (``selector=-``) with a flag. The quality gate (01c) decides
-whether a finished run is evidence; its reason code reaches this caller
-unchanged.
+reported unbound (``selector=-``) with a flag. The quality gate (01c)
+decides whether a MAP-DRIVEN run is evidence — a legacy ``--urls`` /
+``--sitemap`` / ``--crawl`` / ``--local`` run keeps its pre-gate exit codes
+(a baseline-only run is 0, a failed job is 1, done-with-errors is 3) — and
+its reason code reaches this caller unchanged when a gate runs.
 """
 
 from __future__ import annotations
@@ -32,7 +34,8 @@ from .capture import (
 from .pathway_map import PathwayMapError
 from .quality import build_quality_error, is_passing, summarize_capture_quality
 
-#: Exit code for a finished run the quality gate refuses to call evidence.
+#: Exit code for a finished map-driven run the quality gate refuses to call
+#: evidence. The gate is map-only (D93) — a legacy run never gets this code.
 EXIT_QUALITY_FAIL = 4
 
 
@@ -234,16 +237,21 @@ def main(argv: list[str] | None = None) -> int:
     if job.get("output_dir") and (job.get("output_dir") != job.get("zip_path")):
         print(f"out:  {job['output_dir']}")
 
-    # The quality gate (01c) decides; its reason code reaches the caller
-    # unchanged - no re-wording downstream, honest-failure at the exit code.
-    summary = build_quality_summary(job.get("results") or [])
-    quality = summarize_capture_quality(summary)
-    if not is_passing(summary):
-        print(f"quality: {' '.join(quality.reason_codes)}", file=sys.stderr)
-        detail = build_quality_error(quality)
-        if detail:
-            print(detail, file=sys.stderr)
-        return EXIT_QUALITY_FAIL
+    # D93: the quality gate (01c) decides only for MAP-DRIVEN runs — a
+    # --urls / --sitemap / --crawl / --local run exits exactly as it did
+    # before this PR's gate (a baseline-only run is 0, a failed job keeps its
+    # old code, done-with-errors is 3). When a gate runs its reason code
+    # reaches the caller unchanged - no re-wording downstream, honest-failure
+    # at the exit code.
+    if map_input:
+        summary = build_quality_summary(job.get("results") or [])
+        quality = summarize_capture_quality(summary)
+        if not is_passing(summary):
+            print(f"quality: {' '.join(quality.reason_codes)}", file=sys.stderr)
+            detail = build_quality_error(quality)
+            if detail:
+                print(detail, file=sys.stderr)
+            return EXIT_QUALITY_FAIL
     return 0 if status == "done" else 3
 
 
