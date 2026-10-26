@@ -1250,6 +1250,57 @@ def test_unbalanced_backtick_in_header_is_refused():
     assert "trigger" in message
 
 
+def test_collapsed_header_with_a_separator_refuses():
+    # D47: a header whose stray backtick collapses it to fewer than two
+    # cells short-circuits at `len(cells) < 2` BEFORE the backtick refusal
+    # is inspected — the whole table and every row under it vanish with no
+    # error, the exact silent drop this PR exists to close. The separator
+    # following proves the line IS a table header, so the same refusal as
+    # the >=2-cell case fires, naming the line.
+    text = "\n".join([
+        "# Pathway Manifest — collapsed header",    # line 1
+        "",                                        # line 2
+        "## 1. Pathways Table",                    # line 3
+        "",                                        # line 4
+        "| id | status |",                         # line 5
+        "|---|---|",                               # line 6
+        "| p1 | WIRED |",                          # line 7
+        "",                                        # line 8
+        "## 2. Second Table",                      # line 9
+        "",                                        # line 10
+        "| `a | b |",                              # line 11 — collapses to one cell
+        "|---|---|",                               # line 12
+        "| r1 | 5 |",                              # line 13
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(text)
+    message = str(excinfo.value)
+    assert "line 11" in message
+    assert "unbalanced backtick" in message
+
+
+def test_collapsed_header_without_a_separator_is_not_a_table():
+    # D47's other half: the refusal fires only where the line is KNOWN to
+    # be a table header — a separator follows. `| `a | b |` with no
+    # separator after it is not a table: it is skipped like any other
+    # non-table line, with no refusal, and the document still parses.
+    text = "\n".join([
+        "# Pathway Manifest — stray backtick, no separator",  # line 1
+        "",                                                   # line 2
+        "## Notes",                                           # line 3
+        "",                                                   # line 4
+        "| `a | b |",                                         # line 5 — no separator below
+        "",                                                   # line 6
+        "## 1. Pathways Table",                               # line 7
+        "",                                                   # line 8
+        "| id | status |",                                    # line 9
+        "|---|---|",                                          # line 10
+        "| p1 | WIRED |",                                     # line 11
+    ])
+    parsed = parse_manifest_text(text)
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+
+
 def test_unknown_wired_token_is_unclear():
     # D6: the wired column's own polarity — a token outside
     # yes|true|✔|wired / no|false|✗|unwired is UNCLEAR, with the raw cell
