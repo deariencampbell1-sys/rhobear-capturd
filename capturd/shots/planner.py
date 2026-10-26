@@ -736,6 +736,24 @@ def _is_visible(node: _Node) -> bool:
     return True
 
 
+def _in_first_legend(fieldset: _Node, node: _Node) -> bool:
+    """Is ``node`` inside the ``fieldset``'s first ``<legend>`` subtree (D20)?
+
+    Per HTML, the first ``legend`` element child of a disabled ``fieldset``
+    is exempt: its descendants are not disabled by that fieldset. The path
+    from ``node`` up to the ``fieldset`` must pass through that exact legend.
+    """
+    legend = next((child for child in fieldset.children if child.tag == "legend"), None)
+    if legend is None:
+        return False
+    current: Optional[_Node] = node
+    while current is not None and current is not fieldset:
+        if current is legend:
+            return True
+        current = current.parent
+    return False
+
+
 def _is_disabled(node: _Node) -> bool:
     """Disabled-ness, self and inherited (D10).
 
@@ -745,6 +763,11 @@ def _is_disabled(node: _Node) -> bool:
     ``<button>`` inside ``<fieldset disabled>`` is unclickable however deep
     it is nested, so it is never planned. The ancestor chain is walked via
     :func:`_ancestors_inclusive`, like :func:`_is_visible`.
+
+    D20 exception, per HTML: the first ``<legend>`` subtree of a disabled
+    ``<fieldset>`` is interactive — those controls are not disabled by that
+    fieldset (a second legend's subtree, and everything else in the fieldset,
+    still is).
     """
     if node.tag in ("button", "input", "select", "textarea", "optgroup", "option", "fieldset"):
         if "disabled" in node.attrs:
@@ -755,7 +778,8 @@ def _is_disabled(node: _Node) -> bool:
         return True
     for ancestor in _ancestors_inclusive(node):
         if ancestor.tag == "fieldset" and "disabled" in ancestor.attrs:
-            return True
+            if not _in_first_legend(ancestor, node):
+                return True
     return False
 
 
