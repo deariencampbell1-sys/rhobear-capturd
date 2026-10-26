@@ -54,6 +54,7 @@ pass, ``NO_CAPTURES`` is a failure. The reason vocabulary is closed in
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -234,8 +235,16 @@ def classify_result(result: Any) -> tuple[str, list[str]]:
 
 
 def _named(files: list[str]) -> str:
-    """Render file names for the error text, ``""`` fallback included."""
-    return ", ".join(f'"{name}"' for name in files)
+    """Render file names for the error text, ``""`` fallback included.
+
+    D3: names are JSON-escaped before they enter the text — a name with
+    ``"`` gets ``\\"``, a newline gets ``\\n`` — so no name can break the
+    quoting, inject a line break, or forge a ``[PASS]`` line in a log.
+    Plain names render exactly as before (``"same.png"``); this is
+    ``repr(name)``'s safety with the double-quote style the error text
+    has always used.
+    """
+    return ", ".join(json.dumps(name) for name in files)
 
 
 def build_quality_error(quality: CaptureQuality) -> str:
