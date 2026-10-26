@@ -452,6 +452,26 @@ def test_unrecognised_count_header_refuses_and_wider_vocabulary_reads():
     assert [p["id"] for p in parsed["pathways"]] == ["p1"]
 
 
+def test_tables_have_no_first_row_field():
+    # D40: the table dict carries no `first_row` key. It was added to every
+    # table dict and read by nobody — dead data whose line-number contract
+    # invites a future consumer to rely on something unmaintained. The
+    # table dict is internal to `_extract_tables` (never returned to
+    # callers), so this test reaches into the private extractor to pin the
+    # exact shape: `headers` and `rows`, nothing else.
+    text = "\n".join([
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+    ])
+    tables = pathway_map._extract_tables(text)
+    assert len(tables) == 1
+    assert set(tables[0]) == {"headers", "rows"}
+    assert "first_row" not in tables[0]
+    assert tables[0]["headers"] == ["id", "status"]
+    assert tables[0]["rows"] == [["p1", "WIRED"]]
+
+
 def test_both_flavours_return_the_same_key_set():
     # One shape for both flavours: identical top-level keys, with `flavour`
     # saying which produced it; summary and metadata carry the same keys too.
