@@ -38,22 +38,16 @@ entry with no usable category is refused the same way (D27): the returned
 array is never shorter than what the feed declared.
 
 Refusals — every one of these constructs raises ``PathwayMapError``
-rather than half-fill, and each is named here so the list cannot live
-only in a PR body: a misaligned row (a row whose cell count differs
-from its header's, named with its line number); pipe-bearing prose
-immediately after a table, which the parser cannot tell from a
-misaligned row — put a blank line between; a duplicate ``id`` or an
-over-long ``id`` (over 200 characters); an unbalanced backtick in a
-confirmed table header or row — including a header the backtick
-collapsed to fewer than two cells: that header refuses too, it never
-silently drops the table (D47); a verifier
-``antiPatterns`` value that is not a list; an anti-pattern entry that is
-not a mapping; an anti-pattern entry with no usable category; a two-column
-table whose rows are count rows (a count label with a numeric count) but
-whose header is not a recognised count-table header — the feed owner fixes
-the header, the consumer never receives nulls (D38); and a count cell of
-two bare integers (``2 5`` — nothing between the runs but whitespace),
-which is ambiguous and is never glued into one number.
+rather than half-fill. The list is data (``REFUSALS`` below, D49) and
+is rendered at the end of this docstring, so it cannot live only in a
+PR body. A misaligned row is refused naming its line number;
+pipe-bearing prose immediately after a table is refused the same way —
+the parser cannot tell it from a misaligned row, so put a blank line
+between; a collapsed table header raises the same backtick refusal as
+any confirmed header (D47) — it never drops the table; an
+unrecognised count-table header names the vocabulary it accepts
+(D48) — the feed owner fixes the header, the consumer never receives
+nulls.
 """
 
 from __future__ import annotations
@@ -72,6 +66,25 @@ __all__ = [
     "parse_verifier_json",
     "parse_verifier_json_text",
 ]
+
+# D49: the refusal list as data — private bookkeeping (deliberately NOT in
+# ``__all__``), rendered into the module docstring below so the list cannot
+# live only in a PR body and cannot drift from what the docstring claims.
+REFUSALS: tuple[str, ...] = (
+    "a misaligned row",
+    "pipe-bearing prose immediately after a table",
+    "a duplicate pathway id",
+    "an over-long pathway id",
+    "an unbalanced backtick in a confirmed table header or row",
+    "a collapsed table header (the same backtick refusal)",
+    "a verifier 'antiPatterns' value that is not a list",
+    "an anti-pattern entry that is not a mapping",
+    "an anti-pattern entry with no usable category",
+    "an unrecognised count-table header over count rows",
+    "a count cell of two bare integers",
+)
+
+__doc__ = (__doc__ or "").rstrip() + "\n\n* " + "\n* ".join(REFUSALS) + ".\n"
 
 _ROUTE_METHOD_RE = re.compile(
     r"\b(GET|POST|PUT|DELETE|PATCH|WS)\s+(/[^\s`'\"]+)",
