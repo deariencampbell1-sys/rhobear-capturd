@@ -1198,6 +1198,43 @@ def test_cell_with_two_integer_runs_is_refused():
     )["antiPatterns"][0]["count"] == 1234
 
 
+def test_nbsp_grouping_and_verifier_two_run_refusal():
+    # D50: the two count paths the suite never exercised.
+    # 1. The non-breaking space is a grouping separator INSIDE one number
+    #    (named in the D19 grammar) — "1\u00a0234" reads 1234, never the
+    #    truncated first run and never a silent None.
+    # 2. Two bare integers refused through the VERIFIER path —
+    #    parse_verifier_json_text with {"count": "2 5"} — naming the
+    #    cell, not only through the manifest summary (D26).
+    nbsp_text = "\n".join([
+        "# Pathway Manifest — nbsp-grouped count",
+        "",
+        "## Summary Counts",
+        "",
+        "| Category | Count |",
+        "|---|---|",
+        "| **WIRED** | 1\u00a0234 |",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+    ])
+    parsed = parse_manifest_text(nbsp_text)
+    assert parsed["summary"]["wired"] == 1234
+
+    verifier_text = json.dumps({
+        "antiPatterns": [{"category": "z", "count": "2 5"}],
+        "checks": {"api-wiring": {"findings": [{"id": "f1", "path": "/api/x"}]}},
+    })
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_verifier_json_text(verifier_text)
+    message = str(excinfo.value)
+    assert "2 5" in message
+    assert "two bare integers" in message
+
+
 def test_prose_line_with_pipe_and_one_backtick_does_not_abort():
     # D17: a refusal is decided once the line is KNOWN to be a table, never
     # during header detection. A prose line in a Notes section that carries a
