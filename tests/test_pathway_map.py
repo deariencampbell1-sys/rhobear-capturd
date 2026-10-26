@@ -2744,10 +2744,17 @@ def test_docstring_is_static_and_refusals_are_text():
     # the module must not change `__doc__` away from the docstring found
     # in the source file.
     source = Path(pathway_map.__file__).read_text(encoding="utf-8")
-    source_docstring = ast.get_docstring(ast.parse(source))
-    assert source_docstring, "the source module must carry a docstring"
-    # Importing the module did not change the docstring.
-    assert pathway_map.__doc__ == source_docstring
+    # The docstring AS FOUND in the source file — the raw string literal,
+    # not ast.get_docstring's cleaned copy (which strips the trailing
+    # newline and would never equal the module's own ``__doc__``).
+    raw_docstring = ast.parse(source).body[0].value.value
+    assert raw_docstring, "the source module must carry a docstring"
+    # Importing the module did not change the docstring. (Under
+    # ``python -OO`` there is no module ``__doc__`` at all — stripped at
+    # compile time, nothing to mutate; the text-in-source assertion below
+    # is the D79 guarantee that still holds.)
+    if pathway_map.__doc__ is not None:
+        assert pathway_map.__doc__ == raw_docstring
     # Every refusal entry appears in the docstring as text.
     for refusal in pathway_map.REFUSALS:
-        assert refusal in source_docstring, refusal
+        assert refusal in raw_docstring, refusal

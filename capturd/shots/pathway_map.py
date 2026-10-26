@@ -67,8 +67,11 @@ unchanged.
 
 Refusals — every one of these constructs raises ``PathwayMapError``
 rather than half-fill. The list is data (``REFUSALS`` below, D49) and
-is rendered at the end of this docstring, so it cannot live only in a
-PR body. A misaligned row is refused naming its line number;
+is written out at the end of this docstring as text (D79 — the
+docstring is static: nothing appends to ``__doc__`` at import, so the
+list survives ``python -OO`` and cannot live only in a PR body; the
+test suite pins that every ``REFUSALS`` entry appears here verbatim).
+A misaligned row is refused naming its line number;
 pipe-bearing prose immediately after a table is refused the same way
 when it is row-shaped — the parser cannot tell it from a misaligned
 row, so put a blank line between; D67 adds the one prose escape: a
@@ -78,7 +81,21 @@ table without error; a collapsed table header raises the same backtick
 refusal as any confirmed header (D47) — it never drops the table; an
 unrecognised count-table header names the vocabulary it accepts
 (D48) — the feed owner fixes the header, the consumer never receives
-nulls.
+nulls. The list, written out:
+
+* a misaligned row
+* pipe-bearing prose immediately after a table
+* a duplicate pathway id
+* an over-long pathway id
+* an unbalanced backtick in a confirmed table header or row
+* a collapsed table header (the same backtick refusal)
+* a verifier 'antiPatterns' value that is not a list
+* an anti-pattern entry that is not a mapping
+* an anti-pattern entry with no usable category
+* a manifest anti-pattern row with no usable category
+* an unrecognised count-table header over count rows
+* a count cell of two bare integers
+* a duplicate or conflicting count row
 """
 
 from __future__ import annotations
@@ -99,8 +116,12 @@ __all__ = [
 ]
 
 # D49: the refusal list as data — private bookkeeping (deliberately NOT in
-# ``__all__``), rendered into the module docstring below so the list cannot
-# live only in a PR body and cannot drift from what the docstring claims.
+# ``__all__``). D79: the module docstring is static and states the list as
+# text BY HAND — nothing is rendered into ``__doc__`` at import (that
+# mutation replaced the whole docstring with the list under ``python -OO``);
+# test_docstring_is_static_and_refusals_are_text pins that every entry here
+# appears in the source docstring verbatim, so the two cannot drift
+# silently.
 REFUSALS: tuple[str, ...] = (
     "a misaligned row",
     "pipe-bearing prose immediately after a table",
@@ -116,8 +137,6 @@ REFUSALS: tuple[str, ...] = (
     "a count cell of two bare integers",
     "a duplicate or conflicting count row",
 )
-
-__doc__ = (__doc__ or "").rstrip() + "\n\n* " + "\n* ".join(REFUSALS) + ".\n"
 
 _ROUTE_METHOD_RE = re.compile(
     r"\b(GET|POST|PUT|DELETE|PATCH|WS)\s+(/[^\s`'\"]+)",
