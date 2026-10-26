@@ -248,6 +248,35 @@ def test_three_column_table_under_summary_heading_sets_no_counts():
     assert [p["id"] for p in parsed["pathways"]] == ["p1", "p2"]
 
 
+def test_count_table_under_any_heading_is_read():
+    # D24: a count table is its header SHAPE — exactly two columns, a
+    # category word first and a count word second — wherever it sits. A
+    # manifest whose counts live under ## Status Overview or ## Breakdown
+    # must READ its counts, not raise: the section heading no longer
+    # decides anything, so a real feed that parsed yesterday cannot fail
+    # today because its count table sits under a heading outside the old
+    # summary allow-list.
+    for heading in ("Status Overview", "Breakdown", "Distribution", "Summary Counts"):
+        text = "\n".join([
+            "# Pathway Manifest — counts under any heading",
+            "",
+            f"## {heading}",
+            "",
+            "| Category | Count |",
+            "|---|---|",
+            "| **WIRED** | 5 |",
+            "",
+            "## 1. Pathways Table",
+            "",
+            "| id | status |",
+            "|---|---|",
+            "| p1 | WIRED |",
+        ])
+        parsed = parse_manifest_text(text)
+        assert parsed["summary"]["wired"] == 5, heading
+        assert [p["id"] for p in parsed["pathways"]] == ["p1"], heading
+
+
 def test_summary_table_without_a_heading_is_decided():
     # D8, decided: a summary-shaped table outside a summary-named section is
     # REFUSED ("summary table outside a summary section") — never silently
