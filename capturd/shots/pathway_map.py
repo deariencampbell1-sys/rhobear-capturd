@@ -477,6 +477,22 @@ def _count_label_match(cell: str) -> re.Match[str] | None:
     return _COUNT_ROW_RE.match(_ROW_EMPHASIS_RE.sub("", cell))
 
 
+def _reads_as_count_row(label_cell: str, count_cell: str) -> bool:
+    """D60: the DETECTION probe for "does this row read like a count row?" —
+    a count label (D7's set) over a parseable count. A cell that REFUSES
+    (two bare integers) means "this is not a count row" here: the refusal
+    is caught and the row demoted, so an unrelated two-column table can
+    never abort the whole document. The refusal itself still fires where a
+    count is genuinely being read — a recognised count table's rows
+    (`_extract_summary`) and an anti-pattern entry's count cell."""
+    if not _count_label_match(label_cell):
+        return False
+    try:
+        return _count_from_cell(count_cell) is not None
+    except PathwayMapError:
+        return False
+
+
 def _normalised_summary(source: dict[str, Any]) -> dict[str, Any]:
     """The one summary shape for both flavours: the same 8 count keys, with
     None where the source does not say."""
@@ -1015,8 +1031,10 @@ def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, Any]]:
                 # (`| p1 | WIRED |`) as a count label over the id's leading
                 # integer and refuse every two-column pathway table — the
                 # header shape (D24/D59), not a row probe, decides whether
-                # a table counts.
-                if _count_label_match(row[0]) and _count_from_cell(row[1]) is not None:
+                # a table counts. D60: a row whose count cell refuses is
+                # demoted to not-a-count-row by the probe — the refusal
+                # itself still fires where a count is genuinely read.
+                if _reads_as_count_row(row[0], row[1]):
                     raise PathwayMapError(
                         f"table header at line {first_line + i} is "
                         f"'{' | '.join(headers)}' — its rows read like count "
