@@ -341,10 +341,17 @@ def _extract_summary(sections: list[dict[str, Any]]) -> dict[str, Any]:
     summary: dict[str, Any] = {key: None for key in _SUMMARY_COUNT_KEYS}
     for sec in sections:
         # Counts come from the summary section ONLY: the body of the section
-        # whose heading matches summary|count. A pathway row shaped
-        # `| p1 | WIRED | 3 |` sits in a pathways table and must never set
-        # summary["wired"] — if no such section exists, counts stay None.
-        if not re.search(r"summary|count", str(sec.get("heading") or ""), re.I):
+        # whose heading carries a summary word — word-anchored against the
+        # allow-list summary/count(s)/total(s)/metric(s), so "Accounting",
+        # "Discount" or "Counter" is not a summary section while "Totals"
+        # is. A pathway row shaped `| p1 | WIRED | 3 |` sits in a pathways
+        # table and must never set summary["wired"] — if no such section
+        # exists, counts stay None.
+        if not re.search(
+            r"\b(summary|counts?|totals?|metrics?)\b",
+            str(sec.get("heading") or ""),
+            re.I,
+        ):
             continue
         text = "\n".join(sec["body"])
         # IGNORECASE makes the uppercase spellings cover every case variant;
