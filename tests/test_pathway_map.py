@@ -370,6 +370,88 @@ def test_two_column_pathway_table_is_not_a_count_table():
     assert [p["id"] for p in parsed["pathways"]] == ["p1", "p2"]
 
 
+def test_unrecognised_count_header_refuses_and_wider_vocabulary_reads():
+    # D38: an unrecognised count-table header REFUSES — it never returns
+    # nulls. Three pinned behaviours:
+    #
+    # 1. The header vocabulary is wider: `metric(s)`, `value(s)`,
+    #    `number`, `amount`, `qty` count as count words and `metric(s)`,
+    #    `measure`, `item` as category words, so `| Metric | Value |`
+    #    READS its counts instead of silently dropping every row.
+    # 2. A two-column table whose rows are count rows (a count label in
+    #    the first cell, a parseable count in the second) but whose
+    #    header is not a recognised count-table header raises
+    #    PathwayMapError naming the header — the feed owner fixes the
+    #    header; the consumer never receives nulls.
+    # 3. A two-column table whose rows are NOT count labels raises
+    #    nothing — the refusal stays inside D38's rule and does not
+    #    widen to arbitrary two-column tables.
+    # Case 1: the wider vocabulary reads its counts.
+    metric_text = "\n".join([
+        "# Pathway Manifest — metric header",        # line 1
+        "",                                          # line 2
+        "## Status Overview",                        # line 3
+        "",                                          # line 4
+        "| Metric | Value |",                        # line 5
+        "|---|---|",                                 # line 6
+        "| WIRED | 5 |",                             # line 7
+        "",                                          # line 8
+        "## 1. Pathways Table",                      # line 9
+        "",                                          # line 10
+        "| id | status |",                           # line 11
+        "|---|---|",                                 # line 12
+        "| p1 | WIRED |",                            # line 13
+    ])
+    parsed = parse_manifest_text(metric_text)
+    assert parsed["summary"]["wired"] == 5
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+
+    # Case 2: an unrecognised header over count rows refuses, naming the
+    # header row — never a silent all-None summary.
+    thing_text = "\n".join([
+        "# Pathway Manifest — unrecognised count header",  # line 1
+        "",                                                # line 2
+        "## Status Overview",                              # line 3
+        "",                                                # line 4
+        "| Thing | Blah |",                                # line 5
+        "|---|---|",                                       # line 6
+        "| WIRED | 5 |",                                   # line 7
+        "",                                                # line 8
+        "## 1. Pathways Table",                            # line 9
+        "",                                                # line 10
+        "| id | status |",                                 # line 11
+        "|---|---|",                                       # line 12
+        "| p1 | WIRED |",                                  # line 13
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(thing_text)
+    message = str(excinfo.value)
+    assert "Thing" in message
+    assert "Blah" in message
+
+    # Case 3: non-count-label rows raise nothing — the refusal needs BOTH
+    # a count label and a parseable count, not just a numeric second cell.
+    plain_text = "\n".join([
+        "# Pathway Manifest — plain two-column table",  # line 1
+        "",                                             # line 2
+        "## Notes",                                     # line 3
+        "",                                             # line 4
+        "| Thing | Blah |",                             # line 5
+        "|---|---|",                                    # line 6
+        "| alpha | 7 |",                                # line 7 — numeric, not a label
+        "| beta | gamma |",                             # line 8
+        "",                                             # line 9
+        "## 1. Pathways Table",                         # line 10
+        "",                                             # line 11
+        "| id | status |",                              # line 12
+        "|---|---|",                                    # line 13
+        "| p1 | WIRED |",                               # line 14
+    ])
+    parsed = parse_manifest_text(plain_text)
+    assert all(v is None for v in parsed["summary"].values())
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+
+
 def test_both_flavours_return_the_same_key_set():
     # One shape for both flavours: identical top-level keys, with `flavour`
     # saying which produced it; summary and metadata carry the same keys too.
