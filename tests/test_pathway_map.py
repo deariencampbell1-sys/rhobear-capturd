@@ -2035,3 +2035,41 @@ def test_section_body_is_table_parsed_once(monkeypatch):
     assert [p["id"] for p in parsed["pathways"]] == [
         "capture-start", "capture-job-poll", "catalog-search",
     ]
+
+
+def test_manifest_anti_pattern_row_without_category_refuses():
+    # D64: the flavours must agree — a declared anti-pattern with no usable
+    # category is REFUSED in both. The verifier entry refuses by index
+    # (D27); the manifest row refuses by its line. A silently skipped row
+    # returns a shorter array than the feed declared with no signal.
+    manifest_text = "\n".join([
+        "# Pathway Manifest — anti-pattern row without category",  # line 1
+        "",                                                      # line 2
+        "## 1. Pathways Table",                                  # line 3
+        "",                                                      # line 4
+        "| id | status |",                                       # line 5
+        "|---|---|",                                             # line 6
+        "| p1 | WIRED |",                                        # line 7
+        "",                                                      # line 8
+        "## 2. Anti-patterns",                                   # line 9
+        "",                                                      # line 10
+        "| Category | Count | File | Line | Quote |",             # line 11
+        "|---|---|---|---|---|",                                 # line 12
+        "| real-find | 3 | hub.ts | 88 | `export const x` |",     # line 13
+        "|  | 5 | hub.ts | 89 | `export const y` |",              # line 14 — no category
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(manifest_text)
+    message = str(excinfo.value)
+    assert "line 14" in message
+    assert "category" in message
+
+    # The verifier flavour already refuses such an entry by index (D27) —
+    # both flavours agree on the same input value.
+    verifier_text = json.dumps({
+        "antiPatterns": [{"category": "ok"}, {"count": 3}],
+        "checks": {"api-wiring": {"findings": [{"id": "f1", "path": "/api/x"}]}},
+    })
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_verifier_json_text(verifier_text)
+    assert "index 1" in str(excinfo.value)
