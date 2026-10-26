@@ -26,7 +26,13 @@ and no heading-specific extractor claims the table first (D66: each table is
 consumed by one extractor only); a three-column
 table sets no counts and raises nothing, and a two-column pathway table
 (``| id | status |``) is not a count table because its second header is not
-a count word. A summary count key set by two rows is refused (D61) — the
+a count word. D75: header words are matched by PHRASE CONTAINMENT after
+stripping markdown emphasis — internal spaces survive and runs of
+whitespace collapse to one space — so the multi-word count headers
+(``Total Count``, ``Path Count``, ``Wired Count``) and category headers
+(``Category Name``, ``Metric Value``) are recognised, while an
+unrecognised header over count rows still refuses (D38). A summary count
+table key set by two rows is refused (D61) — the
 ambiguity is the duplicate, not the value, exactly like a duplicate pathway
 id. The refusal is decided once a line is KNOWN to be a
 table, never during header detection: a prose line that carries a pipe
@@ -434,14 +440,38 @@ _COUNT_WORDS_TEXT = ", ".join(sorted(_COUNT_WORDS))
 _CATEGORY_WORDS_TEXT = ", ".join(sorted(_CATEGORY_WORDS))
 
 
-# D31: header cells are matched after removing markdown emphasis — `*`,
-# `_`, backticks and whitespace are stripped from both header cells before
-# the word-set comparison, so `| **Category** | **Count** |`,
-# `| _Category_ | _Count_ |` and `` | `Count` | ... `` are all count
-# tables. The old row-regex tolerated the emphasis in row labels; the
-# shape check must tolerate it in headers too, or every summary count
-# under an emphasised header is silently dropped.
-_EMPHASIS_RE = re.compile(r"[\s*_`]+")
+# D31/D75: header cells are matched after removing markdown emphasis —
+# `*`, `_` and backticks are stripped (replaced with a space so emphasis
+# between two words cannot glue them into one) while whitespace is KEPT
+# and runs of whitespace collapse to one space (D75), so `| **Category** |
+# **Count** |`, `| _Category_ | _Count_ |` and `` | `Count` | ... `` are
+# all count tables — and so is the multi-word `| Total Count |` style.
+# The old D31 strip removed the internal spaces too, which turned
+# `Total Count` into one unrecognised token and made D38 refuse a feed
+# that parsed the day before. (Row LABELS keep their own whitespace for
+# the same reason — see `_ROW_EMPHASIS_RE`.)
+_EMPHASIS_RE = re.compile(r"[*_`]+")
+
+
+def _header_tokens(header: str) -> frozenset[str]:
+    """D75: the words of a header cell. Emphasis (`*`, `_`, backticks) is
+    stripped, runs of whitespace collapse to one space, and the remainder
+    splits on everything that is not a letter, a digit or ``#`` — so
+    ``Total Count`` is {total, count} and a bare ``#`` is still a word."""
+    text = " ".join(_EMPHASIS_RE.sub(" ", header).lower().split())
+    return frozenset(re.findall(r"[a-z0-9#]+", text))
+
+
+def _is_count_cell(header: str) -> bool:
+    """D75: a header cell is a COUNT cell when it contains a count word as
+    a word — phrase containment, not exact set membership."""
+    return bool(_header_tokens(header) & _COUNT_WORDS)
+
+
+def _is_category_cell(header: str) -> bool:
+    """D75: a header cell is a CATEGORY cell when it contains a category
+    word as a word — phrase containment, not exact set membership."""
+    return bool(_header_tokens(header) & _CATEGORY_WORDS)
 
 
 def _count_table_order(headers: list[str]) -> tuple[int, int] | None:
@@ -451,17 +481,21 @@ def _count_table_order(headers: list[str]) -> tuple[int, int] | None:
     read with, or None when the header is not a count-table shape. This
     decides WHERE counts may be read from; the section heading is
     irrelevant. D31: the comparison runs on the header cells with markdown
-    emphasis removed (`*`, `_`, backticks and whitespace stripped), so a
-    bold or italic header is still a count table — never a silent drop of
-    every count under it. D59: a feed that writes its count column first
-    (``| Count | Category |``) is the same shape — recognised and read,
-    never an all-None summary with no error."""
+    emphasis removed, so a bold or italic header is still a count table —
+    never a silent drop of every count under it. D59: a feed that writes
+    its count column first (``| Count | Category |``) is the same shape —
+    recognised and read, never an all-None summary with no error. D75: the
+    two cells are matched by PHRASE CONTAINMENT — a cell is a count cell
+    when it contains a count word as a word and a category cell when it
+    contains a category word as a word, with internal spaces kept and
+    runs of whitespace collapsed — so ``Total Count``, ``Path Count``,
+    ``Wired Count``, ``Category Name`` and ``Metric Value`` are all
+    recognised."""
     if len(headers) != 2:
         return None
-    first, second = (_EMPHASIS_RE.sub("", header).lower() for header in headers)
-    if first in _CATEGORY_WORDS and second in _COUNT_WORDS:
+    if _is_category_cell(headers[0]) and _is_count_cell(headers[1]):
         return (0, 1)
-    if first in _COUNT_WORDS and second in _CATEGORY_WORDS:
+    if _is_count_cell(headers[0]) and _is_category_cell(headers[1]):
         return (1, 0)
     return None
 
@@ -471,7 +505,7 @@ def _is_count_table(headers: list[str]) -> bool:
     word and a count word in either column order (D59). This decides WHERE
     counts may be read from; the section heading is irrelevant. See
     `_count_table_order` for the shape's details (D31 emphasis stripping
-    included)."""
+    and D75 phrase containment included)."""
     return _count_table_order(headers) is not None
 
 
@@ -539,8 +573,10 @@ _COUNT_ROW_RE = re.compile(
 # so `***WIRED***` (bold-italic — three asterisks per side, which the old
 # hand-rolled `\*{0,2}` could never match) counts exactly like `WIRED`,
 # and `*WIRED*`, `_WIRED_` and `` `WIRED` `` do too. Unlike the header
-# check's `_EMPHASIS_RE`, whitespace is KEPT: "TOTAL PATHWAYS" is a
-# two-word label and needs its space.
+# check the match is on the WHOLE cell, not its words: whitespace is kept
+# so the two-word label "TOTAL PATHWAYS" stays one label, and the label
+# set is matched by full-string membership where the header cells are
+# matched by phrase containment (D75).
 _ROW_EMPHASIS_RE = re.compile(r"[*_`]+")
 
 
@@ -1187,18 +1223,19 @@ def _extract_tables(
             # D65: the probe tries BOTH column orders — but the reversed
             # order only where the header itself reads as a REVERSED count
             # table whose category word is unrecognised (its first cell is
-            # a count word; inside this block the second cell is then no
-            # category word either, or the table would already be
-            # recognised). That is the table D65 names. Probing the
-            # reversed order for EVERY unrecognised header would read a
-            # pathway table's status cell (`| p1 | WIRED |`) as a count
-            # label over the id's leading integer and refuse every
-            # two-column pathway table. D60: a cell that refuses (two bare
-            # integers) is demoted to not-a-count-row by the probe — the
-            # refusal itself still fires where a count is genuinely read.
+            # a count cell — D75's containment check; inside this block the
+            # second cell is then no category cell either, or the table
+            # would already be recognised). That is the table D65 names.
+            # Probing the reversed order for EVERY unrecognised header
+            # would read a pathway table's status cell (`| p1 | WIRED |`)
+            # as a count label over the id's leading integer and refuse
+            # every two-column pathway table. D60: a cell that refuses (two
+            # bare integers) is demoted to not-a-count-row by the probe —
+            # the refusal itself still fires where a count is genuinely
+            # read.
             orders = (
                 ((0, 1), (1, 0))
-                if _EMPHASIS_RE.sub("", headers[0]).lower() in _COUNT_WORDS
+                if _is_count_cell(headers[0])
                 else ((0, 1),)
             )
             for row in rows:
