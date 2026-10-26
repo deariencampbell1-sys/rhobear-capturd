@@ -618,6 +618,33 @@ def test_verifier_anti_pattern_entry_must_be_a_mapping():
         )
 
 
+def test_verifier_anti_patterns_round_trip():
+    # D23: the verifier's own `antiPatterns` array is parsed into the
+    # returned map. The key is part of the returned shape and the feed
+    # declares the data, so returning [] would be the drop. A well-formed
+    # entry lands in `antiPatterns` with its fields intact, through the
+    # same normaliser the manifest flavour uses.
+    text = json.dumps({
+        "antiPatterns": [{
+            "category": "mocked-net",
+            "count": 3,
+            "file": "hub.ts",
+            "line": 88,
+            "quote": "fetch('/api/x').then(mock)",
+        }],
+        "checks": {"api-wiring": {"findings": [{"id": "f1", "path": "/api/x"}]}},
+    })
+    parsed = parse_verifier_json_text(text)
+    assert parsed["flavour"] == "verifier"
+    assert parsed["antiPatterns"] == [{
+        "category": "mocked-net",
+        "count": 3,
+        "file": "hub.ts",
+        "line": "88",
+        "quote": "fetch('/api/x').then(mock)",
+    }]
+
+
 def test_comma_formatted_count_is_read_whole_or_refused():
     # D19, decided: READ WHOLE — `,` and spaces are stripped before taking
     # the first integer run, so "1,234" is 1234: never the truncated first
