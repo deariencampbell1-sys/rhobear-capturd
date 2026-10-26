@@ -828,6 +828,7 @@ def build_capture_plan(payload: dict[str, Any]) -> tuple[list[str], list[Capture
         ("map_text", payload.get("map_text")),
     ]
     supplied_maps = [name for name, value in map_inputs if value is not None]
+    url_keys = ("url", "urls", "sitemap_url", "crawl_url", "local_path", "crawl", "local")
     url_supplied = bool(
         payload.get("url")
         or payload.get("urls")
@@ -837,8 +838,13 @@ def build_capture_plan(payload: dict[str, Any]) -> tuple[list[str], list[Capture
         or payload.get("crawl")
         or payload.get("local")
     )
+    # Declared-but-empty is a URL error, not a missing-source error: a caller
+    # who asked for URL capture with nothing in it hears the URL complaint.
+    url_declared = any(payload.get(key) is not None for key in url_keys)
     source_names = (["url"] if url_supplied else []) + supplied_maps
     if not source_names:
+        if url_declared:
+            raise RestedCaptureError("add at least one URL")
         raise PathwayMapError(
             "a pathway map is required — paste the manifest markdown (or pass a file)"
         )

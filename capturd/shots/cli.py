@@ -2,15 +2,34 @@
 
 Invoked either as ``capturd shots ...`` (via the top-level dispatcher) or as
 the legacy ``sunsponge-capture ...`` alias (backwards compat for older scripts).
+
+The batch takes ONE source: explicit URLs, a sitemap, a crawl, a local build,
+or a pathway map (verifier JSON or the markdown manifest) resolved against a
+``--base-url``. The map path is the new wiring: a pathway map goes in and a
+real capture plan comes out — ``--dry-run`` prints that plan without running a
+browser. The quality gate (01c) decides whether a finished run is evidence;
+its reason code reaches this caller unchanged.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
+from dataclasses import asdict
 
-from .capture import RestedCaptureError, RestedCaptureManager
+from .capture import (
+    RestedCaptureError,
+    RestedCaptureManager,
+    build_capture_plan,
+    build_quality_summary,
+)
+from .pathway_map import PathwayMapError
+from .quality import build_quality_error, is_passing, summarize_capture_quality
+
+#: Exit code for a finished run the quality gate refuses to call evidence.
+EXIT_QUALITY_FAIL = 4
 
 
 def _split(value: str | None) -> list[str]:
@@ -31,6 +50,19 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--sitemap", metavar="URL", help="Capture every page listed in a sitemap.xml")
     source.add_argument("--local", metavar="PATH", help="Capture a local .html file, or a folder of them")
     source.add_argument("--urls", metavar="A,B,C", help="Comma- or newline-separated list of URLs")
+    source.add_argument("--pathway-map", metavar="JSON",
+                        help="Pathway map file in verifier JSON (checks with findings) - not the markdown manifest (see --pathway-manifest)")
+    source.add_argument("--pathway-manifest", metavar="MD",
+                        help="Pathway manifest file in markdown (headings and pipe tables) - not verifier JSON (see --pathway-map)")
+    source.add_argument("--map-text", metavar="TEXT",
+                        help="pasted verifier JSON map text - the same content as --pathway-map, no file on disk")
+
+    parser.add_argument("--base-url", metavar="URL",
+                        help="Base URL the map's pathways resolve against - required with a map input (where the built HTML lives)")
+    parser.add_argument("--max-targets", type=int, default=5000, metavar="N",
+                        help="Refuse a map naming more than N capture targets (default 5000)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Print the capture plan and exit - no browser runs, no shots")
 
     parser.add_argument("--viewports", default="desktop,tablet,mobile",
                         help="Any of desktop,tablet,mobile (default: all three)")
@@ -82,8 +114,41 @@ def _parse_cookies(raw: list[str]) -> list[dict]:
     return out
 
 
+def _print_plan(urls, targets, settings) -> int:
+    """The capture plan, human lines plus one deterministic machine line.
+
+    The ``plan-json:`` line is what a caller can diff across runs — same input,
+    same bytes. Nothing here or there carries a host path.
+    """
+    print(f"capture plan: {len(urls)} page(s), {len(targets)} target(s)")
+    for url in urls:
+        print(f"url: {url}")
+    for target in targets:
+        print(
+            f"target {target.index:03d} pathway={target.pathway_id or '-'} "
+            f"status={target.pathway_status or '-'} selector={target.trigger_selector or '-'} "
+            f"state={target.state_id} url={target.url}"
+        )
+    for flag in settings.get("pathway_flags") or []:
+        print(f"flag: {flag['flag']} {flag['pathway_id']}: {flag['reason']}")
+    print(
+        "plan-json: "
+        + json.dumps(
+            {"urls": urls, "targets": [asdict(t) for t in targets], "settings": settings},
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    map_input = bool(args.pathway_map or args.pathway_manifest or args.map_text)
+    if map_input and not (args.base_url or "").strip():
+        print("error: base_url is required with a pathway map - point Captur'd at the built HTML with --base-url", file=sys.stderr)
+        return 2
+
     payload = {
         "urls": _split(args.urls) if args.urls else [],
         "sitemap_url": args.sitemap or "",
@@ -107,11 +172,27 @@ def main(argv: list[str] | None = None) -> int:
         "state_wait_ms": args.state_wait_ms,
         "name": "sunsponge-captures",
     }
+    if map_input:
+        payload.update({
+            "map_path": args.pathway_map,
+            "manifest_path": args.pathway_manifest,
+            "map_text": args.map_text,
+            "base_url": args.base_url,
+            "max_targets": args.max_targets,
+        })
+
+    if args.dry_run:
+        try:
+            urls, targets, settings = build_capture_plan(payload)
+        except (RestedCaptureError, PathwayMapError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        return _print_plan(urls, targets, settings)
 
     manager = RestedCaptureManager()
     try:
         job = manager.start(payload)
-    except RestedCaptureError as exc:
+    except (RestedCaptureError, PathwayMapError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
@@ -138,8 +219,19 @@ def main(argv: list[str] | None = None) -> int:
     print(f"done: {total - failed}/{total} captured" + (f"  ({failed} failed)" if failed else ""))
     if job.get("zip_path"):
         print(f"zip:  {job['zip_path']}")
-    if job.get("output_dir") and job.get("output_dir") != job.get("zip_path"):
+    if job.get("output_dir") and (job.get("output_dir") != job.get("zip_path")):
         print(f"out:  {job['output_dir']}")
+
+    # The quality gate (01c) decides; its reason code reaches the caller
+    # unchanged - no re-wording downstream, honest-failure at the exit code.
+    summary = build_quality_summary(job.get("results") or [])
+    quality = summarize_capture_quality(summary)
+    if not is_passing(summary):
+        print(f"quality: {' '.join(quality.reason_codes)}", file=sys.stderr)
+        detail = build_quality_error(quality)
+        if detail:
+            print(detail, file=sys.stderr)
+        return EXIT_QUALITY_FAIL
     return 0 if status == "done" else 3
 
 

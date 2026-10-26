@@ -22,11 +22,12 @@ from capturd.shots.pathway_plan import (
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "capture-foundations"
-TWO_CONTROL_HTML = (FIXTURES / "two-control-page.html").read_text(encoding="utf-8")
+WIRING = Path(__file__).parent / "fixtures" / "capture-wiring"
+TWO_CONTROL_HTML = (WIRING / "two-control-page.html").read_text(encoding="utf-8")
 
 
 def _load(name: str) -> dict:
-    path = FIXTURES / name
+    path = (WIRING / name) if (WIRING / name).is_file() else (FIXTURES / name)
     if name.endswith(".json"):
         return load_pathway_map(map_path=path)
     return load_pathway_map(manifest_path=path)

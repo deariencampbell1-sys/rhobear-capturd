@@ -22,7 +22,8 @@ from capturd.shots.pathway_map import PathwayMapError, load_pathway_map
 from capturd.shots import cli
 
 FIXTURES = Path(__file__).parent / "fixtures" / "capture-foundations"
-TWO_CONTROL_HTML = (FIXTURES / "two-control-page.html").read_text(encoding="utf-8")
+WIRING = Path(__file__).parent / "fixtures" / "capture-wiring"
+TWO_CONTROL_HTML = (WIRING / "two-control-page.html").read_text(encoding="utf-8")
 
 
 def _stub_loader(monkeypatch, html: str = TWO_CONTROL_HTML) -> None:
@@ -109,7 +110,7 @@ def test_exactly_one_input_is_enforced():
 def test_unwired_pathway_is_planned_and_flagged(monkeypatch):
     _stub_loader(monkeypatch, "<html><body></body></html>")
     _urls, targets, settings = build_capture_plan({
-        "manifest_path": str(FIXTURES / "named-control-manifest.md"),
+        "manifest_path": str(WIRING / "named-control-manifest.md"),
         "base_url": "http://base.test",
         "viewports": ["desktop"],
         "schemes": ["light"],
