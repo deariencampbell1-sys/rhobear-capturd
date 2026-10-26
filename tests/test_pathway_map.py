@@ -557,6 +557,118 @@ def test_decimal_count_reads_the_integer_part():
     assert parsed["antiPatterns"][0]["count"] == 3
 
 
+def test_verifier_integer_zero_count_is_kept():
+    # D18: an integer zero is a real count. The verifier flavour carries the
+    # same anti-pattern shape as the manifest flavour, and a count that
+    # arrives as a JSON value is parsed with `raw is None` as the ONLY
+    # "absent" test — `0 or ""` is the bug that swallowed a JSON `0` into
+    # None while the manifest flavour kept the string cell "0" as 0. The two
+    # flavours must agree on the same input value.
+    text = json.dumps({
+        "antiPatterns": [{"category": "x", "count": 0}],
+        "checks": {"api-wiring": {"findings": [{"id": "f1", "path": "/api/x"}]}},
+    })
+    parsed = parse_verifier_json_text(text)
+    assert parsed["flavour"] == "verifier"
+    assert parsed["antiPatterns"] == [
+        {"category": "x", "count": 0, "file": "", "line": "", "quote": ""},
+    ]
+
+
+def test_comma_formatted_count_is_read_whole_or_refused():
+    # D19, decided: READ WHOLE — `,` and spaces are stripped before taking
+    # the first integer run, so "1,234" is 1234: never the truncated first
+    # run 1, and never a silent None. Both count sites agree: the summary
+    # count row and the anti-pattern count cell (whose "1,234" used to read
+    # 1, understating the count returned to callers).
+    summary_text = "\n".join([
+        "# Pathway Manifest — grouped count",
+        "",
+        "## Summary Counts",
+        "",
+        "| Category | Count |",
+        "|---|---|",
+        "| **WIRED** | 1,234 |",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+    ])
+    parsed = parse_manifest_text(summary_text)
+    assert parsed["summary"]["wired"] == 1234
+    anti_text = "\n".join([
+        "# Pathway Manifest — grouped anti-pattern count",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+        "",
+        "## 2. Anti-patterns",
+        "",
+        "| Category | Count | File | Line | Quote |",
+        "|---|---|---|---|---|",
+        "| comma-hits | 1,234 | hub.ts | 88 | `export const x` |",
+    ])
+    anti = parse_manifest_text(anti_text)
+    assert anti["antiPatterns"][0]["count"] == 1234
+    # The verifier flavour rides the same count parser: a grouped STRING
+    # count in the JSON entry is read whole too.
+    verifier_text = json.dumps({
+        "antiPatterns": [{"category": "y", "count": "2,468"}],
+        "checks": {"api-wiring": {"findings": [{"id": "f1", "path": "/api/x"}]}},
+    })
+    verifier = parse_verifier_json_text(verifier_text)
+    assert verifier["antiPatterns"][0]["count"] == 2468
+
+
+def test_prose_line_with_pipe_and_one_backtick_does_not_abort():
+    # D17: a refusal is decided once the line is KNOWN to be a table, never
+    # during header detection. A prose line in a Notes section that carries a
+    # pipe and an odd number of backticks is not a table — it must be skipped
+    # like any other non-table line, not abort the parse. One typo in an
+    # appendix must never refuse the whole document.
+    text = "\n".join([
+        "# Pathway Manifest — stray backtick in prose",   # line 1
+        "",                                               # line 2
+        "## 1. Pathways Table",                           # line 3
+        "",                                               # line 4
+        "| id | trigger | status |",                      # line 5
+        "|---|---|---|",                                  # line 6
+        "| p1 | onClick | WIRED |",                       # line 7
+        "",                                               # line 8
+        "## 2. Notes",                                    # line 9
+        "",                                               # line 10
+        "Trigger: click | handler: `startCapture",        # line 11
+    ])
+    parsed = parse_manifest_text(text)
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+
+
+def test_table_row_with_unbalanced_backtick_is_still_refused():
+    # D17's other half, committed as the guard: moving the refusal out of
+    # header detection must not re-open the silent swallow. A real table ROW
+    # with one stray backtick is still refused, naming the line and the cell.
+    text = "\n".join([
+        "# Pathway Manifest — stray backtick in a row",   # line 1
+        "",                                               # line 2
+        "## 1. Pathways Table",                           # line 3
+        "",                                               # line 4
+        "| id | trigger | status |",                      # line 5
+        "|---|---|---|",                                  # line 6
+        "| p1 | onClick | WIRED |",                       # line 7
+        "| p2 | `onClick | WIRED |",                      # line 8 — stray backtick
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(text)
+    message = str(excinfo.value)
+    assert "line 8" in message
+    assert "onClick" in message
+
+
 def test_unbalanced_backtick_is_refused():
     # D5: a cell with an opening backtick and no closer must REFUSE — an
     # unterminated code span would otherwise swallow the rest of the row's
