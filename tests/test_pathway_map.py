@@ -1941,3 +1941,43 @@ def test_detection_never_aborts_on_an_unrelated_cell():
     with pytest.raises(PathwayMapError) as excinfo:
         parse_manifest_text(real_count_text)
     assert "2 5" in str(excinfo.value)
+
+
+def test_duplicate_count_rows_refuse():
+    # D61: two rows setting the same summary key refuse, whatever the
+    # values say — the ambiguity is the duplicate, not the value (same key
+    # and same value is refused too). The refusal names the key and both
+    # line numbers, mirroring the duplicate-pathway-id refusal; keeping
+    # the last row silently is exactly the half-fill this module refuses.
+    dup_same_text = "\n".join([
+        "# Pathway Manifest — duplicate count rows",  # line 1
+        "",                                         # line 2
+        "## Summary Counts",                        # line 3
+        "",                                         # line 4
+        "| Category | Count |",                     # line 5
+        "|---|---|",                                # line 6
+        "| **WIRED** | 5 |",                        # line 7
+        "| **WIRED** | 5 |",                        # line 8 — same value
+        "",                                         # line 9
+        "## 1. Pathways Table",                     # line 10
+        "",                                         # line 11
+        "| id | status |",                          # line 12
+        "|---|---|",                                # line 13
+        "| p1 | WIRED |",                           # line 14
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(dup_same_text)
+    message = str(excinfo.value)
+    assert "wired" in message
+    assert "line 7" in message
+    assert "line 8" in message
+
+    # Conflicting values refuse the same way.
+    dup_conflict_text = dup_same_text.replace("| **WIRED** | 5 |\n| **WIRED** | 5 |",
+                                              "| **WIRED** | 5 |\n| **WIRED** | 7 |")
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(dup_conflict_text)
+    message = str(excinfo.value)
+    assert "wired" in message
+    assert "line 7" in message
+    assert "line 8" in message
