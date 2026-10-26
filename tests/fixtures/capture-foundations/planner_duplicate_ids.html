@@ -1,0 +1,18 @@
+<!doctype html>
+<html>
+<head><title>Planner fixture: duplicate ids force structural fallback</title></head>
+<body>
+<div class="card">
+  <button id="expand-btn" class="expand" data-testid="toggle" aria-expanded="false">Expand A</button>
+</div>
+<div class="card">
+  <button id="expand-btn" class="expand" data-testid="toggle" aria-expanded="false">Expand B</button>
+</div>
+<div id="wrap">
+  <button id="action-btn" aria-haspopup="true">Open menu</button>
+</div>
+<div id="wrap">
+  <button id="action-btn" aria-haspopup="true">Open menu</button>
+</div>
+</body>
+</html>

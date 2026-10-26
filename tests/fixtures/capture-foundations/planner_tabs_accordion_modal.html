@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+<head><title>Planner fixture: tabs, accordion, modal</title></head>
+<body>
+<header class="topbar"><a href="/">Home</a></header>
+<main>
+  <div role="tablist">
+    <button role="tab" id="tab-overview" aria-controls="panel-overview">Overview</button>
+    <button role="tab" id="tab-billing" aria-controls="panel-billing">Billing</button>
+  </div>
+  <section id="panel-overview">Overview panel</section>
+  <section id="panel-billing" hidden>Billing panel</section>
+  <details>
+    <summary>Billing FAQ</summary>
+    <p>Answer</p>
+  </details>
+  <button data-bs-toggle="modal" data-bs-target="#signup-modal">Open sign-up</button>
+  <div id="signup-modal" class="modal" hidden>Sign-up form</div>
+</main>
+</body>
+</html>
