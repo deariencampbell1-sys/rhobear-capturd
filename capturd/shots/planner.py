@@ -1297,7 +1297,9 @@ def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
     exception is a cap that truncates the plan to zero (``max_states=0``) —
     ``kept`` then reports the exact overshoot, 1, the one candidate discovery
     kept before the cap cut it, never a lower bound),
-    ``truncated``, ``scan_stopped_at_cap``, ``dropped_ambiguous``,
+    ``truncated``, ``scan_stopped_at_cap``,
+    ``dropped_ambiguous`` (D58: distinct dropped nodes — each node counted
+    once however many discovery reasons reached it),
     ``navigation_excluded`` (D56: every excluded node counted once over the
     FULL discovery lists — the cap may stop discovery early but it never
     truncates this counter), ``dropped_action_labels``, and ``too_large``
@@ -1353,7 +1355,11 @@ def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
     # verifier has just proved names exactly one node), and the value is that
     # candidate's index, so a second kind can fold into its reason text.
     seen: dict[str, int] = {}
-    dropped_ambiguous = 0
+    # D58: dropped_ambiguous counts DISTINCT dropped nodes — a node reached
+    # by two discovery reasons (a <summary role="tab"> is both a tab and a
+    # summary) that is ambiguous is one dropped node, not two. The value is a
+    # node count, never set iteration order.
+    dropped: set[_Node] = set()
     dropped_action_labels = 0
     scan_stopped_at_cap = False
     # D6: a node discoverable by two loops (a <summary role="tab">) is one
@@ -1383,21 +1389,22 @@ def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
         document with exactly ``cap`` kept candidates is not reported as
         truncated.
         """
-        nonlocal dropped_ambiguous
+        # D58: a dropped node is recorded in the ``dropped`` set below — one
+        # entry per node however many discovery reasons reached it.
         if not _is_visible(node) or _is_disabled(node):
             return
         selector, strategy = index.unique_selector(node)
         if selector is None:
-            dropped_ambiguous += 1
+            dropped.add(node)
             return
         if strategy == "structural":
             # D28: verify against the target's parent chain in O(depth) — the
             # verifier has just proved the selector names exactly one node.
             if not index.verify_structural(node, selector):
-                dropped_ambiguous += 1
+                dropped.add(node)
                 return
         elif index.count_matches(selector) != 1:
-            dropped_ambiguous += 1
+            dropped.add(node)
             return
         label = _text_of(node) or node.attrs.get("aria-controls") or _href_artifact(node.attrs.get("href")) or kind.value
         target, target_visible = _target_summary(index, node)
@@ -1493,7 +1500,7 @@ def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
             "kept": kept,
             "truncated": truncated,
             "scan_stopped_at_cap": scan_stopped_at_cap,
-            "dropped_ambiguous": dropped_ambiguous,
+            "dropped_ambiguous": len(dropped),
             "navigation_excluded": navigation_excluded,
             "dropped_action_labels": dropped_action_labels,
         },
