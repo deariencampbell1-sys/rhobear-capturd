@@ -1293,7 +1293,9 @@ def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
     ``kept`` then reports the exact overshoot, 1, the one candidate discovery
     kept before the cap cut it, never a lower bound),
     ``truncated``, ``scan_stopped_at_cap``, ``dropped_ambiguous``,
-    ``navigation_excluded``, ``dropped_action_labels``, and ``too_large``
+    ``navigation_excluded`` (D56: every excluded node counted once over the
+    FULL discovery lists — the cap may stop discovery early but it never
+    truncates this counter), ``dropped_action_labels``, and ``too_large``
     (the reason text, present only on reason="too-large").
     The cap bounds the plan, not the scan (round 3, D15): only kept
     candidates count against it — ``add()`` skips a node that is invisible,
@@ -1347,12 +1349,20 @@ def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
     # candidate's index, so a second kind can fold into its reason text.
     seen: dict[str, int] = {}
     dropped_ambiguous = 0
-    navigation_excluded = 0
     dropped_action_labels = 0
     scan_stopped_at_cap = False
     # D6: a node discoverable by two loops (a <summary role="tab">) is one
     # skipped node, so navigation_excluded counts it once across all loops.
+    # D56: it counts every excluded node over the FULL discovery lists, taken
+    # before the loops run — the cap stops discovery early and must not
+    # truncate the counter, so a document whose navigation nodes lie partly
+    # past the truncation point still reports all of them. The value is a
+    # node count, never set iteration order.
     counted: set[_Node] = set()
+    for node in [*tabs, *summaries, *swept]:
+        if node not in counted and _in_navigation(node):
+            counted.add(node)
+    navigation_excluded = len(counted)
 
     def add(node: _Node, kind: ControlKind, note: str, priority: int) -> None:
         """Validate and append one candidate.
@@ -1417,11 +1427,9 @@ def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
             scan_stopped_at_cap = True  # D4/D15: discovery stopped early at the cap.
             break
         # Uniform navigation exclusion (D2): every discovery loop skips nodes
-        # inside navigation chrome and counts the skip — once per node (D6).
-        if _in_navigation(node):
-            if node not in counted:
-                counted.add(node)
-                navigation_excluded += 1
+        # inside navigation chrome — counted once per node over the full
+        # discovery lists (D6, D56).
+        if node in counted:
             continue
         # D12: one source of truth for priorities - the tab loop uses the same
         # table as the swept classification.
@@ -1430,20 +1438,14 @@ def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
         if len(candidates) > cap:
             scan_stopped_at_cap = True
             break
-        if _in_navigation(node):
-            if node not in counted:
-                counted.add(node)
-                navigation_excluded += 1
+        if node in counted:
             continue
         add(node, ControlKind.ACCORDION, f"summary disclosure {index_no + 1}", PRIORITY_SUMMARY_DISCLOSURE)
     for index_no, node in enumerate(swept):
         if len(candidates) > cap:
             scan_stopped_at_cap = True
             break
-        if _in_navigation(node):
-            if node not in counted:
-                counted.add(node)
-                navigation_excluded += 1
+        if node in counted:
             continue
         kind = _classify_sweep(node)
         if kind is None:
