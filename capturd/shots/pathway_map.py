@@ -25,6 +25,12 @@ silently ignored. The refusal is decided once a line is KNOWN to be a
 table, never during header detection: a prose line that carries a pipe
 and a stray backtick is skipped like any other non-table line, not a
 parse abort (D17).
+
+Verifier JSON may declare the anti-patterns array itself: its well-formed
+entries round-trip into the returned ``antiPatterns`` through the same
+normaliser the manifest flavour uses (D23), while a non-list array is
+refused naming the field and the type it got (D21) and a non-mapping
+entry is refused naming its index and type — never skipped (D22).
 """
 
 from __future__ import annotations
@@ -711,7 +717,9 @@ def _count_from_cell(raw: Any) -> int | None:
     taking the first integer run, so "1,234" is 1234, never the truncated
     first run 1 and never a silent None. D4's decimal semantics survive:
     only separators are stripped (never "."), so "3.5" still reads 3, and
-    a cell with no digits at all stays None."""
+    a cell with no digits at all stays None. The verifier anti-patterns
+    round trip (D23) parses each entry's ``count`` through this same
+    parser."""
     if raw is None:
         return None
     digits = re.sub(r"[,\s]", "", str(raw))
@@ -724,7 +732,9 @@ def _normalise_anti_pattern(entry: dict[str, Any]) -> dict[str, Any] | None:
     same category aliases and count parser whether the entry came from a
     manifest table row or from verifier JSON (D18 — the flavours must agree
     on the same input value). Returns None for an entry with no category,
-    which both callers skip."""
+    which both callers skip. The verifier's own ``antiPatterns`` array
+    round-trips through here (D23); a non-mapping entry never reaches this
+    normaliser — the verifier caller refuses it by index and type (D22)."""
     category = str(
         entry.get("category")
         or entry.get("type")
