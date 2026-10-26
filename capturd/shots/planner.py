@@ -792,14 +792,20 @@ def unique_selector(node: Node) -> tuple[Optional[str], str]:
 def _style_declares(node: _Node, prop: str, value: str) -> bool:
     """Does the node's inline style declare ``prop: value``?
 
-    D17: last-wins, because CSS is. Every declaration for the property is
-    scanned and the LAST match decides — ``style="display:none;display:block"``
-    is visible, ``style="display:block;display:none"`` is hidden. An empty
-    declaration (``display:``) is invalid CSS and overrides nothing, so it is
-    not a match at all.
+    D17: last-wins, because CSS is — with D53 applying the cascade within one
+    declaration block: an ``!important`` declaration beats a later normal
+    one. Per property the winning declaration is the last ``!important`` one
+    when any exists, otherwise the last normal one — and only that winning
+    declaration decides, so ``display:none!important;display:block`` is
+    hidden and ``display:block!important;display:none`` is visible. A
+    trailing ``!important`` is cascade priority, not a value: it is stripped
+    before comparing so "display: none !important" hides like "none". An
+    empty declaration (``display:``) is invalid CSS and overrides nothing, so
+    it is not a match at all and never wins.
     """
     style = node.attrs.get("style", "")
-    result = False
+    normal: Optional[str] = None
+    important: Optional[str] = None
     for declaration in style.split(";"):
         if ":" not in declaration:
             continue
@@ -809,17 +815,24 @@ def _style_declares(node: _Node, prop: str, value: str) -> bool:
         val = val.strip().lower()
         # A trailing "!important" is cascade priority, not a value: strip it
         # before comparing so "display: none !important" hides like "none".
-        val = re.sub(r"!\s*important$", "", val).strip()
+        is_important = re.search(r"!\s*important$", val) is not None
+        if is_important:
+            val = re.sub(r"!\s*important$", "", val).strip()
         if not val:
             continue  # an empty declaration is invalid CSS: it overrides nothing
-        if prop == "opacity":
-            try:
-                result = float(val) == 0.0
-            except ValueError:
-                result = False
+        if is_important:
+            important = val
         else:
-            result = val == value
-    return result
+            normal = val
+    val = important if important is not None else normal
+    if val is None:
+        return False
+    if prop == "opacity":
+        try:
+            return float(val) == 0.0
+        except ValueError:
+            return False
+    return val == value
 
 
 def _in_first_summary(details: _Node, node: _Node) -> bool:
