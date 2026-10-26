@@ -35,13 +35,18 @@ so (:func:`named_control_needs_the_page`).
 
 Determinism: the same map plus the same base URL produces the same plan, byte
 for byte. Nothing here embeds host paths — ``pathway_trigger`` is carried with
-host-path-shaped tokens redacted, and errors name the pathway id, never a path.
+host-path-shaped tokens (Windows or POSIX) redacted, and errors name the
+pathway id, never a path.
 
 The page read for selector binding goes through the real capture path (a
-Playwright navigation to the target the user pointed at — the same trust model
-``run_capture`` already has); it adds no new fetch surface and no SSRF-guard
-exception. The read is best-effort: an unreachable page means no selector, not
-a refused plan — reachability is a capture-time fact.
+Playwright navigation to the target the user pointed at), and every such
+plan-time navigation goes through the capture path's own private-IP / host
+guard — capture's ``_reject_private_url``, the shared :mod:`capturd._net`
+predicate, reused and never re-implemented — so a private/internal target
+refuses the plan with the same error the capture path raises. The read is
+best-effort for reachability: an unreachable page means no selector, not a
+refused plan — reachability is a capture-time fact (a guard refusal is never
+swallowed).
 """
 
 from __future__ import annotations
@@ -87,12 +92,43 @@ _ABS_URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 _SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:")
 _WINDOWS_PATH_RE = re.compile(r"^[a-zA-Z]:[\\/]|^\\\\")
 _HOST_PATH_TOKEN_RE = re.compile(r"[a-zA-Z]:[\\/][^\s\"'`]*|\\\\[^\s\"'`]*")
+# D94: POSIX host paths redact too. A token is a host path when it is an
+# absolute path of two or more segments that is rooted at a well-known host
+# root, or is file-shaped (a dot extension, optional :line[:col]), or is
+# three or more segments deep — a route path (/settings, /api/state) is one
+# or two plain segments and is never redacted. The lookbehind keeps URLs
+# (http://x/y) from being read as paths.
+_POSIX_PATH_TOKEN_RE = re.compile(r"(?<![\w:./\\])/[^\s\"'`]+")
+_POSIX_HOST_ROOTS = frozenset({
+    "home", "users", "user", "root", "tmp", "var", "opt", "mnt", "media",
+    "srv", "etc", "usr", "data", "work", "dev", "private", "applications",
+    "system", "library", "volumes", "proc", "run", "bin", "sbin", "boot",
+    "lib", "lib64",
+})
+_POSIX_FILE_SUFFIX_RE = re.compile(r"\.\w{1,12}(?::\d+(?::\d+)?)?$")
+
+
+def _posix_path_repl(match: re.Match[str]) -> str:
+    token = match.group(0)
+    segments = [seg for seg in token.strip("/").split("/") if seg]
+    if len(segments) < 2:
+        return token   # a single-segment path is a route, not a host path
+    if (
+        segments[0].lower() in _POSIX_HOST_ROOTS
+        or len(segments) >= 3
+        or _POSIX_FILE_SUFFIX_RE.search(segments[-1])
+    ):
+        return "<path>"
+    return token
 
 
 def _redact_host_paths(text: str) -> str:
     """Host-path-shaped tokens become ``<path>`` — the plan and its errors
-    must carry no host paths (the determinism rule)."""
-    return _HOST_PATH_TOKEN_RE.sub("<path>", text or "")
+    must carry no host paths (the determinism rule), on any platform: Windows
+    drive-letter and UNC paths, and POSIX paths alike. A route path is not a
+    host path and is kept."""
+    redacted = _HOST_PATH_TOKEN_RE.sub("<path>", text or "")
+    return _POSIX_PATH_TOKEN_RE.sub(_posix_path_repl, redacted)
 
 
 def _pathway_label(pathway_id: str) -> str:
@@ -326,10 +362,22 @@ def _match_control(tokens: list[str], candidates: list[Any]) -> Any | None:
 def _load_page_html(url: str) -> str:
     """Read the target page's HTML through the real capture path.
 
-    A Playwright navigation to the same target ``run_capture`` will shoot —
-    the local tool pointing at the user's own built HTML. Monkeypatchable
-    seam for tests; best-effort at the call site.
+    D94: every plan-time navigation goes through the SAME private-IP / host
+    guard the capture path's network access uses — capture's
+    ``_reject_private_url`` (the shared :mod:`capturd._net` predicate, reused
+    here, never re-implemented). A private/internal target raises exactly the
+    error the capture path raises and refuses the plan; a local built-HTML
+    (``file:``) read is not a network surface and is not the guard's business.
+
+    Monkeypatchable seam for tests; best-effort at the call site for
+    reachability — but a guard refusal is never swallowed there.
     """
+    parsed = urlparse(url)
+    if parsed.scheme in ("http", "https"):
+        from .capture import _reject_private_url
+
+        _reject_private_url(url)
+
     import asyncio
 
     from .capture import _launch_browser
@@ -343,7 +391,7 @@ def _load_page_html(url: str) -> str:
                 "`python -m playwright install chromium` if system Edge is unavailable."
             ) from exc
         async with async_playwright() as p:
-            browser = await _launch_browser(p, allow_file_access=urlparse(url).scheme == "file")
+            browser = await _launch_browser(p, allow_file_access=parsed.scheme == "file")
             try:
                 page = await browser.new_page()
                 await page.goto(url, wait_until="domcontentloaded", timeout=15000)
@@ -423,6 +471,10 @@ def plan_targets_from_map(
             if url not in html_by_url:
                 try:
                     html_by_url[url] = _load_page_html(url)
+                except RestedCaptureError:
+                    # D94: a guard refusal is a security fact and refuses the
+                    # plan — it is never the reachability best-effort below.
+                    raise
                 except Exception:
                     html_by_url[url] = ""
             plans_by_url[url] = _plan_page(html_by_url[url])
