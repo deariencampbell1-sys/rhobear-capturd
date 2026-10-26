@@ -2372,16 +2372,18 @@ def test_reversed_order_probe_refuses_an_unrecognised_header():
     assert "count word first" in message
 
 
-def test_each_table_is_consumed_by_one_extractor():
-    # D66: a table is claimed by the FIRST extractor whose heading and
-    # header shape match, and every other extractor skips it — one table
-    # can never populate two output keys. Today a count-shaped table
-    # (| Category | Count |) whose rows are count rows feeds BOTH the
-    # summary and the anti-pattern extractor when it sits under
-    # ## 2. Anti-patterns, and both the summary and the suspicious
-    # extractor under a suspicious heading.
+def test_more_than_one_extractor_may_read_the_same_table():
+    # D76: D66's exclusivity is withdrawn — main's rule returns. Each
+    # extractor claims a table by its OWN heading and header shape, and
+    # MORE THAN ONE extractor may read the same table: a count-shaped
+    # table (| Category | Count |) whose rows are count rows feeds BOTH
+    # the summary and the anti-pattern extractor under ## 2. Anti-patterns,
+    # and both the summary and the suspicious extractor under a suspicious
+    # heading. Both keys populated is main's behaviour, not a data loss.
+    # (Amends the D66 test, which pinned the withdrawn one-extractor rule;
+    # the restored assertions are a superset of what main populated.)
     anti_text = "\n".join([
-        "# Pathway Manifest — one table, one extractor",  # line 1
+        "# Pathway Manifest — one table, two readers",       # line 1
         "",                                             # line 2
         "## 1. Pathways Table",                         # line 3
         "",                                             # line 4
@@ -2396,30 +2398,30 @@ def test_each_table_is_consumed_by_one_extractor():
         "| WIRED | 5 |",                                # line 13
     ])
     parsed = parse_manifest_text(anti_text)
-    # The anti-pattern extractor claims the table (its heading and its
-    # category-word header both match) — the summary extractor must leave
-    # it alone, so no count is set.
+    # Both readers: the anti-pattern extractor (its heading and its
+    # category-word header both match) AND the summary extractor (the
+    # count-table header shape matches wherever the table sits).
     assert parsed["antiPatterns"] == [
         {"category": "WIRED", "count": 5, "file": "", "line": "", "quote": ""},
     ]
-    assert all(v is None for v in parsed["summary"].values())
+    assert parsed["summary"]["wired"] == 5
 
-    # The other direction: a count table under ## Summary matches no
-    # heading-specific extractor, so the summary extractor claims it and
-    # the anti-pattern and suspicious arrays stay empty.
+    # Under ## Summary no heading-specific extractor matches, so only the
+    # summary extractor reads the count table — the anti-pattern and
+    # suspicious arrays stay empty.
     summary_text = anti_text.replace("## 2. Anti-patterns", "## Summary")
     parsed = parse_manifest_text(summary_text)
     assert parsed["summary"]["wired"] == 5
     assert parsed["antiPatterns"] == []
     assert parsed["suspicious"] == []
 
-    # The same defect through the suspicious extractor: a count-shaped
-    # table under a suspicious heading is claimed there — the summary
-    # extractor must not also read its rows as count rows.
+    # The same through the suspicious extractor: a count-shaped table
+    # under a suspicious heading feeds the suspicious array AND the
+    # summary — both keys populated, exactly as on main.
     suspicious_text = anti_text.replace("## 2. Anti-patterns", "## Suspicious Calls")
     parsed = parse_manifest_text(suspicious_text)
     assert parsed["suspicious"] == [{"category": "WIRED", "count": "5"}]
-    assert all(v is None for v in parsed["summary"].values())
+    assert parsed["summary"]["wired"] == 5
 
 
 def test_prose_ends_a_table_and_only_a_misaligned_row_refuses():
