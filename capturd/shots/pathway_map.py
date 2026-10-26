@@ -132,6 +132,7 @@ nulls. The list, written out:
 * an unrecognised count-table header over count rows
 * a count cell of two bare integers
 * a conflicting count row
+* a truncated row_lines list
 """
 
 from __future__ import annotations
@@ -172,6 +173,7 @@ REFUSALS: tuple[str, ...] = (
     "an unrecognised count-table header over count rows",
     "a count cell of two bare integers",
     "a conflicting count row",
+    "a truncated row_lines list",
 )
 
 _ROUTE_METHOD_RE = re.compile(
@@ -908,16 +910,31 @@ def _split_sections(raw: str) -> list[dict[str, Any]]:
 
 
 def _row_reference(row_lines: list[int] | None, row_position: int) -> str:
-    """D90: the one total read of a table's row lines. The key exists only
-    when `_extract_tables` ran with ``row_lines=True`` — the manifest's
+    """D90/D107: the one total read of a table's row lines. The key exists
+    only when `_extract_tables` ran with ``row_lines=True`` — the manifest's
     strict parse always does (D61), so no production caller reaches the
     extractors without it — but the extractors must not ASSUME it: when
     the key is absent the reference is the row's 1-based position within
-    the table, honestly named as a row. A ``KeyError`` is never raised,
-    and a line number is never fabricated where none was parsed."""
-    if row_lines is not None and row_position < len(row_lines):
-        return f"line {row_lines[row_position]}"
-    return f"row {row_position + 1}"
+    the table, honestly named as a row (D90; the D107 test asserts that
+    output, not merely its execution). A ``KeyError`` is never raised,
+    and a line number is never fabricated where none was parsed. D107: a
+    list that IS present but has no entry for the referenced row
+    disagrees with the table's own rows — a misalignment inside the
+    table dict, the same class of defect as a misaligned row — and
+    refuses with a named message instead of silently downgrading to a
+    row reference: line data that exists but disagrees is a lie, and
+    this module refuses rather than half-fill. (Before D90 the same
+    shape raised IndexError — the named refusal restores a loud failure,
+    it does not invent one.)"""
+    if row_lines is None:
+        return f"row {row_position + 1}"
+    if row_position >= len(row_lines):
+        raise PathwayMapError(
+            f"table row {row_position + 1} has no entry in its row_lines "
+            f"list ({len(row_lines)} entries) — refusing a truncated "
+            "row_lines list"
+        )
+    return f"line {row_lines[row_position]}"
 
 
 def _extract_summary(parsed_sections: _ParsedSections) -> dict[str, Any]:

@@ -11,6 +11,7 @@ import ast
 import inspect
 import json
 import re
+import shutil
 import traceback
 from pathlib import Path
 
@@ -959,7 +960,7 @@ def test_overlong_pathway_id_is_refused():
     assert long_id[:40] in message
 
 
-def test_every_manifest_fixture_parses():
+def test_every_manifest_fixture_parses(fixtures_dir: Path | None = None):
     # D3': the duplicate/over-long id refusals must be proven safe for the
     # inputs we ship — every manifest fixture in the repo parses without
     # raising, so the refusal cannot be blamed for breaking a real input.
@@ -969,8 +970,11 @@ def test_every_manifest_fixture_parses():
     # map lists the counts each fixture's table actually declares, and all
     # of them must come out non-None. A fixture added later must join the
     # map — an unlisted fixture fails below instead of silently skipping
-    # the count assertion.
-    manifests = sorted(FIXTURES.glob("*.md"))
+    # the count assertion. D107: fixtures_dir lets the D91 stray-file guard
+    # run this test against a temporary COPY of the fixtures directory, so
+    # the guard never writes into tests/fixtures/.
+    fixtures = Path(fixtures_dir) if fixtures_dir is not None else FIXTURES
+    manifests = sorted(fixtures.glob("*.md"))
     assert manifests, "no manifest fixtures found under capture-foundations"
     declared_counts = {
         "pathway-manifest-boolean-columns.md": (
@@ -998,7 +1002,9 @@ def test_every_manifest_fixture_parses():
             )
 
 
-def test_every_fixture_populates_every_key_main_populated():
+def test_every_fixture_populates_every_key_main_populated(
+    fixtures_dir: Path | None = None,
+):
     # D76: D66's "one table, one extractor" is withdrawn — main's claiming
     # returns. Each extractor claims a table by its OWN heading and header
     # shape, and more than one extractor may read the same table: that is
@@ -1158,14 +1164,17 @@ def test_every_fixture_populates_every_key_main_populated():
     # directory (a .DS_Store, an editor swap file) cannot fail the suite
     # for a reason unrelated to pathway parsing. A fixture added later
     # must still join the maps: test_every_manifest_fixture_parses
-    # asserts every *.md in the directory is mapped.
+    # asserts every *.md in the directory is mapped. D107: fixtures_dir
+    # lets the D91 stray-file guard run this comparison against a
+    # temporary COPY of the fixtures directory.
+    fixtures = Path(fixtures_dir) if fixtures_dir is not None else FIXTURES
     for name in expected:
-        assert (FIXTURES / name).is_file(), (
+        assert (fixtures / name).is_file(), (
             f"{name} is missing from capture-foundations — the fixture "
             "comparison has nothing to compare"
         )
     for name, want in expected.items():
-        path = FIXTURES / name
+        path = fixtures / name
         parsed = (parse_verifier_json(path) if path.suffix == ".json"
                   else parse_manifest_md(path))
         assert parsed["summary"] == want["summary"], name
@@ -3331,7 +3340,7 @@ def test_row_lines_is_not_assumed():
     assert "no usable category" in str(excinfo.value)
 
 
-def test_stray_fixture_file_is_a_real_guard():
+def test_stray_fixture_file_is_a_real_guard(tmp_path):
     # D91: the D88 stray-file test wrote a .txt — a file NEITHER
     # FIXTURES.glob("*.md") nor either expected-name map would ever pick
     # up — so it could not fail and proved nothing: the suite stayed green
@@ -3347,7 +3356,11 @@ def test_stray_fixture_file_is_a_real_guard():
     #     count assertion.
     #
     # The vacuous .txt variant is gone: a stray-file test that cannot fail
-    # guards nothing. The stray is deleted in a finally.
+    # guards nothing. D107: the stray is written into a TEMPORARY COPY of
+    # the fixtures directory — never into tests/fixtures/, which a test
+    # has no business mutating (two parallel runs race; a killed process
+    # leaves a stray in the tree). The stray is deleted in a finally, and
+    # the real fixtures directory is asserted byte-identical afterwards.
     vacuous = "test_stray_file_in_the_fixtures_directory_does_not_fail_the_suite"
     assert vacuous not in globals(), (
         "the vacuous D88 stray-file test is still defined — it writes a .txt "
@@ -3355,21 +3368,27 @@ def test_stray_fixture_file_is_a_real_guard():
         "up, so it cannot fail and proves nothing; D91 replaced it with "
         "this test"
     )
-    stray = FIXTURES / "stray-notes.md"
+    snapshot = {p.name: p.read_bytes() for p in FIXTURES.iterdir()}
+    work = tmp_path / "capture-foundations"
+    shutil.copytree(FIXTURES, work)
+    stray = work / "stray-notes.md"
     stray.write_text("a stray file — not a fixture\n", encoding="utf-8")
     try:
         # D88 holds for a file the glob sees: the comparison expectations
-        # pass unchanged.
-        test_every_fixture_populates_every_key_main_populated()
+        # pass unchanged — run against the COPY, never the repository.
+        test_every_fixture_populates_every_key_main_populated(work)
         # D6's guard bites by name: an unmapped .md fails the count map
         # with its own message — it never silently skips the counts.
         with pytest.raises(AssertionError) as excinfo:
-            test_every_manifest_fixture_parses()
+            test_every_manifest_fixture_parses(work)
         assert "stray-notes.md" in str(excinfo.value)
         assert "D6 count map" in str(excinfo.value)
     finally:
         stray.unlink(missing_ok=True)
     assert not stray.exists()
+    # D107: tests/fixtures/ is byte-identical to what it was — no stray
+    # left behind, nothing else disturbed.
+    assert {p.name: p.read_bytes() for p in FIXTURES.iterdir()} == snapshot
 
 
 def test_a_fenced_code_block_is_never_a_table():
