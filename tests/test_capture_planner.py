@@ -152,7 +152,8 @@ def test_max_states_zero_is_a_failed_plan():
     assert plan.reason == "truncated"
     assert plan.limits["truncated"] is True
     assert plan.limits["max_states"] == 0
-    assert plan.limits["kept"] >= 1
+    # D30: the exact overshoot — discovery kept exactly one candidate (cap+1).
+    assert plan.limits["kept"] == 1
 
     # A negative cap behaves like zero.
     negative = plan_candidates(root, max_states=-3)
@@ -783,8 +784,9 @@ def test_reason_taxonomy_is_exactly_four_codes():
 def test_discovery_stops_at_the_cap():
     # D4 (round 2), D15: the cap bounds the plan — discovery stops as soon
     # as the plan holds more than max_states kept candidates, and
-    # limits["scan_stopped_at_cap"] says so. kept reports the candidates
-    # kept (cap + 1, the truncation sentinel), never a full-document count.
+    # limits["scan_stopped_at_cap"] says so. D26: kept reports the candidates
+    # the plan holds (len(plan.candidates)), never the cap + 1 truncation
+    # sentinel and never a full-document count.
     links = "".join(f'<a href="/p/{index}">Item {index}</a>' for index in range(2_000))
     root = parse_html(f"<main>{links}</main>")
     plan = plan_candidates(root, max_states=5)
@@ -796,7 +798,7 @@ def test_discovery_stops_at_the_cap():
     assert plan.reason == "truncated"
     assert plan.limits["truncated"] is True
     assert plan.limits["scan_stopped_at_cap"] is True
-    assert plan.limits["kept"] == 6
+    assert plan.limits["kept"] == 5
 
 
 def test_large_document_planning_is_bounded_by_max_states():
@@ -813,7 +815,8 @@ def test_large_document_planning_is_bounded_by_max_states():
     # reason="truncated", whatever its size — "ok" is untruncated only.
     assert plan.reason == "truncated"
     assert plan.limits["truncated"] is True
-    assert plan.limits["kept"] == 6
+    # D26: kept is the true count — len(plan.candidates) — not cap + 1.
+    assert plan.limits["kept"] == 5
 
     # Exactly cap candidates in the document is NOT a truncation.
     exact = plan_candidates(parse_html("<main><button>One</button><button>Two</button></main>"), max_states=2)
@@ -1375,3 +1378,21 @@ def test_exactly_cap_is_not_truncated():
     assert plan.limits["truncated"] is False
     assert plan.limits["scan_stopped_at_cap"] is False
     assert len(plan.candidates) == 3
+
+
+def test_kept_equals_len_candidates():
+    # D26: limits["kept"] is the true count — len(plan.candidates) — on a
+    # capped and an uncapped plan. It used to report cap + 1 (the truncation
+    # sentinel) while plan.candidates held cap, under a name that says
+    # otherwise; the sentinel is internal bookkeeping and is never counted.
+    root = _load("planner_tabs_accordion_modal.html")
+
+    capped = plan_candidates(root, max_states=2)
+    assert capped.limits["kept"] == len(capped.candidates) == 2
+    uncapped = plan_candidates(root)
+    assert uncapped.limits["kept"] == len(uncapped.candidates) == 4
+
+    # D30: max_states=0 asserts the exact overshoot — the discovery kept
+    # exactly one candidate (cap + 1) — not a lower bound.
+    zero = plan_candidates(root, max_states=0)
+    assert zero.limits["kept"] == 1
