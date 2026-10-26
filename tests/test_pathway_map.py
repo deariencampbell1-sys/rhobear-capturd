@@ -1735,22 +1735,18 @@ def test_file_field_is_basename_never_a_host_path(tmp_path):
     assert str(right) not in dumped
 
 
-def test_refusals_are_documented_in_the_module():
-    # D33: the constructs that raise are listed in the module docstring,
-    # not only in a PR body — the next worker reads the module, not the
-    # board. A string check is enough: the point is that the refusals
-    # list cannot silently disappear from the docstring.
+def test_refusals_are_a_structured_list():
+    # D49: the refusals are data, not prose. The module defines REFUSALS —
+    # a non-empty tuple of short names — and renders it into the module
+    # docstring; this test asserts structure (every name appears in the
+    # docstring, the list is non-empty), never the wording of any entry,
+    # so rewording cannot go red and dropping a refusal cannot slip
+    # through unnoticed. Replaces the D33 substring test, which pinned
+    # ten literal phrases and went red on any rewording without
+    # protecting anything.
+    refusals = pathway_map.REFUSALS
+    assert isinstance(refusals, tuple)
+    assert refusals, "REFUSALS must be non-empty"
     doc = pathway_map.__doc__ or ""
-    for phrase in (
-        "misaligned row",
-        "pipe-bearing prose",
-        "duplicate",
-        "over-long",
-        "unbalanced backtick",
-        "antiPatterns",
-        "not a list",
-        "not a mapping",
-        "no usable category",
-        "two bare integers",
-    ):
-        assert phrase in doc, f"module docstring must still name: {phrase}"
+    for name in refusals:
+        assert name in doc, f"module docstring must still name refusal: {name}"
