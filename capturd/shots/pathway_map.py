@@ -21,7 +21,10 @@ as the equivalent file. Output is deterministic: same input bytes, same dict
 The parser refuses rather than half-fill: a table is returned with every row
 or the parse raises ``PathwayMapError`` — never part of one — and a
 summary-shaped table outside a summary-named section is refused, not
-silently ignored.
+silently ignored. The refusal is decided once a line is KNOWN to be a
+table, never during header detection: a prose line that carries a pipe
+and a stray backtick is skipped like any other non-table line, not a
+parse abort (D17).
 """
 
 from __future__ import annotations
@@ -706,7 +709,11 @@ def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, Any]]:
     heading; a pipe-bearing line inside the body is a row — aligned it is
     returned, misaligned it raises ``PathwayMapError`` naming the line and
     both cell counts. The parser either returns every row of a table or
-    raises — it never returns part of one."""
+    raises — it never returns part of one. D17: the unbalanced-backtick
+    refusal fires only where the line is already a confirmed header (the
+    separator matched) or a confirmed body row — never during header
+    detection, so pipe-bearing prose with a stray backtick does not abort
+    the parse."""
     tables: list[dict[str, list[str]]] = []
     lines = text.split("\n")
     i = 0
@@ -715,7 +722,7 @@ def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, Any]]:
         if "|" not in header_line:
             i += 1
             continue
-        cells = _split_row(header_line, first_line + i)
+        cells, backtick_refusal = _split_row(header_line, first_line + i)
         if len(cells) < 2:
             i += 1
             continue
@@ -723,6 +730,11 @@ def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, Any]]:
         if not re.match(r"^\s*\|?[\s\-:|]+\|?\s*$", sep_line) or "-" not in sep_line:
             i += 1
             continue
+        if backtick_refusal is not None:
+            # D17: the separator matched, so this line IS a table header —
+            # only now is the unbalanced-backtick refusal decided. A prose
+            # line above a non-separator line was skipped untouched.
+            raise PathwayMapError(backtick_refusal)
         rows: list[list[str]] = []
         j = i + 2
         # D5: the body ends only at a blank line, a line with no unescaped
@@ -739,7 +751,14 @@ def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, Any]]:
                 break
             if not re.search(r"(?<!\\)\|", line):
                 break  # no unescaped pipe — not a row, ends the table
-            row = _split_row(line, first_line + j)
+            row, backtick_refusal = _split_row(line, first_line + j)
+            if backtick_refusal is not None:
+                # D17: this line is a confirmed row (the table was
+                # established by header + separator), so the refusal fires
+                # — an unterminated code span swallows the row's remaining
+                # pipes, which makes the cell count untrustworthy; the
+                # backtick is the defect to name.
+                raise PathwayMapError(backtick_refusal)
             if len(row) != len(cells):
                 raise PathwayMapError(
                     f"table row at line {first_line + j} has {len(row)} cells but its "
@@ -758,12 +777,19 @@ def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, Any]]:
     return tables
 
 
-def _split_row(line: str, lineno: int) -> list[str]:
+def _split_row(line: str, lineno: int) -> tuple[list[str], str | None]:
     """Split a table row into cells. A ``|`` inside a backtick code span and
     an escaped ``\\|`` never split — otherwise a cell like `` `a || b` ``
-    shifts every later column or gets the row silently dropped. A cell with
-    an ODD backtick count is REFUSED, not swallowed: an unterminated code
-    span would otherwise eat the rest of the row's pipes."""
+    shifts every later column or gets the row silently dropped.
+
+    D17: this function NEVER raises. A line is not yet known to be a table
+    when header detection calls it, and a prose line can carry a pipe and
+    an odd number of backticks — refusing there would abort the whole
+    document on one typo in an appendix. A cell with an ODD backtick count
+    is flagged instead: the second return value carries the ready-made
+    refusal message (``None`` when every cell is balanced), and the caller
+    raises it only once it has established the line is a table header or
+    row."""
     text = line.strip()
     if text.startswith("|"):
         text = text[1:]
@@ -772,15 +798,17 @@ def _split_row(line: str, lineno: int) -> list[str]:
     cells: list[str] = []
     buf: list[str] = []
     in_code = False
+    refusal: str | None = None
 
-    def cell_done() -> str:
+    def cell_done() -> None:
+        nonlocal refusal
         cell = "".join(buf).strip()
-        if cell.count("`") % 2 == 1:
-            raise PathwayMapError(
+        if refusal is None and cell.count("`") % 2 == 1:
+            refusal = (
                 f"table line {lineno} has an unbalanced backtick in cell "
                 f"'{cell}' — refusing"
             )
-        return cell
+        cells.append(cell)
 
     i = 0
     while i < len(text):
@@ -793,11 +821,11 @@ def _split_row(line: str, lineno: int) -> list[str]:
             buf.append("|")
             i += 2
         elif ch == "|" and not in_code:
-            cells.append(cell_done())
+            cell_done()
             buf = []
             i += 1
         else:
             buf.append(ch)
             i += 1
-    cells.append(cell_done())
-    return cells
+    cell_done()
+    return cells, refusal
