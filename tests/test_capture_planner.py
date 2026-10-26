@@ -2082,3 +2082,44 @@ def test_every_truncation_counter_counts_past_the_cap():
     # The unrepairable buttons under the two <html> elements lie past the
     # truncation point: both counted.
     assert plan.limits["dropped_ambiguous"] == 2
+
+
+def test_all_three_truncation_counters_count_on_one_truncated_plan():
+    # D83, edge case 3: one rule counts all three counters on one truncated
+    # plan. Two navigation links are excluded, four neutral buttons fill the
+    # cap (plus the sentinel), and past the truncation point sit two
+    # action-label buttons and the unrepairable two-<html> ambiguity shape:
+    # each counter reports its own full count, exactly as D56 made
+    # navigation_excluded do.
+    doc = (
+        "<nav><a href='/n/1'>N one</a><a href='/n/2'>N two</a></nav>"
+        "<button>Keep 1</button><button>Keep 2</button>"
+        "<button>Keep 3</button><button>Keep 4</button>"
+        "<button>Save</button><button>Cancel changes</button>"
+        "<html><body><button id='dup' title='dup'>Amb 1</button></body></html>"
+        "<html><body><button id='dup' title='dup'>Amb 2</button></body></html>"
+    )
+    plan = plan_candidates(parse_html(doc), max_states=3)
+
+    assert plan.reason == "truncated"
+    assert plan.limits["truncated"] is True
+    assert plan.limits["scan_stopped_at_cap"] is True
+    assert plan.limits["kept"] == 3
+    assert plan.limits["navigation_excluded"] == 2
+    assert plan.limits["dropped_action_labels"] == 2
+    assert plan.limits["dropped_ambiguous"] == 2
+
+
+def test_untruncated_plan_counts_nothing():
+    # D24 standing (edge case 4): a plan that does not truncate has no drops
+    # to count and no cap stop to report — every counter is 0 and the flag
+    # is false.
+    doc = "<main><button>Keep 1</button><button>Keep 2</button><button>Keep 3</button></main>"
+    plan = plan_candidates(parse_html(doc), max_states=24)
+
+    assert plan.reason == "ok"
+    assert plan.limits["truncated"] is False
+    assert plan.limits["scan_stopped_at_cap"] is False
+    assert plan.limits["navigation_excluded"] == 0
+    assert plan.limits["dropped_action_labels"] == 0
+    assert plan.limits["dropped_ambiguous"] == 0

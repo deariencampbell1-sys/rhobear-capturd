@@ -516,6 +516,14 @@ def _parse_attr_decl(decl: str) -> Optional[tuple[str, str]]:
 
 _NTH_PREFIX = ":nth-of-type("
 _LEADING_DIGIT_RE = re.compile(r"^(-?)([0-9])")
+#: The exact simple-selector shape :func:`_structural_path` generates for a
+#: repeated tag — ``tag:nth-of-type(k)`` and nothing else. A part of this
+#: shape can match at most one child of a parent (the k-th of that tag), so
+#: :meth:`_PlanIndex._level_match_count` answers its count from the memoised
+#: same-tag child list instead of scanning every sibling per node — D83
+#: support: verification now runs for past-cap nodes too, and must not be
+#: quadratic on wide sibling lists (the 2 000-link document).
+_NTH_PART_RE = re.compile(r"^([A-Za-z][\w-]*):nth-of-type\(([1-9][0-9]*)\)$")
 
 
 def _match_simple(node: _Node, part: str) -> bool:
@@ -706,6 +714,16 @@ class _PlanIndex:
             if node.tag == "html":
                 self._boundary_nodes.extend(node.children)
         self._counts: dict[str, int] = {}
+        # D83: the same-tag child list per (parent, tag) and the per-level
+        # match count per (parent, part). The tree is immutable during a
+        # plan (D7), so both are computed once and shared by
+        # :func:`_structural_path` and :meth:`verify_structural`; without
+        # them each rescans every sibling per node — quadratic on wide
+        # sibling lists (the 2 000-link document) — and the truncated walk
+        # can no longer skip that work: D83 examines every node past the
+        # cap so the drop counters see the full discovery lists.
+        self._same_tag: dict[tuple[_Node, str], list[_Node]] = {}
+        self._level_counts: dict[tuple[_Node, str], int] = {}
         # D82: the per-call navigation memo — created inside the plan and
         # owned by it, never stored on the public ``Node``. The tree is
         # immutable during a plan, so the values never go stale; when the
@@ -764,10 +782,53 @@ class _PlanIndex:
             parent = current.parent
             if parent is None:
                 return False
-            if sum(1 for child in parent.children if _match_simple(child, part)) != 1:
+            if self._level_match_count(parent, part) != 1:
                 return False
             current = parent
         return True
+
+    def _same_tag_children(self, parent: _Node, tag: str) -> list[_Node]:
+        """Children of ``parent`` whose tag is ``tag`` — computed once.
+
+        D83 support: :func:`_structural_path` and the level check in
+        :meth:`verify_structural` both need this list per node; on a wide
+        sibling list (the 2 000-link document) recomputing it per node is
+        quadratic, and the truncated walk can no longer skip that work.
+        """
+        key = (parent, tag)
+        cached = self._same_tag.get(key)
+        if cached is None:
+            cached = [child for child in parent.children if child.tag == tag]
+            self._same_tag[key] = cached
+        return cached
+
+    def _level_match_count(self, parent: _Node, part: str) -> int:
+        """How many children of ``parent`` match one simple selector part.
+
+        D83 support: verification runs for every examined node on a
+        truncated plan too — the cap stops the plan, never the counters —
+        so the per-level check must not rescan every sibling per node. A
+        part of the exact generated shape ``tag:nth-of-type(k)`` (see
+        :func:`_structural_path`) carries only the tag and the nth
+        condition, so it can match at most one child — the k-th of that
+        tag — and its count is read off the memoised same-tag list: 1 when
+        that child exists, else 0. Exactly the scan's answer, by
+        construction: the scan's own tag test is the same tag equality and
+        its own nth test pins the same element. Every other part keeps the
+        full scan, memoised per (parent, part).
+        """
+        key = (parent, part)
+        cached = self._level_counts.get(key)
+        if cached is not None:
+            return cached
+        nth_shape = _NTH_PART_RE.match(part)
+        if nth_shape:
+            same_tag = self._same_tag_children(parent, nth_shape.group(1))
+            count = 1 if int(nth_shape.group(2)) <= len(same_tag) else 0
+        else:
+            count = sum(1 for child in parent.children if _match_simple(child, part))
+        self._level_counts[key] = count
+        return count
 
     def unique_selector(self, node: _Node) -> tuple[Optional[str], str]:
         """Best selector for ``node``: ``#id``, then a stable attribute, then
@@ -828,7 +889,7 @@ def _structural_path(node: _Node, index: _PlanIndex) -> str:
         else:
             parent = current.parent
             if parent is not None:
-                same_tag = [child for child in parent.children if child.tag == current.tag]
+                same_tag = index._same_tag_children(parent, current.tag)
                 if len(same_tag) > 1:
                     part += f"{_NTH_PREFIX}{same_tag.index(current) + 1})"
             parts.insert(0, part)
@@ -1428,15 +1489,23 @@ def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
     kept before the cap cut it, never a lower bound),
     ``truncated``, ``scan_stopped_at_cap``,
     ``dropped_ambiguous`` (D58: distinct dropped nodes — each node counted
-    once however many discovery reasons reached it),
+    once however many discovery reasons reached it; D83: counted over the
+    FULL discovery lists — the cap may stop the plan early but it never
+    truncates this counter),
     ``navigation_excluded`` (D56: every excluded node counted once over the
     FULL discovery lists — the cap may stop discovery early but it never
-    truncates this counter), ``dropped_action_labels``, and ``too_large``
+    truncates this counter), ``dropped_action_labels`` (D83: likewise
+    counted over the FULL discovery lists — every action-word drop past the
+    truncation point is counted), and ``too_large``
     (the reason text, present only on reason="too-large").
     The cap bounds the plan, not the scan (round 3, D15): only kept
     candidates count against it — ``add()`` skips a node that is invisible,
     disabled or ambiguous before anything is added — so a document full of
     such controls is still scanned node by node to the end.
+    D83: on a truncated plan the scan also runs every discovery list to
+    the end — the suffix past the truncation point is examined and every
+    drop in it counted (D56's rule, applied to all three counters) — while
+    ``add()`` refuses to grow the plan past the cap + 1 sentinel.
     ``limits["scan_stopped_at_cap"]`` (D24) is True exactly when
     ``truncated`` is True — it used to be set only when a discovery loop
     re-entered and broke, so a plan whose overflow node was the last element
@@ -1490,7 +1559,6 @@ def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
     # node count, never set iteration order.
     dropped: set[_Node] = set()
     dropped_action_labels = 0
-    scan_stopped_at_cap = False
     # D6: a node discoverable by two loops (a <summary role="tab">) is one
     # skipped node, so navigation_excluded counts it once across all loops.
     # D56: it counts every excluded node over the FULL discovery lists, taken
@@ -1505,18 +1573,22 @@ def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
     navigation_excluded = len(counted)
 
     def add(node: _Node, kind: ControlKind, note: str, priority: int) -> None:
-        """Validate and append one candidate.
+        """Validate one node; append it as a candidate unless the cap is full.
 
-        D7: one cap mechanism only — the discovery loops check the cap at the
-        top of every iteration and stop iterating once the plan holds more
-        than ``cap`` kept candidates. The cap bounds kept candidates, not the
-        node scan (round 3, D15): ``add()`` itself never consults it and its
-        return value is gone (D7), and a node skipped here — invisible,
-        disabled, ambiguous — does not count against it, so a document of
-        only such nodes is scanned in full.
-        The cap is overshot by one so the ``truncated`` flag stays exact: a
-        document with exactly ``cap`` kept candidates is not reported as
-        truncated.
+        D7: one cap mechanism only — a plan holds at most ``cap + 1``
+        candidates, the last one the truncation sentinel, kept so the
+        ``truncated`` flag stays exact (a document with exactly ``cap``
+        kept candidates is not reported as truncated). The gate below
+        refuses to append past the sentinel — and does nothing else. The
+        cap bounds the plan, not the node scan (round 3, D15): a node
+        skipped here — invisible, disabled, ambiguous — does not count
+        against it, so a document of only such nodes is scanned in full.
+        D83: the gate sits after the ambiguity checks on purpose. Past the
+        cap this function still names every node and records every
+        unnameable one in ``dropped`` — the counters see the FULL
+        discovery lists on a truncated plan (D56's rule for
+        ``navigation_excluded``, applied to ``dropped_ambiguous`` and
+        ``dropped_action_labels``) — only the plan stops growing.
         """
         # D58: a dropped node is recorded in the ``dropped`` set below — one
         # entry per node however many discovery reasons reached it.
@@ -1534,6 +1606,12 @@ def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
                 return
         elif index.count_matches(selector) != 1:
             dropped.add(node)
+            return
+        if len(candidates) > cap:
+            # D7/D83: the truncation sentinel — the plan already holds cap + 1
+            # candidates, so nothing more is appended. This node was still
+            # named (or recorded in ``dropped``) above: the counters see the
+            # full discovery lists, only the plan stops growing.
             return
         # D70: the label fallback is scrubbed too — every string that can
         # reach output goes through the one helper.
@@ -1570,10 +1648,12 @@ def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
             )
         )
 
+    # D83: no discovery loop breaks at the cap any more. The walk runs every
+    # list to the end so the drop counters see the suffix past the
+    # truncation point — D56's rule for navigation_excluded, applied to
+    # dropped_ambiguous (inside add()) and dropped_action_labels (below) —
+    # while add() refuses to grow the plan past the cap + 1 sentinel (D7).
     for index_no, node in enumerate(tabs):
-        if len(candidates) > cap:
-            scan_stopped_at_cap = True  # D4/D15: discovery stopped early at the cap.
-            break
         # Uniform navigation exclusion (D2): every discovery loop skips nodes
         # inside navigation chrome — counted once per node over the full
         # discovery lists (D6, D56).
@@ -1583,16 +1663,10 @@ def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
         # table as the swept classification.
         add(node, ControlKind.TAB, f"role tab {index_no + 1}", _PRIORITY_BY_KIND[ControlKind.TAB])
     for index_no, node in enumerate(summaries):
-        if len(candidates) > cap:
-            scan_stopped_at_cap = True
-            break
         if node in counted:
             continue
         add(node, ControlKind.ACCORDION, f"summary disclosure {index_no + 1}", PRIORITY_SUMMARY_DISCLOSURE)
     for index_no, node in enumerate(swept):
-        if len(candidates) > cap:
-            scan_stopped_at_cap = True
-            break
         if node in counted:
             continue
         kind = _classify_sweep(node, index.nav_memo)
@@ -1605,10 +1679,11 @@ def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
 
     candidates.sort(key=lambda c: (c.priority, c.label))
     truncated = len(candidates) > cap
-    # D24: the flag tracks ``truncated`` exactly — a plan whose overflow node
-    # was the last element of its discovery list never re-enters a loop to
-    # break out of, but it was still cut by the cap.
-    scan_stopped_at_cap = truncated or scan_stopped_at_cap
+    # D24: the flag tracks ``truncated`` exactly. Since D83 the discovery
+    # walk never breaks at the cap — it runs every list to the end so the
+    # drop counters see the suffix past the truncation point — so the flag
+    # is the cap's verdict, set here from the same comparison.
+    scan_stopped_at_cap = truncated
     final = [
         replace(candidate, id=f"{index_no + 1:02d}-{candidate.kind}")
         for index_no, candidate in enumerate(candidates[:cap])
