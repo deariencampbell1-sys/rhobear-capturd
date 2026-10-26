@@ -2055,3 +2055,30 @@ def test_memo_state_does_not_outlive_a_call():
     plan3 = plan_candidates(root)
     assert plan3.limits["navigation_excluded"] == 0
     assert [c.label for c in plan3.candidates] == ["Nav link", "Body link"]
+
+
+def test_every_truncation_counter_counts_past_the_cap():
+    # D83: dropped_action_labels and dropped_ambiguous count every dropped
+    # node on a truncated plan — exactly as D56 made navigation_excluded do.
+    # The cap stops discovery; it never stops the counters: the suffix of the
+    # discovery list past the truncation point is still examined and every
+    # drop in it is counted. Four kept buttons fill the cap (plus the
+    # truncation sentinel); past that point sit two action-label buttons and
+    # the unrepairable two-<html> ambiguity shape — all four drops counted.
+    doc = (
+        "<button>Keep 1</button><button>Keep 2</button>"
+        "<button>Keep 3</button><button>Keep 4</button><button>Keep 5</button>"
+        "<button>Save</button><button>Cancel changes</button>"
+        "<html><body><button id='dup' title='dup'>Amb 1</button></body></html>"
+        "<html><body><button id='dup' title='dup'>Amb 2</button></body></html>"
+    )
+    plan = plan_candidates(parse_html(doc), max_states=3)
+
+    assert plan.reason == "truncated"
+    assert plan.limits["truncated"] is True
+    assert plan.limits["kept"] == 3
+    # The action-label buttons lie past the truncation point: both counted.
+    assert plan.limits["dropped_action_labels"] == 2
+    # The unrepairable buttons under the two <html> elements lie past the
+    # truncation point: both counted.
+    assert plan.limits["dropped_ambiguous"] == 2
