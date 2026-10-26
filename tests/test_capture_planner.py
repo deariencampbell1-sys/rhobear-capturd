@@ -1923,3 +1923,27 @@ def test_control_sweep_includes_checkbox_radio_select_and_names_the_exclusion():
     assert "not swept" in accepted
 
 
+def test_empty_declaration_does_not_hide():
+    # D72: _style_declares skips a declaration whose value is empty
+    # (if not val: continue) — an empty declaration is invalid CSS: it is not
+    # a match at all and never wins. The branch is behaviour-changing (it
+    # landed with D17 unpinned), so it is pinned here in both directions:
+    #   style="display:none;color:"   -> hidden (the empty color: is ignored)
+    #   style="display:"              -> visible, and nothing raises
+    #   style="display:none;display:" -> hidden (an empty declaration never
+    #                                    overrides the declaration before it)
+    #   style="opacity:"              -> visible: float() is never called on
+    #                                    an empty value, so nothing raises
+    root = parse_html(
+        "<main>"
+        '<button style="display:none;color:" id="a">Gone</button>'
+        '<button style="display:" id="b">Shown</button>'
+        '<button style="display:none;display:" id="c">Still gone</button>'
+        '<button style="opacity:" id="d">Also shown</button>'
+        "</main>"
+    )
+    plan = plan_candidates(root)
+
+    assert [c.label for c in plan.candidates] == ["Also shown", "Shown"]
+
+
