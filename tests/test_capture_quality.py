@@ -6,6 +6,10 @@ cover the four cases that matter plus the shape tolerances.
 
 from __future__ import annotations
 
+import copy
+import os
+from pathlib import Path
+
 import pytest
 
 from capturd.shots.quality import (
@@ -553,3 +557,102 @@ def test_error_text_and_reason_codes_agree_on_inconsistent_object() -> None:
     )
     assert set(bracketed) == set(codes)  # both report exactly {NO_CAPTURES}
     assert "a.png" not in message  # the text follows the codes, not the lists
+
+
+# ---------------------------------------------------------------------------
+# Read-only contract (W0-15): the module docstring promises, in as many
+# words, "Read-only: nothing here mutates ``result`` or the filesystem."
+# The tests below prove that promise for the whole public surface —
+# summarize_capture_quality, build_quality_error, reason_codes, is_passing.
+# A refactor that mutated the input in place would pass every test above
+# and break every downstream caller that reuses the dict; these two tests
+# are the guard against exactly that.
+# ---------------------------------------------------------------------------
+
+
+def _mixed_result() -> dict[str, object]:
+    """A result mixing all four entry shapes (edge case 1): a passing
+    capture, a baseline-only capture, a failing capture with a name, and
+    an entry that is not a mapping."""
+    return _result(
+        _file("good.png", [_capture("baseline", True), _capture("modal", True)]),
+        _file("rested.png", [_capture("baseline", True)]),
+        _file("dead.png", [_capture("modal", False)]),
+        42,  # not a mapping: tolerated, never read, never written
+    )
+
+
+def test_summary_does_not_mutate_its_input() -> None:
+    # D1: deep-copy the mixed result, run every public call over it, and
+    # assert the *input* is byte-for-byte what it was — assertEqual on the
+    # deep copy, not on the returned summary. If this ever goes red, the
+    # code is the bug: fix the mutation (copy on entry), never weaken this
+    # assertion.
+    result = _mixed_result()
+    snapshot = copy.deepcopy(result)
+
+    quality = summarize_capture_quality(result)
+    message = build_quality_error(quality)
+    codes = quality.reason_codes
+    passing = is_passing(result)
+
+    # The contract, checked on the input itself.
+    assert result == snapshot
+
+    # Non-vacuous guard: the calls above really did compute the expected
+    # summary, so the equality is not passing because nothing happened.
+    assert quality.baseline_only_files == ["rested.png"]
+    assert quality.empty_files == ["dead.png"]
+    assert codes == [BASELINE_ONLY, NO_SUCCESSFUL_CAPTURE]
+    assert quality.verdict == FAIL
+    assert message.startswith("[BASELINE_ONLY] 1 file only produced")
+    assert passing is False
+
+    # Edge case 2: a caller mutating the ``captures`` list *after* the
+    # call must not reach back into the already-computed summary — the
+    # summary is its own data, not a view onto the input.
+    result["results"][0]["manifest"]["captures"].clear()
+    result["results"][2]["manifest"]["captures"].append(_capture("modal", True))
+    assert quality.baseline_only_files == ["rested.png"]
+    assert quality.empty_files == ["dead.png"]
+    assert quality.reason_codes == codes
+    assert quality.verdict == FAIL
+    assert build_quality_error(quality) == message
+    # is_passing re-reads the (now mutated) input without writing to it:
+    # the passing file lost its captures, so the run is still not a pass.
+    assert is_passing(result) is False
+
+
+def test_summary_writes_nothing_to_disk() -> None:
+    # D2: nothing on disk moves. Record Path.cwd() and the sorted
+    # os.listdir of the repo root before and after the four public calls;
+    # both must come back identical — no temp files, no .json, no summary
+    # sidecar (edge case 3: the working-directory listing itself).
+    import re
+
+    import capturd.shots.quality as quality_module
+
+    # The module source itself carries no write calls — stated here as an
+    # assertion, mirroring the acceptance grep, so a future edit that adds
+    # Path.write_text / a write-mode open() fails here, not just in review:
+    source = Path(quality_module.__file__).read_text(encoding="utf-8")
+    assert re.search(r"write_text|open\([^)]*['\"][wa]", source) is None, (
+        "capturd/shots/quality.py must contain no write calls"
+    )
+    # json.dumps renders text; json.dump(target) writes a file — only the
+    # former is allowed in a read-only module.
+    assert "json.dump(" not in source
+
+    cwd = Path.cwd()
+    before = sorted(os.listdir(cwd))
+    # Guard: this really is the repo root listing, not an empty no-op.
+    assert "capturd" in before and "tests" in before
+
+    result = _mixed_result()
+    quality = summarize_capture_quality(result)
+    build_quality_error(quality)
+    quality.reason_codes
+    is_passing(result)
+
+    assert Path.cwd() == cwd
+    assert sorted(os.listdir(cwd)) == before
