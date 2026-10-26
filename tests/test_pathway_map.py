@@ -277,6 +277,31 @@ def test_count_table_under_any_heading_is_read():
         assert [p["id"] for p in parsed["pathways"]] == ["p1"], heading
 
 
+def test_three_column_table_is_not_a_count_table():
+    # D24: a count table has EXACTLY two columns. A three-column table —
+    # `| Category | Count | Notes |`, wherever it sits — sets no counts and
+    # raises nothing.
+    for heading in ("Notes", "Summary"):
+        text = "\n".join([
+            "# Pathway Manifest — three columns",
+            "",
+            f"## {heading}",
+            "",
+            "| Category | Count | Notes |",
+            "|---|---|---|",
+            "| WIRED | 5 | headline figure |",
+            "",
+            "## 1. Pathways Table",
+            "",
+            "| id | status |",
+            "|---|---|",
+            "| p1 | WIRED |",
+        ])
+        parsed = parse_manifest_text(text)
+        assert all(v is None for v in parsed["summary"].values()), heading
+        assert [p["id"] for p in parsed["pathways"]] == ["p1"], heading
+
+
 def test_summary_table_without_a_heading_is_decided():
     # D8, decided: a summary-shaped table outside a summary-named section is
     # REFUSED ("summary table outside a summary section") — never silently
