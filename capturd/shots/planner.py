@@ -209,10 +209,25 @@ def _classes(node: _Node) -> list[str]:
     return node.attrs.get("class", "").split()
 
 
+def _href_artifact(value: Optional[str]) -> str:
+    """href -> plan-artifact form (D18): the query string never enters the plan.
+
+    A ``?token=…&sig=…`` credential-bearing query must not be baked into the
+    labels and targets that brief 01d writes to disk — "no credential, no
+    signed URL". The path (or fragment) is kept; only the query is dropped.
+    """
+    return (value or "").split("?", 1)[0]
+
+
 # ---------------------------------------------------------------------------
 # Unique selectors (planner.js uniqueSelector / queryCount)
 # ---------------------------------------------------------------------------
 
+#: Attributes whose values name a control stably enough to select on.
+#: Deliberately absent (D18): ``href`` — the structural path already
+#: disambiguates a link, and ``a[href="https://…?token=…&sig=…"]`` bakes
+#: signed URLs and credential-bearing query strings into plan artifacts that
+#: brief 01d writes to disk.
 STABLE_SELECTOR_ATTRIBUTES: tuple[str, ...] = (
     "data-testid",
     "data-test",
@@ -228,7 +243,6 @@ STABLE_SELECTOR_ATTRIBUTES: tuple[str, ...] = (
     "aria-label",
     "aria-controls",
     "title",
-    "href",
     "name",
 )
 
@@ -1003,7 +1017,7 @@ def _target_summary(index: _PlanIndex, node: _Node) -> tuple[str, Optional[bool]
                 node.attrs.get("data-controls"),
                 node.attrs.get("data-target"),
                 node.attrs.get("data-bs-target"),
-                node.attrs.get("href"),
+                _href_artifact(node.attrs.get("href")),
             )
             if value
         ),
@@ -1131,7 +1145,7 @@ def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int 
         if selector is None or index.count_matches(selector) != 1:
             dropped_ambiguous += 1
             return
-        label = _text_of(node) or node.attrs.get("aria-controls") or node.attrs.get("href") or kind.value
+        label = _text_of(node) or node.attrs.get("aria-controls") or _href_artifact(node.attrs.get("href")) or kind.value
         target, target_visible = _target_summary(index, node)
         existing = seen.get(selector)
         if existing is not None:
