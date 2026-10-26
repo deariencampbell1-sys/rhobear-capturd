@@ -1324,3 +1324,40 @@ def test_menu_is_a_documented_navigation_exclusion():
     assert plan.candidates == []
     assert plan.reason == "no-candidates"
     assert plan.limits["navigation_excluded"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Review round 7: the limits layer — the ceilings must bound what they claim.
+# ---------------------------------------------------------------------------
+
+
+def test_scan_stopped_at_cap_tracks_truncated_exactly():
+    # D24: scan_stopped_at_cap is true exactly when truncated is true. It used
+    # to be set only when a discovery loop re-entered and broke, so a plan
+    # whose overflow node was the LAST element of its discovery list reported
+    # truncated=True with scan_stopped_at_cap=False — the exact case the flag
+    # exists to disambiguate.
+
+    # 1. Overshoot mid-list: discovery stops early — True.
+    links = "".join(f'<a href="/p/{index}">Item {index}</a>' for index in range(200))
+    mid = plan_candidates(parse_html(f"<main>{links}</main>"), max_states=5)
+    assert mid.limits["truncated"] is True
+    assert mid.limits["scan_stopped_at_cap"] is True
+
+    # 2. Overshoot on the LAST node of a discovery list: the overflow node is
+    #    the swept list's last element, so no loop re-enters and breaks — the
+    #    flag must still be True.
+    last = plan_candidates(
+        parse_html("<main><button>Alpha</button><button>Beta</button><button>Gamma</button></main>"),
+        max_states=2,
+    )
+    assert last.limits["truncated"] is True
+    assert last.limits["scan_stopped_at_cap"] is True
+
+    # 3. Exactly cap kept: not truncated — False.
+    exact = plan_candidates(
+        parse_html("<main><button>Alpha</button><button>Beta</button></main>"),
+        max_states=2,
+    )
+    assert exact.limits["truncated"] is False
+    assert exact.limits["scan_stopped_at_cap"] is False
