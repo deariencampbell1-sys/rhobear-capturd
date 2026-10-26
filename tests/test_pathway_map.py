@@ -978,6 +978,31 @@ def test_verifier_anti_patterns_round_trip():
     }]
 
 
+def test_zero_line_and_file_survive_normalisation():
+    # D39: `line` and `file` keep a real zero. `str(entry.get(key) or "")`
+    # collapses an integer 0 into "" — the same falsy collapse D18 fixed
+    # for `count` — so a feed that says line 0 or file 0 (a synthetic
+    # "no real location" marker) silently loses the value. Absence is
+    # decided by `is None`, never truthiness: a present zero round-trips
+    # as "0", and an absent key stays "".
+    text = json.dumps({
+        "antiPatterns": [
+            {"category": "zeroed", "line": 0, "file": 0},
+            {"category": "absent"},
+            {"category": "real", "line": 88, "file": "hub.ts"},
+        ],
+        "checks": {"api-wiring": {"findings": [{"id": "f1", "path": "/api/x"}]}},
+    })
+    parsed = parse_verifier_json_text(text)
+    entries = {a["category"]: a for a in parsed["antiPatterns"]}
+    assert entries["zeroed"]["line"] == "0"
+    assert entries["zeroed"]["file"] == "0"
+    assert entries["absent"]["line"] == ""
+    assert entries["absent"]["file"] == ""
+    assert entries["real"]["line"] == "88"
+    assert entries["real"]["file"] == "hub.ts"
+
+
 def test_comma_formatted_count_is_read_whole_or_refused():
     # D19, decided: READ WHOLE — `,` and spaces are stripped before taking
     # the first integer run, so "1,234" is 1234: never the truncated first
