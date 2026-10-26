@@ -66,7 +66,7 @@ __all__ = [
 class _Node:
     """One element of the parsed document."""
 
-    __slots__ = ("tag", "attrs", "children", "parent", "text_chunks", "content")
+    __slots__ = ("tag", "attrs", "children", "parent", "text_chunks", "content", "nav_memo")
 
     def __init__(self, tag: str, attrs: dict[str, str]) -> None:
         self.tag = tag
@@ -79,6 +79,10 @@ class _Node:
         #: :func:`_full_text` can interleave inline children with text.
         #: ``children`` and ``text_chunks`` stay as the element/text views.
         self.content: list[object] = []
+        #: D73: memo for :func:`_in_navigation` — ``None`` until computed,
+        #: then the node's navigation status. The tree is immutable during a
+        #: plan, so the value never goes stale.
+        self.nav_memo: Optional[bool] = None
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return f"<_Node {self.tag} attrs={sorted(self.attrs.items())!r} children={len(self.children)}>"
@@ -1067,15 +1071,41 @@ _hint_comparisons = 0
 
 
 def _in_navigation(node: _Node) -> bool:
+    """Is ``node`` inside navigation chrome — itself or an ancestor?
+
+    D73: computed ONCE per node and memoised on the node. This check is
+    called two to three times per node and every call used to re-walk the
+    ancestor chain against twelve hints — tens of millions of comparisons on
+    a legal maximum document. The walk now stops at the first memoised
+    ancestor and fills the memo for every node it passes through
+    (``_in_navigation(n)`` is ``hint-match(n) or _in_navigation(n.parent)``),
+    so each node's twelve hints are compared at most once per tree and the
+    cost is provably bounded by the node count — measured by the
+    ``_hint_comparisons`` counter, never a wall clock (D28).
+    """
     global _hint_comparisons
+    chain: list[_Node] = []
+    result = False
     current: Optional[_Node] = node
     while current is not None and current.tag != "#root":
+        memo = current.nav_memo
+        if memo is not None:
+            # Ancestor already decided: it (or one of its ancestors) matches
+            # exactly when result is True, and every node below it inherits.
+            result = memo
+            break
+        chain.append(current)
         for hint in NAVIGATION_SELECTOR_HINTS:
             _hint_comparisons += 1  # one hint comparison (D73)
             if _hint_match(current, hint):
-                return True
+                result = True
+                break
+        if result:
+            break
         current = current.parent
-    return False
+    for passed in chain:
+        passed.nav_memo = result
+    return result
 
 
 def _in_control_sweep(node: _Node) -> bool:
