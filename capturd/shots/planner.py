@@ -1038,7 +1038,7 @@ class NonDocumentRootError(ValueError):
     passing a subtree can never mistake the refusal for an empty plan."""
 
 
-def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int = 24) -> CapturePlan:
+def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
     """Turn a parsed document into an ordered, deduped candidate list.
 
     Deterministic: document order drives discovery, the final order is
@@ -1046,8 +1046,9 @@ def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int 
     never set iteration. Dedupe is by selector (D8): one node is one candidate,
     however many discovery loops reach it (a ``<summary role="tab">``) — the
     second kind stays visible in the candidate's ``reason`` text, never as a
-    second row. ``base_url`` is accepted for the live-clicking layer
-    (brief 01d) and does not affect the pure plan.
+    second row. There is no ``base_url`` parameter (D19): one that is
+    accepted and ignored is a silent no-op that reads as a planner bug in the
+    layer above — brief 01d gets it back when 01d actually resolves links.
 
     The reason is exactly one of ``"ok"`` (an untruncated plan with
     candidates), ``"no-candidates"`` (the document has nothing to interact
