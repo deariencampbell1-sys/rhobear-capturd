@@ -1127,10 +1127,14 @@ def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
     The cap bounds the plan, not the scan (round 3, D15): only kept
     candidates count against it — ``add()`` skips a node that is invisible,
     disabled or ambiguous before anything is added — so a document full of
-    such controls is still scanned node by node to the end. Discovery stops
-    early — ``limits["scan_stopped_at_cap"]`` is True exactly then — as soon
-    as the plan holds more than ``cap`` kept candidates; the cap is overshot
-    by one so the ``truncated`` flag stays exact.
+    such controls is still scanned node by node to the end.
+    ``limits["scan_stopped_at_cap"]`` (D24) is True exactly when
+    ``truncated`` is True — it used to be set only when a discovery loop
+    re-entered and broke, so a plan whose overflow node was the last element
+    of its discovery list reported ``truncated=True`` with
+    ``scan_stopped_at_cap=False``, the exact case the flag exists to
+    disambiguate. The cap is overshot by one so the ``truncated`` flag stays
+    exact.
 
     Raises :class:`NonDocumentRootError` (D4) unless ``root`` is the document
     root produced by :func:`parse_html` — ``root.parent is None`` and
@@ -1271,6 +1275,10 @@ def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
 
     candidates.sort(key=lambda c: (c.priority, c.label))
     truncated = len(candidates) > cap
+    # D24: the flag tracks ``truncated`` exactly — a plan whose overflow node
+    # was the last element of its discovery list never re-enters a loop to
+    # break out of, but it was still cut by the cap.
+    scan_stopped_at_cap = truncated or scan_stopped_at_cap
     final = [
         replace(candidate, id=f"{index_no + 1:02d}-{candidate.kind}")
         for index_no, candidate in enumerate(candidates[:cap])
