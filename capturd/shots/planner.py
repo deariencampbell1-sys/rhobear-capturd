@@ -789,17 +789,47 @@ def _style_declares(node: _Node, prop: str, value: str) -> bool:
     return result
 
 
+def _in_first_summary(details: _Node, node: _Node) -> bool:
+    """Is ``node`` inside the ``details``' first ``<summary>`` subtree (D35)?
+
+    Per HTML, a ``<details>`` without ``open`` renders exactly its first
+    ``<summary>`` child — the disclosure's own toggle — and nothing else in
+    its body. The path from ``node`` up to the ``details`` must pass through
+    that exact summary. Mirrors :func:`_in_first_legend`.
+    """
+    summary = next((child for child in details.children if child.tag == "summary"), None)
+    if summary is None:
+        return False
+    current: Optional[_Node] = node
+    while current is not None and current is not details:
+        if current is summary:
+            return True
+        current = current.parent
+    return False
+
+
 def _is_visible(node: _Node) -> bool:
     """Attribute-level approximation of computed-style visibility.
 
     Static HTML carries no computed styles or layout boxes, so this checks the
     node and its ancestors for ``hidden``, ``aria-hidden="true"`` and inline
-    ``display:none`` / ``visibility:hidden`` / ``opacity:0``. Rect-size checks
+    ``display:none`` / ``visibility:hidden`` / ``opacity:0``. D35: it also
+    refuses controls the browser never renders at all — anything under a
+    ``<template>``, and anything in a ``<details>`` body whose ``<details>``
+    has no ``open`` attribute. Both shapes appear verbatim in ``outerHTML``,
+    so unlike computed layout they are attribute-detectable. The first
+    ``<summary>`` of a closed ``<details>`` IS rendered (it is the toggle)
+    and stays visible; ``<details open>`` renders its body. Rect-size checks
     from planner.js are impossible without a browser and are intentionally
     omitted; the live-clicking layer re-checks visibility on the real DOM.
     """
     current: Optional[_Node] = node
     while current is not None and current.tag != "#root":
+        if current.tag == "template":
+            return False
+        if current.tag == "details" and "open" not in current.attrs:
+            if not _in_first_summary(current, node):
+                return False
         if "hidden" in current.attrs:
             return False
         if _keyword_value(current, "aria-hidden") == "true":
