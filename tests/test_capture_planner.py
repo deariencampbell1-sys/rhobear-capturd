@@ -1828,3 +1828,63 @@ def test_dropped_ambiguous_counts_each_node_once():
     plan2 = plan_candidates(parse_html(two_nodes))
     assert plan2.candidates == []
     assert plan2.limits["dropped_ambiguous"] == 2
+
+
+# ---------------------------------------------------------------------------
+# W0-21-r1 (closing round for PR #45): D70 (the one scrub reaches every
+# output string), D71 (the control sweep is decided), D72 (the empty
+# declaration is pinned) and D73 (the navigation check is computed once per
+# node). Cost is proved with deterministic counters, never a wall clock (D28).
+# ---------------------------------------------------------------------------
+
+
+def test_no_query_string_reaches_a_label_or_target():
+    # D70: the D18 query scrub applies to every string the plan can emit, not
+    # just href. A credential-bearing query — ?token=…&sig=… — must not be
+    # baked into a Candidate label, target, selector or repr(plan): the same
+    # "no credential, no signed URL" rule, one attribute over. Sources
+    # exercised: title (edge case 1), aria-label (edge case 2), data-title,
+    # data-label, data-target (the spec's document) and visible text that is
+    # itself a URL (edge case 2). The scrubbed labels stay non-empty and
+    # readable — the credential is cut, the words remain — and a node whose
+    # only stable attribute carries the query is still named (structurally).
+    root = parse_html(
+        "<main>"
+        '<button title="Go ?token=secret" id="b1">Tap</button>'
+        '<button aria-label="https://x/?sig=abc&token=secret" id="b2">Push</button>'
+        '<button data-title="Open ?token=secret" id="b3">Press</button>'
+        '<button data-label="Pick ?token=secret" id="b4">Flick</button>'
+        '<button data-target="https://x/?token=secret" id="b5">Flip</button>'
+        '<a href="/docs?token=secret" id="b6">https://x/?sig=abc</a>'
+        '<button title="Run ?token=secret">Zoom</button>'
+        "</main>"
+    )
+    plan = plan_candidates(root)
+
+    assert plan.reason == "ok"
+    assert plan.limits["dropped_ambiguous"] == 0
+    # The labels survive the scrub, non-empty and readable (edge cases 1-2).
+    assert sorted(c.label for c in plan.candidates) == [
+        "Flip",
+        "Go",
+        "Open",
+        "Pick",
+        "Run",
+        "https://x/",
+        "https://x/",
+    ]
+    for candidate in plan.candidates:
+        assert candidate.label.strip()
+        assert "?" not in candidate.label
+    # The scrubbed values land in the target fields too.
+    by_label = {c.label + c.selector: c for c in plan.candidates}
+    assert by_label["Flip#b5"].target == "https://x/"
+    assert by_label["https://x/#b6"].target == "/docs"
+    # The serialized plan — labels, targets, selectors and notes included —
+    # carries no query string and no credential word at all.
+    assert "?" not in repr(plan)
+    assert "token" not in repr(plan)
+    assert "secret" not in repr(plan)
+    assert "sig" not in repr(plan)
+
+
