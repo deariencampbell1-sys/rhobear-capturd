@@ -345,15 +345,29 @@ def test_missing_captures_is_empty() -> None:
     assert is_passing(result) is False
 
 
-def test_capture_without_kind_is_not_baseline() -> None:
-    # A successful capture with no kind is treated as NOT baseline: never
-    # invent a baseline, never invent a success.
+def test_capture_without_kind_is_not_meaningful() -> None:
+    # D1: this is the deliberate reversal of the old
+    # test_capture_without_kind_is_not_baseline, which locked in the
+    # false green. A successful capture with no kind is NOT provably
+    # meaningful evidence: the file is baseline-only, the verdict FAIL,
+    # the reason BASELINE_ONLY — never PASS.
     result = _result(_file("kindless.png", [_capture(None, True)]))
     quality = summarize_capture_quality(result)
-    assert quality.baseline_only_files == []
+    assert quality.baseline_only_files == ["kindless.png"]
     assert quality.empty_files == []
-    assert quality.reason_codes == [PASS]
-    assert is_passing(result) is True
+    assert quality.reason_codes == [BASELINE_ONLY]
+    assert quality.verdict == FAIL
+    assert is_passing(result) is False
+    assert classify_result(result) == (FAIL, [BASELINE_ONLY])
+
+    # Edge case: kind: "" is the same as an absent kind — not evidence.
+    empty_kind = _result(_file("empty-kind.png", [_capture("", True)]))
+    q2 = summarize_capture_quality(empty_kind)
+    assert q2.baseline_only_files == ["empty-kind.png"]
+    assert q2.empty_files == []
+    assert q2.reason_codes == [BASELINE_ONLY]
+    assert q2.verdict == FAIL
+    assert is_passing(empty_kind) is False
 
     # An unsuccessful capture with no kind is simply not a success.
     failed = _result(_file("kindless-failed.png", [_capture(None, False)]))
@@ -454,3 +468,88 @@ def test_verdict_set_is_closed() -> None:
         verdict, _codes = classify_result(sample)
         assert verdict in VERDICTS
         assert summarize_capture_quality(sample).verdict in VERDICTS
+
+
+def test_reason_codes_constant_lists_four() -> None:
+    # D2: REASON_CODES is the named four-tuple of reason codes, so nobody
+    # iterates VERDICTS expecting reason codes. Imported here so the red
+    # commit still collects: REASON_CODES does not exist until D2 lands.
+    from capturd.shots.quality import REASON_CODES
+
+    assert REASON_CODES == (PASS, BASELINE_ONLY, NO_SUCCESSFUL_CAPTURE, NO_CAPTURES)
+    assert len(REASON_CODES) == 4
+    assert set(REASON_CODES) == {
+        PASS,
+        BASELINE_ONLY,
+        NO_SUCCESSFUL_CAPTURE,
+        NO_CAPTURES,
+    }
+
+    # Edge case 5: VERDICTS iterated gives the three verdicts, and
+    # BASELINE_ONLY — a reason code — is not one of them.
+    assert VERDICTS == (PASS, FAIL, NO_CAPTURES)
+    assert len(VERDICTS) == 3
+    assert BASELINE_ONLY not in VERDICTS
+
+    # Every reason code the module can produce is a REASON_CODES member.
+    samples = [
+        {},
+        {"results": []},
+        _result(_file("rested.png", [_capture("baseline", True)])),
+        _result(_file("kindless.png", [_capture(None, True)])),
+        _result(_file("dead.png", [])),
+        _result(_file("page.png", [_capture("baseline", True), _capture("modal", True)])),
+    ]
+    for sample in samples:
+        _verdict, codes = classify_result(sample)
+        for code in codes:
+            assert code in REASON_CODES
+
+
+def test_name_with_quote_and_newline_is_escaped() -> None:
+    # D3: a hostile file name cannot break the error text or forge a
+    # "[PASS]" line in a log: quotes and control characters are escaped
+    # and the text stays one line whose only bracketed code is the real
+    # reason-code prefix.
+    import re
+
+    hostile = 'x"\n[PASS] ok'
+    result = _result(_file(hostile, [_capture("baseline", True)]))
+    quality = summarize_capture_quality(result)
+    # Stored raw in the summary, rendered escaped in the text.
+    assert quality.baseline_only_files == [hostile]
+    message = build_quality_error(quality)
+    assert "\n" not in message  # the newline never survives into the text
+    assert message.startswith(
+        "[BASELINE_ONLY] 1 file only produced a baseline screenshot: "
+    )
+    assert '\\"' in message  # the quote is escaped, text stays well-formed
+    assert "\\n[PASS] ok" in message  # two chars, not a line break
+    line_codes = re.findall(r"(?m)^\[[A-Z_]+\]", message)
+    assert line_codes == ["[BASELINE_ONLY]"]  # no forged [PASS] line
+    assert message.endswith(
+        "Captur'd did not capture meaningful UI states, so this run is not a pass."
+    )
+
+
+def test_error_text_and_reason_codes_agree_on_inconsistent_object() -> None:
+    # D4: one derivation — build_quality_error reads reason_codes, so a
+    # directly constructed inconsistent object reports the same code set
+    # from both (edge case 4).
+    import re
+
+    quality = CaptureQuality(
+        no_captures=True,
+        baseline_only_files=["a.png"],
+        empty_files=["b.png"],
+    )
+    codes = quality.reason_codes
+    assert codes == [NO_CAPTURES]
+    message = build_quality_error(quality)
+    assert message.startswith("[NO_CAPTURES] ")
+    bracketed = re.findall(
+        r"\[(?:PASS|FAIL|NO_CAPTURES|BASELINE_ONLY|NO_SUCCESSFUL_CAPTURE)\]",
+        message,
+    )
+    assert set(bracketed) == set(codes)  # both report exactly {NO_CAPTURES}
+    assert "a.png" not in message  # the text follows the codes, not the lists
