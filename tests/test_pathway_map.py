@@ -1885,3 +1885,59 @@ def test_count_table_recognised_in_either_column_order():
     message = str(excinfo.value)
     assert "category word first" in message
     assert "count word first" in message
+
+
+def test_detection_never_aborts_on_an_unrelated_cell():
+    # D60: during DETECTION, a cell that refuses means "this is not a count
+    # row" — the refusal is caught and the row skipped, so an unrelated
+    # two-column table can never abort the whole document. The refusal
+    # itself still fires where a count is genuinely being read (a real
+    # count table's row, an anti-pattern count cell).
+    unrelated_text = "\n".join([
+        "# Pathway Manifest — unrelated two-column table",  # line 1
+        "",                                               # line 2
+        "## Notes",                                       # line 3
+        "",                                               # line 4
+        "| Thing | Blah |",                               # line 5
+        "|---|---|",                                      # line 6
+        "| foo | 2 5 |",                                  # line 7
+        "",                                               # line 8
+        "## 1. Pathways Table",                           # line 9
+        "",                                               # line 10
+        "| id | status |",                                # line 11
+        "|---|---|",                                      # line 12
+        "| p1 | WIRED |",                                 # line 13
+    ])
+    parsed = parse_manifest_text(unrelated_text)
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+    assert all(v is None for v in parsed["summary"].values())
+
+    # The refusing cell beside a count LABEL under an unrecognised header:
+    # the detection probe reaches `_count_from_cell` there, and the
+    # two-bare-integers refusal escaping detection kills the whole parse.
+    # A cell that refuses is not a count — the document must still parse.
+    labelled_text = unrelated_text.replace("| foo | 2 5 |", "| WIRED | 2 5 |")
+    parsed = parse_manifest_text(labelled_text)
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+    assert all(v is None for v in parsed["summary"].values())
+
+    # The same refusing cell inside a REAL count table still refuses —
+    # there the count is genuinely being read (D26 stands).
+    real_count_text = "\n".join([
+        "# Pathway Manifest — refusing cell in a real count table",
+        "",
+        "## Summary Counts",
+        "",
+        "| Category | Count |",
+        "|---|---|",
+        "| **WIRED** | 2 5 |",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(real_count_text)
+    assert "2 5" in str(excinfo.value)
