@@ -544,6 +544,33 @@ def test_tables_have_no_first_row_field():
     assert tables[0]["rows"] == [["p1", "WIRED"]]
 
 
+def test_tables_are_aligned_and_retyped():
+    # D51: two structural claims, no behaviour change.
+    # 1. Rows are refused unless aligned with their header, so the row-map
+    #    fill that guards a short row can never take its false branch —
+    #    dead defensive code, gone from the module.
+    # 2. `_extract_tables`' local accumulator is annotated against its
+    #    return (`list[dict[str, Any]]`), not `list[dict[str, list[str]]]`
+    #    — the dict's values include `rows: list[list[str]]`.
+    source = inspect.getsource(pathway_map)
+    assert "if i < len(row)" not in source
+    assert "list[dict[str, list[str]]]" not in source
+    assert re.search(r"tables: list\[dict\[str, Any\]\] = \[\]", source)
+    # Aligned rows survive intact end to end: dropping the dead fill
+    # changes nothing for a well-formed table.
+    text = "\n".join([
+        "# Pathway Manifest — aligned rows",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status | trigger |",
+        "|---|---|---|",
+        "| p1 | WIRED | onClick |",
+    ])
+    parsed = parse_manifest_text(text)
+    assert parsed["pathways"][0]["trigger"] == "onClick"
+
+
 def test_both_flavours_return_the_same_key_set():
     # One shape for both flavours: identical top-level keys, with `flavour`
     # saying which produced it; summary and metadata carry the same keys too.
