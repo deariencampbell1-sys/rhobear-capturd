@@ -1785,3 +1785,20 @@ def test_navigation_excluded_counts_on_a_truncated_plan():
 
     assert plan.reason == "truncated"
     assert plan.limits["navigation_excluded"] == 7
+
+
+def test_aria_current_false_is_not_current():
+    # D57: aria-current is a value keyword (page|step|location|date|time|true)
+    # and "false" means not current. The check was presence-based, so an
+    # aria-current="false" control was marked current and classified PAGE;
+    # it must plan as a normal action instead.
+    root = parse_html(
+        "<main>"
+        '<button aria-current="false">Alpha</button>'
+        '<button aria-current="page">Beta</button>'
+        "</main>"
+    )
+    plan = plan_candidates(root)
+    by_label = {c.label: c for c in plan.candidates}
+    assert by_label["Alpha"].kind == "control"  # not current: a normal action
+    assert by_label["Beta"].kind == "page"      # current
