@@ -106,7 +106,8 @@ class CaptureQuality:
     """Which files captured no evidence, and how they failed.
 
     ``baseline_only_files``: files whose successful captures are all
-    rested-baseline screenshots. ``empty_files``: files with no successful
+    non-meaningful — rested-baseline screenshots or kindless captures
+    (D1). ``empty_files``: files with no successful
     capture at all. ``no_captures``: the run landed no readable files at
     all. A run passes only when none of the three is populated. File
     names are deduplicated across the summary, first-seen order kept
@@ -172,8 +173,8 @@ def summarize_capture_quality(result: Any) -> CaptureQuality:
     truthy string is not a success (D7). A file whose manifest has no
     successful capture is empty; a file whose successful captures are
     all non-meaningful (baseline kind, or an absent/empty kind — D1) is
-    baseline-only;
-    a result whose ``results`` is absent, empty or not a list reports
+    baseline-only; a result whose ``results`` is absent, empty or not a
+    list reports
     ``no_captures`` (``NO_CAPTURES``). Read-only: nothing here mutates
     ``result`` or the filesystem.
     """
