@@ -1691,3 +1691,21 @@ def test_escaped_quote_outside_quotes_does_not_open_a_string():
     (candidate,) = plan.candidates
     assert candidate.label == "Go"
     assert candidate.selector == 'main > div#say\\"hi > button'
+
+
+def test_important_beats_a_later_normal_declaration():
+    # D53: within one declaration block the cascade beats plain last-wins —
+    # if any declaration for the property is !important, the LAST !important
+    # one wins over a later normal one; only when none is !important does the
+    # last normal one win. Both orders, because an inversion here silently
+    # plans dead controls or drops live ones:
+    #   display:none!important;display:block  -> hidden -> not planned
+    #   display:block!important;display:none  -> visible -> planned
+    root = parse_html(
+        "<main>"
+        '<button style="display:none!important;display:block" id="imp">Gone</button>'
+        '<button style="display:block!important;display:none" id="norm">Kept</button>'
+        "</main>"
+    )
+    plan = plan_candidates(root)
+    assert [c.label for c in plan.candidates] == ["Kept"]
