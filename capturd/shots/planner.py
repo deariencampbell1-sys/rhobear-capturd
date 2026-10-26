@@ -267,8 +267,21 @@ def _classes(node: _Node) -> list[str]:
     return node.attrs.get("class", "").split()
 
 
+#: D81: fragment keys that name a credential. An OAuth implicit-flow
+#: response arrives exactly as a bare fragment — ``#access_token=…&state=…``
+#: — so a bare fragment carrying one of these keys and an ``=`` is a
+#: credential, not an anchor target, and is cut at the ``#``. Matched with a
+#: ``#``/``&``/start delimiter before the key and ``=`` right after it, so
+#: ``#signup-modal`` and ``#footnote=3`` stay whole and ``#tokenizer=1``
+#: (whose key is "tokenizer", not "token") stays whole too.
+_CREDENTIAL_FRAGMENT_RE = re.compile(
+    r"(?:^|[&#])(?:access_token|id_token|token|sig|signature|key|secret|code)=",
+    re.IGNORECASE,
+)
+
+
 def _scrub_artifact(value: Optional[str]) -> str:
-    """One scrub for every string the plan can emit (D18, D70).
+    """One scrub for every string the plan can emit (D18, D70, D81).
 
     A ``?token=…&sig=…`` credential-bearing query must not be baked into the
     labels, targets and selectors that brief 01d writes to disk — "no
@@ -277,14 +290,18 @@ def _scrub_artifact(value: Optional[str]) -> str:
     the same credential problem. The helper cuts at the first ``?`` and at
     the first ``#``.
 
-    One exception, on the record: a *bare* fragment reference — the whole
-    value is ``#…``, like ``#signup-modal`` or ``#footnote`` — is the plan's
-    own anchor-target form, not a URL suffix: it names the element a control
-    reveals and the fixture tests assert it verbatim
+    One exception, on the record (D81): a *bare* fragment reference — the
+    whole value is ``#…``, like ``#signup-modal`` or ``#footnote`` — is the
+    plan's own anchor-target form, not a URL suffix: it names the element a
+    control reveals and the fixture tests assert it verbatim
     (test_fixture_a_selectors_and_strategies pins target ==
     ``"#signup-modal"`` and the ``button[data-bs-target="#signup-modal"]``
     selector; W0-21-r1's stop rule forbids scrubbing a fixture-asserted
-    value). It keeps its anchor and cuts only a query.
+    value). It keeps its anchor and cuts only a query. The exception is
+    narrow: a fragment is kept only when it is NOT credential-shaped — one
+    carrying ``=`` and a credential-shaped key (``token``, ``access_token``,
+    ``id_token``, ``sig``, ``signature``, ``key``, ``secret``, ``code``) is
+    an implicit-flow credential, not an anchor, and is cut at the ``#``.
 
     Called from :func:`_text_of`, the label fallback, the target summary and
     the selector strategies (where a value that is not its own scrubbed self
@@ -294,6 +311,8 @@ def _scrub_artifact(value: Optional[str]) -> str:
     """
     text = value or ""
     if text.startswith("#"):
+        if _CREDENTIAL_FRAGMENT_RE.search(text):
+            return ""  # D81: a credential-shaped fragment is cut at the "#"
         return text.split("?", 1)[0]
     return text.split("?", 1)[0].split("#", 1)[0]
 
