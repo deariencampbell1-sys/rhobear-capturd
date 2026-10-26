@@ -1234,3 +1234,34 @@ def test_legend_controls_are_planned():
     assert sorted(c.label for c in plan.candidates) == ["Legend deep", "Legend top"]
     assert all(c.kind == "control" for c in plan.candidates)
     assert plan.reason == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Review round 6: D21 — attribute values are compared case-insensitively
+# where HTML says so (role, type, aria-* keywords).
+# ---------------------------------------------------------------------------
+
+
+def test_attribute_values_are_case_insensitive():
+    # D21: <input TYPE="Submit">, role="TAB" and aria-hidden="TRUE" must read
+    # exactly as their lowercase forms — HTML makes these keyword values
+    # ASCII-case-insensitive. All three directions:
+    root = parse_html(
+        "<main>"
+        '<input TYPE="Submit" value="Continue">'
+        '<button role="TAB" id="t">Tabs</button>'
+        '<button aria-hidden="TRUE" id="h">Ghost</button>'
+        "</main>"
+    )
+    plan = plan_candidates(root)
+
+    # TYPE="Submit" reads as type="submit" -> swept and planned;
+    # aria-hidden="TRUE" reads as aria-hidden="true" -> hidden, not planned.
+    assert [c.label for c in plan.candidates] == ["Tabs", "Continue"]
+    by_label = {c.label: c for c in plan.candidates}
+    assert by_label["Continue"].kind == "control"
+    assert by_label["Tabs"].kind == "tab"
+
+    # role="TAB" reads as role="tab" in the classifier too.
+    tab_node = next(n for n in iter_elements(root) if n.attrs.get("id") == "t")
+    assert classify_control(tab_node) == (ControlKind.TAB, False)
