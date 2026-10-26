@@ -13,7 +13,11 @@ from pathlib import Path
 
 import pytest
 
-from capturd.shots.capture import CaptureTarget, RestedCaptureError
+from capturd.shots.capture import (
+    CaptureTarget,
+    RestedCaptureError,
+    build_capture_plan,
+)
 from capturd.shots.pathway_map import PathwayMapError, load_pathway_map
 from capturd.shots.pathway_plan import (
     MAX_TARGETS,
@@ -234,3 +238,105 @@ def test_route_path_extracted():
     assert _extract_route_path("`GET /settings`") == "/settings"
     assert _extract_route_path('fetch(url + "/api/state")') == "/api/state"
     assert _extract_route_path("Home painted") is None
+
+
+# ---------------------------------------------------------------------------
+# W0-28-r1 — D94: plan-time navigation guarded like capture; no host paths
+# ---------------------------------------------------------------------------
+
+
+_POSIX_MANIFEST = """\
+# Pathway Manifest — posix paths
+
+A one-pathway map whose location and trigger carry a POSIX path from the
+machine that produced the manifest. The path must parse fine and must never
+reach the capture plan or any error text.
+
+## Summary Counts
+
+| Category | Count |
+|---|---|
+| **Total pathways** | 1 |
+| **WIRED** | 1 |
+
+## 1. Pathways Table
+
+| id | location | trigger | declared_intent | handler | downstream_call | expected_side_effect | evidence | status |
+|---|---|---|---|---|---|---|---|---|
+| `home` | /home/dev/project/src/RestedCaptureView.jsx:1 | `click` (handler in /home/dev/project/src/app.js:88) | Render the home view | `render` |  | Home painted | /home/dev/project/src/RestedCaptureView.jsx:1 | WIRED |
+"""
+
+
+def test_plan_time_navigation_is_guarded_and_host_paths_are_redacted(monkeypatch):
+    # D94: any navigation the planner performs goes through the same
+    # private-IP / host guard the capture path uses — reused, not rewritten —
+    # and _redact_host_paths redacts POSIX paths as well as Windows ones, so
+    # no host path reaches plan-json or an error message on any platform.
+    from capturd.shots import capture as capture_mod
+
+    pathway_map = _load("named-control-manifest.md")
+    with pytest.raises(RestedCaptureError) as plan_refusal:
+        plan_targets_from_map(pathway_map, "http://169.254.169.254")
+    with pytest.raises(RestedCaptureError) as capture_refusal:
+        capture_mod._reject_private_url("http://169.254.169.254/")
+    # the same error class — and the same error — the capture path raises
+    assert type(plan_refusal.value) is type(capture_refusal.value)
+    assert str(plan_refusal.value) == str(capture_refusal.value)
+
+    monkeypatch.setattr(
+        "capturd.shots.pathway_plan._load_page_html",
+        lambda url: "<html><body></body></html>",
+    )
+    urls, targets, settings = build_capture_plan({
+        "manifest_text": _POSIX_MANIFEST,
+        "base_url": "http://base.test",
+        "viewports": ["desktop"],
+        "schemes": ["light"],
+    })
+    assert urls == ["http://base.test/?view=capture"]  # the manifest resolves
+    plan_text = json.dumps(
+        {"urls": urls, "targets": [dataclasses.asdict(t) for t in targets], "settings": settings},
+        sort_keys=True,
+    )
+    for host_fragment in ("/home/dev", "home/dev", "project/src"):
+        assert host_fragment not in plan_text
+
+
+def test_plan_time_navigation_to_a_private_address_is_refused():
+    # Edge 4: plan-time navigation to a private address is refused by the
+    # shared guard, with the same error class the capture path raises.
+    from capturd.shots import capture as capture_mod
+
+    pathway_map = _load("named-control-manifest.md")
+    with pytest.raises(RestedCaptureError) as plan_refusal:
+        plan_targets_from_map(pathway_map, "http://127.0.0.1:9")
+    with pytest.raises(RestedCaptureError) as capture_refusal:
+        capture_mod._reject_private_url("http://127.0.0.1:9/x")
+    assert type(plan_refusal.value) is RestedCaptureError
+    assert str(plan_refusal.value) == str(capture_refusal.value)
+    assert "private/internal" in str(plan_refusal.value)
+
+
+def test_posix_host_path_in_a_manifest_never_reaches_plan_or_error(monkeypatch):
+    # Edge 5: a POSIX host path in a manifest resolves, and the path appears
+    # in neither plan-json nor an error text.
+    pathway_map = load_pathway_map(manifest_text=_POSIX_MANIFEST)
+    monkeypatch.setattr(
+        "capturd.shots.pathway_plan._load_page_html",
+        lambda url: "<html><body></body></html>",
+    )
+    urls, targets = plan_targets_from_map(pathway_map, "http://base.test")
+    assert urls and targets  # the manifest resolves
+    plan_text = json.dumps(
+        {"urls": urls, "targets": [dataclasses.asdict(t) for t in targets]},
+        sort_keys=True,
+    )
+    for host_fragment in ("/home/dev", "home/dev", "project/src"):
+        assert host_fragment not in plan_text
+
+    with pytest.raises(PathwayMapError) as excinfo:
+        resolve_pathway_url("", "http://base.test", pathway_id="/home/dev/project/src/broken")
+    message = str(excinfo.value)
+    assert "route is empty" in message
+    for host_fragment in ("/home/dev", "home/dev", "project/src"):
+        assert host_fragment not in message

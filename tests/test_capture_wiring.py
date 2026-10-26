@@ -134,8 +134,9 @@ def test_unwired_pathway_is_planned_and_flagged(monkeypatch):
 
 
 class _StubManager:
-    def __init__(self, results: list[dict]) -> None:
+    def __init__(self, results: list[dict], status: str = "done") -> None:
         self._results = results
+        self._status = status
 
     def start(self, payload: dict) -> dict:
         return {"job_id": "stub-job"}
@@ -143,7 +144,7 @@ class _StubManager:
     def get(self, job_id: str) -> dict:
         return {
             "job_id": job_id,
-            "status": "done",
+            "status": self._status,
             "message": "Done",
             "completed": len(self._results),
             "total": len(self._results),
@@ -257,3 +258,200 @@ def test_cli_help_names_the_map_inputs(capsys):
     ):
         assert flag in help_text
         assert one_liner in help_text
+
+
+# ---------------------------------------------------------------------------
+# W0-28-r1 — D92: --dry-run is dry (no navigation, no network call)
+# ---------------------------------------------------------------------------
+
+
+def _forbid_page_reads(monkeypatch) -> list[str]:
+    """The page-reading seam, recorded and made fatal: a call is proof that
+    something navigated."""
+    calls: list[str] = []
+
+    def _record(url: str) -> str:
+        calls.append(url)
+        raise AssertionError(f"a page read happened for {url}")
+
+    monkeypatch.setattr("capturd.shots.pathway_plan._load_page_html", _record)
+    return calls
+
+
+def _plan_from_output(out: str) -> dict:
+    lines = [line for line in out.splitlines() if line.startswith("plan-json: ")]
+    assert lines, f"no plan-json line in output:\n{out}"
+    return json.loads(lines[0][len("plan-json: "):])
+
+
+def _verifier_map_text(findings: list[dict]) -> str:
+    return json.dumps({
+        "checks": {
+            "smoke-check": {
+                "name": "smoke-check",
+                "passed": False,
+                "findings": findings,
+            }
+        }
+    })
+
+
+def _finding(fid: str, code: str) -> dict:
+    return {
+        "id": fid,
+        "check": "smoke-check",
+        "severity": "high",
+        "code": code,
+        "message": f"{fid} finding",
+    }
+
+
+def test_dry_run_performs_no_navigation(monkeypatch, capsys):
+    # D92: in dry-run the planner prints the plan without launching a browser
+    # and without any network call: a target's trigger_selector comes only
+    # from what the map itself names (selector/css column, or a selector-shaped
+    # token in trigger), and a named control that would need the page to bind
+    # is reported as unbound (selector=-) with a flag saying so.
+    calls = _forbid_page_reads(monkeypatch)
+    map_text = _verifier_map_text([
+        _finding("named-selector", "click `#panel-btn`"),
+        _finding("named-by-label", "click Settings button"),
+    ])
+
+    exit_code = cli.main([
+        "--map-text", map_text,
+        "--base-url", "http://base.test",
+        "--viewports", "desktop", "--schemes", "light",
+        "--dry-run",
+    ])
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+
+    assert exit_code == 0
+    assert calls == [], "dry-run must perform no navigation and no network call"
+    plan = _plan_from_output(out)
+    selectors = {t["pathway_id"]: t["trigger_selector"] for t in plan["targets"]}
+    # the printed plan names the explicit selector the map carries...
+    assert selectors["named-selector"] == "#panel-btn"
+    # ...and marks the label-named control unbound, flagged
+    assert selectors["named-by-label"] == ""
+    assert "selector=-" in out
+    unbound = [f for f in plan["settings"]["pathway_flags"] if f["flag"] == "UNBOUND"]
+    assert [f["pathway_id"] for f in unbound] == ["named-by-label"]
+    assert "unbound" in unbound[0]["reason"].lower()
+
+
+def test_dry_run_carries_explicit_selectors_without_a_page_read(monkeypatch, capsys):
+    # Edge 1: a map naming explicit selectors — plan printed, selectors
+    # present, NO page read.
+    calls = _forbid_page_reads(monkeypatch)
+    exit_code = cli.main([
+        "--pathway-manifest", str(WIRING / "named-control-manifest.md"),
+        "--base-url", "http://base.test",
+        "--viewports", "desktop", "--schemes", "light",
+        "--dry-run",
+    ])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert calls == [], "dry-run must not read any page"
+    plan = _plan_from_output(captured.out)
+    selectors = {t["pathway_id"]: t["trigger_selector"] for t in plan["targets"]}
+    assert selectors["open-settings"] == "#open-settings"
+    assert selectors["open-missing"] == "#missing-btn"
+
+
+def test_dry_run_flags_a_label_only_control_unbound(monkeypatch, capsys):
+    # Edge 2: a map naming a control only by label — plan printed,
+    # selector=-, flagged unbound.
+    calls = _forbid_page_reads(monkeypatch)
+    map_text = _verifier_map_text([_finding("label-only", "click Settings button")])
+
+    exit_code = cli.main([
+        "--map-text", map_text,
+        "--base-url", "http://base.test",
+        "--viewports", "desktop", "--schemes", "light",
+        "--dry-run",
+    ])
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+
+    assert exit_code == 0
+    assert calls == []
+    plan = _plan_from_output(out)
+    target = plan["targets"][0]
+    assert target["pathway_id"] == "label-only"
+    assert target["trigger_selector"] == ""
+    assert "selector=-" in out
+    unbound = [f for f in plan["settings"]["pathway_flags"] if f["flag"] == "UNBOUND"]
+    assert [f["pathway_id"] for f in unbound] == ["label-only"]
+    assert "unbound" in unbound[0]["reason"].lower()
+
+
+# ---------------------------------------------------------------------------
+# W0-28-r1 — D93: legacy runs keep their exit codes; the gate is map-only
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_runs_keep_their_exit_codes(monkeypatch, capsys):
+    # D93: the quality gate applies only to map-driven runs. A --urls /
+    # --sitemap / --crawl / --local run exits exactly as it did before this
+    # PR: a baseline-only run is 0, a failed job keeps its old code, and
+    # `quality: <CODE>` is printed only when a gate runs.
+    baseline = [{"file": "001-home-desktop-light.png", "status": "ok", "states": []}]
+    mixed = [
+        {"file": "a.png", "status": "ok", "trigger_fired": True, "states": []},
+        {"file": "b.png", "status": "failed", "error": "boom", "states": []},
+    ]
+    broken = [{"file": "a.png", "status": "failed", "error": "boom", "states": []}]
+    legacy_modes = {
+        "--urls": ["--urls", "example.com"],
+        "--sitemap": ["--sitemap", "http://example.com/sitemap.xml"],
+        "--crawl": ["--site", "http://example.com"],
+        "--local": ["--local", "build"],
+    }
+    for mode, argv in legacy_modes.items():
+        for results, status, expected in (
+            (baseline, "done", 0),
+            (mixed, "done_with_errors", 3),
+            (broken, "failed", 1),
+        ):
+            monkeypatch.setattr(
+                cli,
+                "RestedCaptureManager",
+                lambda results=results, status=status: _StubManager(results, status),
+            )
+            exit_code = cli.main(argv)
+            captured = capsys.readouterr()
+            output = captured.out + captured.err
+            assert exit_code == expected, (
+                f"{mode} run with status={status} must exit {expected}, "
+                f"got {exit_code}"
+            )
+            assert "quality:" not in output, (
+                f"{mode} is a legacy run — no quality gate runs, so no quality line"
+            )
+
+    # and a map-driven run still exits 4 on a quality refusal, gate code and all
+    monkeypatch.setattr(cli, "RestedCaptureManager", lambda: _StubManager(baseline, "done"))
+    exit_code = cli.main([
+        "--pathway-manifest", str(WIRING / "named-control-manifest.md"),
+        "--base-url", "http://base.test",
+    ])
+    captured = capsys.readouterr()
+    assert exit_code == 4
+    assert "quality: BASELINE_ONLY" in captured.out + captured.err
+
+
+def test_map_driven_baseline_only_run_still_exits_four(monkeypatch, capsys):
+    # Edge 3 (second half): the gate keeps refusing a baseline-only
+    # MAP-driven run with EXIT_QUALITY_FAIL — its reason code printed.
+    results = [{"file": "001-home-desktop-light.png", "status": "ok", "states": []}]
+    monkeypatch.setattr(cli, "RestedCaptureManager", lambda: _StubManager(results, "done"))
+    exit_code = cli.main([
+        "--pathway-manifest", str(WIRING / "named-control-manifest.md"),
+        "--base-url", "http://base.test",
+    ])
+    captured = capsys.readouterr()
+    assert exit_code == cli.EXIT_QUALITY_FAIL == 4
+    assert "quality: BASELINE_ONLY" in captured.out + captured.err
