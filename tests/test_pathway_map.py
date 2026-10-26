@@ -225,6 +225,55 @@ def test_totals_heading_is_a_summary_section():
     assert parsed["summary"]["pathwaysTotal"] is None
 
 
+def test_three_column_table_under_summary_heading_sets_no_counts():
+    # D7: the summary heading gate alone is not enough — a count row must be
+    # exactly two cells (`| <LABEL> | <N> |`). A three-column pathway table
+    # under ## Summary has `| p1 | WIRED | 3 |` rows: WIRED sits in the
+    # middle cell, so it must not set summary["wired"] — and the pathways
+    # must still parse.
+    text = "\n".join([
+        "# Pathway Manifest — three columns under summary",
+        "",
+        "## Summary",
+        "",
+        "| id | status | count |",
+        "|---|---|---|",
+        "| p1 | WIRED | 3 |",
+        "| p2 | UNWIRED | 1 |",
+    ])
+    parsed = parse_manifest_text(text)
+    assert parsed["summary"]["wired"] is None
+    assert parsed["summary"]["unwired"] is None
+    assert all(v is None for v in parsed["summary"].values())
+    assert [p["id"] for p in parsed["pathways"]] == ["p1", "p2"]
+
+
+def test_summary_table_without_a_heading_is_decided():
+    # D8, decided: a summary-shaped table outside a summary-named section is
+    # REFUSED ("summary table outside a summary section") — never silently
+    # ignored, never read as summary. Reading it as summary would void the
+    # D1' heading gate (## Accounting must not set counts); silently
+    # ignoring it would hide a misplaced summary block behind an all-None
+    # summary.
+    text = "\n".join([
+        "# Pathway Manifest — misplaced summary",
+        "",
+        "## Notes",
+        "",
+        "| Category | Count |",
+        "|---|---|",
+        "| **WIRED** | 2 |",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+    ])
+    with pytest.raises(PathwayMapError, match="summary table outside a summary section"):
+        parse_manifest_text(text)
+
+
 def test_both_flavours_return_the_same_key_set():
     # One shape for both flavours: identical top-level keys, with `flavour`
     # saying which produced it; summary and metadata carry the same keys too.
@@ -303,6 +352,77 @@ def test_misaligned_row_is_refused():
     message = str(excinfo.value)
     assert "line 7" in message
     assert "p1" in message
+
+
+def test_misaligned_row_mid_table_is_refused():
+    # D5: a pipe-bearing row in the MIDDLE of a table that cannot be aligned
+    # is refused, naming the line and both cell counts. The old parser broke
+    # at such a row and silently skipped every row after it — a truncation,
+    # not a parse: the parser returns every row of a table or raises.
+    text = "\n".join([
+        "# Pathway Manifest — mid-table misalignment",  # line 1
+        "",                                             # line 2
+        "## 1. Pathways Table",                         # line 3
+        "",                                             # line 4
+        "id | status",                                  # line 5
+        "---|---",                                      # line 6
+        "p1 | WIRED",                                   # line 7
+        "p2 | WIRED | extra",                           # line 8 — 3 cells vs 2
+        "p3 | WIRED",                                   # line 9
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(text)
+    message = str(excinfo.value)
+    assert "line 8" in message
+    assert "3 cells" in message
+    assert "header has 2" in message
+    # The same refusal when the row does carry its leading pipe.
+    piped = "\n".join([
+        "# Pathway Manifest — mid-table misalignment",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+        "| p2 | WIRED | extra |",
+        "| p3 | WIRED |",
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(piped)
+    assert "line 8" in str(excinfo.value)
+
+
+def test_misaligned_row_mid_table_does_not_lose_trailing_rows():
+    # The same table as above: the old parser returned a SUCCESSFUL parse of
+    # [p1] — nothing refused, and p3 silently absent. D5: every row of a
+    # table or a refusal, so a misaligned mid-table row can never leave a
+    # successful partial parse behind; and when the row is repaired, p3 must
+    # be present in the successful parse.
+    text = "\n".join([
+        "# Pathway Manifest — trailing row",  # line 1
+        "",                                   # line 2
+        "## 1. Pathways Table",               # line 3
+        "",                                   # line 4
+        "id | status",                        # line 5
+        "---|---",                            # line 6
+        "p1 | WIRED",                         # line 7
+        "p2 | WIRED | extra",                 # line 8 — 3 cells vs 2
+        "p3 | WIRED",                         # line 9
+    ])
+    with pytest.raises(PathwayMapError):
+        parse_manifest_text(text)
+    repaired = "\n".join([
+        "# Pathway Manifest — trailing row",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "id | status",
+        "---|---",
+        "p1 | WIRED",
+        "p3 | WIRED",
+    ])
+    assert [p["id"] for p in parse_manifest_text(repaired)["pathways"]] == ["p1", "p3"]
 
 
 def test_duplicate_pathway_id_is_refused():
