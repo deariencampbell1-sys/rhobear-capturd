@@ -13,13 +13,17 @@ document. The planner therefore plans from the *rested* document; the
 live-clicking layer (brief 01d, ``capturd.shots.capture``) reuses this same pure
 code against the live DOM rather than keeping a second implementation.
 
-Navigation chrome and ``.nav``: ``NAVIGATION_SELECTOR_HINTS`` includes ``.nav``
-for upstream parity (scout-src ``planner.js`` plans from the same hint list).
+Navigation chrome, ``.nav`` and ``.menu``: ``NAVIGATION_SELECTOR_HINTS``
+includes ``.nav`` for upstream parity (scout-src ``planner.js`` plans from the
+same hint list) and ``.menu`` because dropdown menus are navigation in this
+product — a ``ul.menu`` is chrome and is excluded from the plan, the same
+accepted limitation as ``.nav``, and this paragraph names both.
 Accepted, on the record: a Bootstrap-style ``ul.nav.nav-tabs >
 a[data-toggle="tab"]`` is chrome and is excluded from the plan, where upstream
 planned such link tabs as ``page`` controls. Captur'd excludes chrome where
-upstream planned it; a framework that hangs its tabs off ``.nav`` is captured
-only if it also marks them up some other way outside navigation containers.
+upstream planned it; a framework that hangs its tabs off ``.nav`` or ``.menu``
+is captured only if it also marks them up some other way outside navigation
+containers.
 
 Everything here is deterministic: identical HTML in produces an identical
 ``CapturePlan`` out, byte for byte under ``repr``. All ordering comes from
@@ -819,7 +823,10 @@ class ControlKind(enum.Enum):
 
 #: Containers whose links are navigation, not interaction states (planner.js
 #: ``element.closest("nav, aside, header, [role='navigation'], .sidebar, ...")``;
-#: brief 01b adds ``footer`` — site-footer links are navigation too).
+#: brief 01b adds ``footer`` — site-footer links are navigation too). ``.menu``
+#: is here deliberately (D23): dropdown menus are navigation in this product —
+#: the module docstring's accepted-limitation paragraph names both ``.nav``
+#: and ``.menu``.
 NAVIGATION_SELECTOR_HINTS: tuple[str, ...] = (
     "nav",
     "aside",
