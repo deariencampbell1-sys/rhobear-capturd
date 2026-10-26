@@ -1709,3 +1709,19 @@ def test_important_beats_a_later_normal_declaration():
     )
     plan = plan_candidates(root)
     assert [c.label for c in plan.candidates] == ["Kept"]
+
+
+def test_explicit_aria_disabled_false_overrides_inherited_true():
+    # D54: aria-disabled is inherited down the ancestor chain (D34), but the
+    # NEAREST explicit value wins — an explicit aria-disabled="false" stops
+    # the inheritance and re-enables the subtree. The near-false case is
+    # planned; the inherited-true case without an override is not.
+    root = parse_html(
+        "<main>"
+        '<div aria-disabled="true"><button aria-disabled="false">Near</button></div>'
+        '<div aria-disabled="true"><div aria-disabled="false"><button>Mid</button></div></div>'
+        '<div aria-disabled="true"><button>Far</button></div>'
+        "</main>"
+    )
+    plan = plan_candidates(root)
+    assert [c.label for c in plan.candidates] == ["Mid", "Near"]
