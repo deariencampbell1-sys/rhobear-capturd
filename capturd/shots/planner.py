@@ -927,7 +927,10 @@ def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int 
 
     Deterministic: document order drives discovery, the final order is
     ``(priority, label)``, ties keep insertion order, and everything is sorted —
-    never set iteration. ``base_url`` is accepted for the live-clicking layer
+    never set iteration. Dedupe is by selector (D8): one node is one candidate,
+    however many discovery loops reach it (a ``<summary role="tab">``) — the
+    second kind stays visible in the candidate's ``reason`` text, never as a
+    second row. ``base_url`` is accepted for the live-clicking layer
     (brief 01d) and does not affect the pure plan.
 
     The reason is exactly one of ``"ok"`` (an untruncated plan with
@@ -982,7 +985,10 @@ def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int 
     swept = [n for n in nodes if n.attrs.get("role") != "tab" and n.tag != "summary" and _in_control_sweep(n)]
 
     candidates: list[Candidate] = []
-    seen: set[str] = set()
+    # D8: one candidate per node — the dedupe key is the selector (which the
+    # verifier has just proved names exactly one node), and the value is that
+    # candidate's index, so a second kind can fold into its reason text.
+    seen: dict[str, int] = {}
     dropped_ambiguous = 0
     navigation_excluded = 0
     dropped_action_labels = 0
@@ -1013,10 +1019,17 @@ def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int 
             return True
         label = _text_of(node) or node.attrs.get("aria-controls") or node.attrs.get("href") or kind.value
         target, target_visible = _target_summary(index, node)
-        key = f"{kind.value}|{selector}"
-        if key in seen:
+        existing = seen.get(selector)
+        if existing is not None:
+            # D8: dedupe by selector — one node is one candidate. The second
+            # kind stays visible in the kept candidate's reason text.
+            kept = candidates[existing]
+            candidates[existing] = replace(
+                kept,
+                reason=f"{kept.reason}; also {kind.value}: {reason}",
+            )
             return True
-        seen.add(key)
+        seen[selector] = len(candidates)
         candidates.append(
             Candidate(
                 id="",
