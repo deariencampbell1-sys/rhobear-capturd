@@ -28,6 +28,26 @@ dependencies = [
     "fastmcp>=0.4",
     "edge-tts>=6.1",
     "httpx>=0.27",
+    # Import-time requirements of the production entry points, moved up from
+    # the dev extra (verdicts pinned executably by
+    # tests/test_import_path_hygiene.py::test_production_entry_module_imports_per_dependency_verdict):
+    #   fastapi      — service/app/main.py (the hosted service) imports it
+    #                  unguarded at module import.
+    #   uvicorn      — `capturd serve` (capturd.mcp.server) imports fastmcp,
+    #                  whose server chain needs uvicorn at import time (mcp
+    #                  itself declares uvicorn>=0.31.1); also the
+    #                  service/mcp_service.py runner.
+    #   numpy        — capturd/walk/voice.py imports it unguarded at module
+    #                  import; voice is on the capturd.mcp.server and
+    #                  `capturd walk` import chains via walk/recorder.py.
+    #   cryptography — first-party use is LAZY (capturd/pro.py imports it
+    #                  inside _signed_license_ok), but mcp 2.3.0 imports it at
+    #                  module import on the `capturd serve` chain, so the
+    #                  entry point cannot import without it.
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.23",
+    "numpy>=1.26",
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]
@@ -35,7 +55,33 @@ dependencies = [
 # faster-whisper is CT2-backed (~5x openai-whisper) and offline-capable.
 # Pull only when you actually want voice mode; ~500MB of native deps.
 voice = ["faster-whisper>=1.0", "sounddevice>=0.4", "miniaudio>=1.60"]
-dev = ["pytest>=7", "pytest-asyncio>=0.21"]
+# Development / test dependencies. Everything the collected test suite needs
+# is declared here so a fresh clone reproduces the green run from committed
+# setup alone (no hand-set PYTHONPATH, no undeclared installs):
+#
+#   python -m pip install -e ".[dev]"
+#   python -m playwright install chromium
+#   python -m playwright install chrome
+#   # plus ffmpeg/ffprobe on PATH (apt install ffmpeg / choco install ffmpeg)
+#
+# `playwright install chrome` is required for the full suite: three
+# tests/test_recorder_agent.py content-mode tests launch channel="chrome".
+# Expected skips in a clean Linux run: the gateway-key LLM test, the Postgres
+# integration test, and the voice-loop fixture test (miniaudio — installed
+# only via the `voice` extra above), plus the two Windows-only finisher path
+# tests (they run on Windows, where the two POSIX ones skip instead).
+#
+# fastapi/uvicorn/numpy/cryptography used to be dev-only; they are now in
+# [project] dependencies because production entry points import them at
+# import time (see the dependencies list above for the per-package evidence).
+# The suite's tests still import them (they import the production modules),
+# so dev keeps working with no extra declaration.
+# miniaudio/faster-whisper/sounddevice are deliberately NOT here — installing
+# them changes the expected skip count (they belong to `voice`).
+dev = [
+    "pytest>=7",
+    "pytest-asyncio>=0.21",
+]
 all = ["faster-whisper>=1.0", "sounddevice>=0.4", "miniaudio>=1.60", "pytest>=7", "pytest-asyncio>=0.21"]
 
 [project.scripts]
@@ -59,6 +105,12 @@ packages = ["capturd", "capturd.shots", "capturd.walk", "capturd.mcp"]
 # e2e tests need network + browser + a configured AI gateway; run them
 # explicitly with `pytest -m e2e`.
 addopts = "-m 'not e2e'"
+# Import discovery without hand-set PYTHONPATH: `scripts` holds the e2e
+# harness modules (e2e_mcp_stdio / e2e_walkthrough_proof, imported by tests
+# and by director-rig/film.py), `director-rig` holds the rig modules its own
+# tests import. `python -m pytest -q` then collects and passes with no
+# environment variables set (pytest >= 7 supports the pythonpath ini).
+pythonpath = ["scripts", "director-rig"]
 markers = [
     "slow: marks tests as slow (browser-dependent, skipped by default)",
     "e2e: marks end-to-end proof tests (network + browser + AI pipeline — deselected by default)",
