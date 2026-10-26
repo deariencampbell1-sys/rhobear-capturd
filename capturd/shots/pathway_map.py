@@ -628,7 +628,9 @@ def _extract_summary(parsed_sections: _ParsedSections) -> dict[str, Any]:
     # (the ambiguity is the duplicate, not the value), exactly like the
     # duplicate-pathway-id refusal.
     line_by_count_key: dict[str, int] = {}
-    for sec, tables in parsed_sections:
+    # D69: the section heading decides nothing here (D24) — only the tables
+    # matter, so the loop binds no `sec` local at all.
+    for _, tables in parsed_sections:
         # D24: the section heading no longer decides anything — every table
         # in the document is checked against the count-table header shape,
         # and a matching table's rows are read wherever the table sits. A
@@ -868,7 +870,9 @@ def _normalize_status(status: str) -> str:
 
 def _extract_routes(parsed_sections: _ParsedSections) -> list[dict[str, Any]]:
     routes: list[dict[str, Any]] = []
-    for sec, tables in parsed_sections:
+    # D69: routes carry no heading gate — only the tables matter, so the
+    # loop binds no `sec` local at all.
+    for _, tables in parsed_sections:
         # D63: the tables arrive already parsed (once per section).
         for table in tables:
             # D66: only the tables the routes extractor claimed.
