@@ -315,6 +315,41 @@ def test_bold_header_is_still_a_count_table():
         assert [p["id"] for p in parsed["pathways"]] == ["p1"], label
 
 
+def test_bold_italic_count_row_is_counted():
+    # D41: `_COUNT_ROW_RE`'s hand-rolled `\*{0,2}` cannot match a
+    # bold-ITALIC label — `***WIRED***` is three asterisks per side — so
+    # that count was silently dropped inside the very path that refuses
+    # silent drops. Emphasis is stripped from the row label before the
+    # label set is matched (the D31 approach), so one, two or three
+    # asterisks — and underscores and code spans — all read as the label.
+    for row_label, label in (
+        ("***WIRED***", "bold-italic"),
+        ("*WIRED*", "italic"),
+        ("**WIRED**", "bold"),
+        ("_WIRED_", "underscore"),
+        ("`WIRED`", "code span"),
+        ("WIRED", "bare"),
+    ):
+        text = "\n".join([
+            "# Pathway Manifest — emphasised count row",
+            "",
+            "## Status Overview",
+            "",
+            "| Category | Count |",
+            "|---|---|",
+            f"| {row_label} | 4 |",
+            "",
+            "## 1. Pathways Table",
+            "",
+            "| id | status |",
+            "|---|---|",
+            "| p1 | WIRED |",
+        ])
+        parsed = parse_manifest_text(text)
+        assert parsed["summary"]["wired"] == 4, label
+        assert [p["id"] for p in parsed["pathways"]] == ["p1"], label
+
+
 def test_three_column_table_is_not_a_count_table():
     # D24: a count table has EXACTLY two columns. A three-column table —
     # `| Category | Count | Notes |`, wherever it sits — sets no counts and
