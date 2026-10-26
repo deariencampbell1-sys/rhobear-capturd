@@ -866,6 +866,19 @@ def _split_sections(raw: str) -> list[dict[str, Any]]:
     return sections
 
 
+def _row_reference(row_lines: list[int] | None, row_position: int) -> str:
+    """D90: the one total read of a table's row lines. The key exists only
+    when `_extract_tables` ran with ``row_lines=True`` — the manifest's
+    strict parse always does (D61), so no production caller reaches the
+    extractors without it — but the extractors must not ASSUME it: when
+    the key is absent the reference is the row's 1-based position within
+    the table, honestly named as a row. A ``KeyError`` is never raised,
+    and a line number is never fabricated where none was parsed."""
+    if row_lines is not None and row_position < len(row_lines):
+        return f"line {row_lines[row_position]}"
+    return f"row {row_position + 1}"
+
+
 def _extract_summary(parsed_sections: _ParsedSections) -> dict[str, Any]:
     summary: dict[str, Any] = {key: None for key in _SUMMARY_COUNT_KEYS}
     # D61/D87: the summary is one document-wide object; a second row
@@ -873,7 +886,7 @@ def _extract_summary(parsed_sections: _ParsedSections) -> dict[str, Any]:
     # values CONFLICT (the ambiguity is the conflict, not the value).
     # Identical duplicates are not ambiguous — they collapse (D87): one
     # count named twice is the same fact stated twice.
-    line_and_value_by_count_key: dict[str, tuple[int, int]] = {}
+    line_and_value_by_count_key: dict[str, tuple[str, int]] = {}
     # D69: the section heading decides nothing here (D24) — only the tables
     # matter, so the loop binds no `sec` local at all.
     for _, tables in parsed_sections:
@@ -890,7 +903,9 @@ def _extract_summary(parsed_sections: _ParsedSections) -> dict[str, Any]:
             if order is None:
                 continue
             label_index, count_index = order
-            row_lines = table["row_lines"]
+            # D90: the key is used when present and honestly degraded when
+            # absent — never a KeyError.
+            row_lines: list[int] | None = table.get("row_lines")
             # Counts come from the table's CELLS only, never from prose.
             # The row label decides WHICH count the row sets (D7); which
             # cell carries the label is the header's column order (D59).
@@ -923,18 +938,19 @@ def _extract_summary(parsed_sections: _ParsedSections) -> dict[str, Any]:
                     summary_key = "routesCount"
                 else:
                     summary_key = "pluginsCount"
-                row_line = row_lines[row_position]
+                row_line = _row_reference(row_lines, row_position)
                 first_set = line_and_value_by_count_key.get(summary_key)
                 if first_set is not None:
                     first_line, first_value = first_set
                     if val != first_value:
                         # D61/D87: refuse, never keep-the-last — two rows
                         # that disagree about the same count are a real
-                        # ambiguity.
+                        # ambiguity. The reference is the input line when
+                        # row lines were parsed, else the table row (D90).
                         raise PathwayMapError(
-                            f"count row at line {row_line} sets summary key "
+                            f"count row at {row_line} sets summary key "
                             f"'{summary_key}' to {val} — already set to "
-                            f"{first_value} at line {first_line} — refusing a "
+                            f"{first_value} at {first_line} — refusing a "
                             "conflicting count row"
                         )
                     # D87: identical duplicate — collapse, never refuse.
@@ -1271,7 +1287,9 @@ def _extract_anti_patterns(parsed_sections: _ParsedSections) -> list[dict[str, A
             if not _anti_patterns_reads(heading, table):
                 continue
             headers = [h.lower() for h in table["headers"]]
-            row_lines = table["row_lines"]
+            # D90: the key is used when present and honestly degraded when
+            # absent — never a KeyError.
+            row_lines: list[int] | None = table.get("row_lines")
             for row_position, row in enumerate(table["rows"]):
                 entry: dict[str, str] = {}
                 for i, header in enumerate(headers):
@@ -1287,8 +1305,9 @@ def _extract_anti_patterns(parsed_sections: _ParsedSections) -> list[dict[str, A
                     # returned array with no signal. The refusal names the
                     # row's line.
                     raise PathwayMapError(
-                        "manifest anti-pattern table row at line "
-                        f"{row_lines[row_position]} has no usable category "
+                        "manifest anti-pattern table row at "
+                        f"{_row_reference(row_lines, row_position)} has no "
+                        "usable category "
                         "(category/type/anti-pattern/pattern all missing or "
                         "empty) — refusing"
                     )

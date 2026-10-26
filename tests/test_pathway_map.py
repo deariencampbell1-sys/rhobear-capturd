@@ -3332,9 +3332,9 @@ def test_row_lines_is_not_assumed():
     assert "conflicting count row" in str(excinfo.value)
 
     categoryless = "\n".join([
-        "| Count | File |",     # line 1
-        "|---|---|",            # line 2
-        "| 3 | hub.ts |",       # line 3 — no category cell
+        "| Category | Count | File |",   # line 1 — record shape, not count-shaped
+        "|---|---|---|",                 # line 2
+        "| | 3 | hub.ts |",              # line 3 — category cell empty
     ])
     with pytest.raises(PathwayMapError) as excinfo:
         pathway_map._extract_anti_patterns(
