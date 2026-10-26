@@ -2105,3 +2105,53 @@ def test_reversed_order_probe_refuses_an_unrecognised_header():
     assert "line 5" in message                # names the header row's line
     assert "category word first" in message   # both accepted orders listed
     assert "count word first" in message
+
+
+def test_each_table_is_consumed_by_one_extractor():
+    # D66: a table is claimed by the FIRST extractor whose heading and
+    # header shape match, and every other extractor skips it — one table
+    # can never populate two output keys. Today a count-shaped table
+    # (| Category | Count |) whose rows are count rows feeds BOTH the
+    # summary and the anti-pattern extractor when it sits under
+    # ## 2. Anti-patterns, and both the summary and the suspicious
+    # extractor under a suspicious heading.
+    anti_text = "\n".join([
+        "# Pathway Manifest — one table, one extractor",  # line 1
+        "",                                             # line 2
+        "## 1. Pathways Table",                         # line 3
+        "",                                             # line 4
+        "| id | status |",                              # line 5
+        "|---|---|",                                    # line 6
+        "| p1 | WIRED |",                               # line 7
+        "",                                             # line 8
+        "## 2. Anti-patterns",                          # line 9
+        "",                                             # line 10
+        "| Category | Count |",                         # line 11
+        "|---|---|",                                    # line 12
+        "| WIRED | 5 |",                                # line 13
+    ])
+    parsed = parse_manifest_text(anti_text)
+    # The anti-pattern extractor claims the table (its heading and its
+    # category-word header both match) — the summary extractor must leave
+    # it alone, so no count is set.
+    assert parsed["antiPatterns"] == [
+        {"category": "WIRED", "count": 5, "file": "", "line": "", "quote": ""},
+    ]
+    assert all(v is None for v in parsed["summary"].values())
+
+    # The other direction: a count table under ## Summary matches no
+    # heading-specific extractor, so the summary extractor claims it and
+    # the anti-pattern and suspicious arrays stay empty.
+    summary_text = anti_text.replace("## 2. Anti-patterns", "## Summary")
+    parsed = parse_manifest_text(summary_text)
+    assert parsed["summary"]["wired"] == 5
+    assert parsed["antiPatterns"] == []
+    assert parsed["suspicious"] == []
+
+    # The same defect through the suspicious extractor: a count-shaped
+    # table under a suspicious heading is claimed there — the summary
+    # extractor must not also read its rows as count rows.
+    suspicious_text = anti_text.replace("## 2. Anti-patterns", "## Suspicious Calls")
+    parsed = parse_manifest_text(suspicious_text)
+    assert parsed["suspicious"] == [{"category": "WIRED", "count": "5"}]
+    assert all(v is None for v in parsed["summary"].values())
