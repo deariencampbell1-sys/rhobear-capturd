@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 from capturd.shots.planner import (
+    CapturePlan,
+    Candidate,
     ControlKind,
     NAVIGATION_SELECTOR_HINTS,
     STABLE_SELECTOR_ATTRIBUTES,
@@ -654,9 +656,9 @@ def test_summary_tab_yields_one_candidate():
 
     (candidate,) = plan.candidates
     assert candidate.kind == "tab"
-    assert "role tab" in candidate.reason
-    assert "accordion" in candidate.reason
-    assert "summary disclosure" in candidate.reason
+    assert "role tab" in candidate.kind_note
+    assert "accordion" in candidate.kind_note
+    assert "summary disclosure" in candidate.kind_note
     assert plan.limits["dropped_ambiguous"] == 0
 
 
@@ -1054,7 +1056,7 @@ def test_duplicate_candidates_are_deduped():
     plan2 = plan_candidates(parse_html('<summary role="tab" id="both">Overview</summary>'))
     (only,) = plan2.candidates
     assert only.selector == "#both"
-    assert "accordion" in only.reason
+    assert "accordion" in only.kind_note
     selectors2 = [c.selector for c in plan2.candidates]
     assert len(selectors2) == len(set(selectors2)) == 1
 
@@ -1265,3 +1267,35 @@ def test_attribute_values_are_case_insensitive():
     # role="TAB" reads as role="tab" in the classifier too.
     tab_node = next(n for n in iter_elements(root) if n.attrs.get("id") == "t")
     assert classify_control(tab_node) == (ControlKind.TAB, False)
+
+
+# ---------------------------------------------------------------------------
+# Review round 6: D22 — the per-candidate note is kind_note, so it can never
+# be confused with CapturePlan.reason, whose domain is exactly four codes.
+# ---------------------------------------------------------------------------
+
+
+def test_candidate_note_is_not_a_plan_reason():
+    # D22: the per-candidate field is renamed kind_note; CapturePlan.reason is
+    # typed as a Literal over ok | no-candidates | truncated | too-large. The
+    # note is never read as a plan status.
+    import dataclasses
+    import typing
+
+    statuses = typing.get_args(typing.get_type_hints(CapturePlan)["reason"])
+    assert set(statuses) == {"ok", "no-candidates", "truncated", "too-large"}
+
+    field_names = {f.name for f in dataclasses.fields(Candidate)}
+    assert "kind_note" in field_names
+    assert "reason" not in field_names
+
+    root = parse_html("<main><summary role='tab' id='both'>Overview</summary></main>")
+    plan = plan_candidates(root)
+    (candidate,) = plan.candidates
+    assert plan.reason == "ok"
+    assert plan.reason in statuses
+    # The note folds two discovery kinds into one line of text — it is not
+    # one of the four statuses and can never be read as one.
+    assert candidate.kind_note not in statuses
+    assert "role tab" in candidate.kind_note
+    assert "accordion" in candidate.kind_note
