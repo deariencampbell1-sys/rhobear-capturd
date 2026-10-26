@@ -355,9 +355,10 @@ def _extract_summary(sections: list[dict[str, Any]]) -> dict[str, Any]:
             continue
         text = "\n".join(sec["body"])
         # IGNORECASE makes the uppercase spellings cover every case variant;
-        # TODO/FIXME mapped to no downstream branch, so they are gone. ROUTES
-        # and PLUGINS ride the same cell shape — counts come from summary
-        # cells only, never from prose or a pathway row's text.
+        # the two upstream "unfinished" status words map to no downstream
+        # branch, so they are gone. ROUTES and PLUGINS ride the same cell
+        # shape — counts come from summary cells only, never from prose or a
+        # pathway row's text.
         for match in re.finditer(
             r"\|\s*\*{0,2}(WIRED|MOCKED|UNWIRED|INCOMPLETE|UNCLEAR|TOTAL PATHWAYS|ROUTES|PLUGINS)\*{0,2}\s*\|?\s*(\d+)\s*\|",
             text,
