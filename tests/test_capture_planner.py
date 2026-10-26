@@ -1725,3 +1725,47 @@ def test_explicit_aria_disabled_false_overrides_inherited_true():
     )
     plan = plan_candidates(root)
     assert [c.label for c in plan.candidates] == ["Mid", "Near"]
+
+
+def test_closed_details_and_its_summary_are_visible():
+    # D55: only the details BODY is conditional. A closed <details> renders
+    # itself and its first <summary> (the disclosure's own toggle); the
+    # planner judged the <details> invisible ITSELF — _in_first_summary(details,
+    # details) is False — so a closed <details> control was dropped as
+    # invisible and a control targeting it reported target_visible=False.
+    import capturd.shots.planner as planner_module
+
+    root = parse_html(
+        "<main><details><summary>s</summary><button>x</button></details></main>"
+    )
+    details = root.children[0].children[0]
+    summary, body_button = details.children[0], details.children[1]
+    assert planner_module._is_visible(details) is True
+    assert planner_module._is_visible(summary) is True
+    assert planner_module._is_visible(body_button) is False
+
+    plan = plan_candidates(root)
+    labels = [c.label for c in plan.candidates]
+    assert "s" in labels      # its first <summary> is planned when closed
+    assert "x" not in labels  # a control in the body is not
+
+    # The <details> element itself passes the gate too: the closed <details>
+    # and its <summary> are both planned, never dropped as invisible.
+    control = plan_candidates(
+        parse_html(
+            "<main><details aria-expanded='false'>"
+            "<summary>s</summary><button>x</button></details></main>"
+        )
+    )
+    assert [c.selector for c in control.candidates] == [
+        "main > details > summary",
+        "main > details",
+    ]
+
+    # With open, the body is planned too.
+    opened = plan_candidates(
+        parse_html(
+            "<main><details open><summary>s</summary><button>x</button></details></main>"
+        )
+    )
+    assert "x" in [c.label for c in opened.candidates]
