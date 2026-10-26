@@ -657,8 +657,11 @@ def _extract_anti_patterns(sections: list[dict[str, Any]]) -> list[dict[str, Any
 def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, list[str]]]:
     """Extract markdown pipe tables. ``first_line`` is the 1-based line number
     of ``text``'s first line within the original input, so a refused row can
-    name its line. A row shorter than its header is REFUSED, not dropped — a
-    half-filled map is the failure this module exists to prevent."""
+    name its line. A body row may omit the leading pipe (GFM) as long as it
+    carries an unescaped pipe and aligns with the header's cell count; a row
+    that cannot be aligned is REFUSED, not dropped — a half-filled map, or a
+    table parsing to zero rows beside a skipped pipe-bearing line, is the
+    failure this module exists to prevent."""
     tables: list[dict[str, list[str]]] = []
     lines = text.split("\n")
     i = 0
@@ -677,18 +680,33 @@ def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, list[str]]
             continue
         rows: list[list[str]] = []
         j = i + 2
-        # A row must START with a pipe: a prose line containing a pipe right
-        # after a table ends the table there — it is neither injected as a
-        # phantom row nor refused as a short row.
-        while j < len(lines) and re.match(r"^\s*\|", lines[j]):
-            row = _split_row(lines[j], first_line + j)
-            if len(row) < len(cells):
-                raise PathwayMapError(
-                    f"table row at line {first_line + j} has {len(row)} cells but its "
-                    f"header has {len(cells)} — refusing short row, first cell: '{row[0]}'"
-                )
-            rows.append(row)
-            j += 1
+        # The body continues while a line starts with a pipe — or, GFM-style,
+        # omits the leading pipe but carries an unescaped one and aligns with
+        # the header's cell count. A line that matches neither ends the
+        # table. A row that cannot be aligned is REFUSED, never dropped: a
+        # table parsing to zero rows beside a skipped pipe-bearing line is
+        # exactly the silent drop this module exists to prevent.
+        while j < len(lines):
+            line = lines[j]
+            if not line.strip():
+                break
+            leading_pipe = re.match(r"^\s*\|", line) is not None
+            has_unescaped_pipe = re.search(r"(?<!\\)\|", line) is not None
+            if not leading_pipe and not has_unescaped_pipe:
+                break  # plain prose — not a row, ends the table
+            row = _split_row(line, first_line + j)
+            if len(row) == len(cells):
+                rows.append(row)
+                j += 1
+                continue
+            if not leading_pipe and rows:
+                # A pipe-bearing line AFTER parsed rows reads as prose (the
+                # trailing-notes case): it ends the table, no refusal.
+                break
+            raise PathwayMapError(
+                f"table row at line {first_line + j} has {len(row)} cells but its "
+                f"header has {len(cells)} — refusing misaligned row, first cell: '{row[0]}'"
+            )
         tables.append({"headers": [c.strip() for c in cells], "rows": rows})
         i = j
     return tables
