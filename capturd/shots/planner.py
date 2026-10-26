@@ -515,8 +515,31 @@ def _count_matches(root: _Node, selector: str) -> int:
     return _PlanIndex(root).count_matches(selector)
 
 
-#: A single-part ``tag[attr="value"]`` selector, for the index fast path.
-_ATTR_SELECTOR_RE = re.compile(r'^([a-zA-Z][a-zA-Z0-9-]*)\[([\w-]+)="(.*)"\]$', re.DOTALL)
+def _parse_attr_part(part: str) -> Optional[tuple[str, str, str]]:
+    """Parse a complete ``tag[attr="escaped value"]`` part, escape-aware (D16).
+
+    Returns ``(tag, attr, raw_value)`` — or ``None`` when the part is not
+    exactly that shape (``*`` tag, extra fragments, unterminated value). The
+    index fast path delegates to this parser, the same scanner
+    :func:`_match_simple` uses (D11), so a value containing ``"`` or ``]``
+    can never be split one way on one path and another way on the other.
+    Replaces the old ``_ATTR_SELECTOR_RE`` whose greedy ``(.*)`` was not
+    escape-aware.
+    """
+    match = _TAG_RE.match(part)
+    if match is None or match.group(1) == "*":
+        return None
+    split = _scan_bracketed(part[match.end():])
+    if split is None:
+        return None
+    decl, rest = split
+    if rest:
+        return None
+    parsed = _parse_attr_decl(decl)
+    if parsed is None:
+        return None
+    name, raw_value = parsed
+    return match.group(1), name, raw_value
 
 
 class _PlanIndex:
@@ -562,9 +585,9 @@ class _PlanIndex:
                 if remainder == "" and ident:
                     return len(self.by_id.get(_css_unescape(ident), ()))
             else:
-                attr_match = _ATTR_SELECTOR_RE.fullmatch(part)
-                if attr_match is not None:
-                    tag, name, raw_value = attr_match.groups()
+                attr_part = _parse_attr_part(part)
+                if attr_part is not None:
+                    tag, name, raw_value = attr_part
                     nodes = self.by_attr.get((name, _css_unescape(raw_value)), ())
                     return sum(1 for node in nodes if node.tag == tag)
         return sum(1 for node in self.nodes if _match_chain(node, selector))
