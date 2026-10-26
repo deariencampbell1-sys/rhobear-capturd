@@ -233,6 +233,9 @@ def _text_of(node: _Node) -> str:
     ``input`` and ``button``, and only after every other source: a control
     with text keeps its text, and the fallback never rescues a non-control
     (a hidden input's value is data, not a label — it is not swept anyway).
+    D70: every source is scrubbed by the one helper first — no query string
+    and no trailing fragment can reach the label, from any attribute or from
+    visible text that is itself a URL.
     """
     for value in (
         node.attrs.get("aria-label"),
@@ -241,12 +244,13 @@ def _text_of(node: _Node) -> str:
         node.attrs.get("data-label"),
         _full_text(node),
     ):
-        if value and value.strip():
-            return " ".join(value.split())[:80]
+        cleaned = _scrub_artifact(value)
+        if cleaned.strip():
+            return " ".join(cleaned.split())[:80]
     if node.tag in ("input", "button"):
-        value = node.attrs.get("value")
-        if value and value.strip():
-            return " ".join(value.split())[:80]
+        cleaned = _scrub_artifact(node.attrs.get("value"))
+        if cleaned.strip():
+            return " ".join(cleaned.split())[:80]
     return ""
 
 
@@ -254,14 +258,35 @@ def _classes(node: _Node) -> list[str]:
     return node.attrs.get("class", "").split()
 
 
-def _href_artifact(value: Optional[str]) -> str:
-    """href -> plan-artifact form (D18): the query string never enters the plan.
+def _scrub_artifact(value: Optional[str]) -> str:
+    """One scrub for every string the plan can emit (D18, D70).
 
     A ``?token=…&sig=…`` credential-bearing query must not be baked into the
-    labels and targets that brief 01d writes to disk — "no credential, no
-    signed URL". The path (or fragment) is kept; only the query is dropped.
+    labels, targets and selectors that brief 01d writes to disk — "no
+    credential, no signed URL" (D18), one attribute over (D70). A fragment
+    trailing a path goes with it — an implicit-flow ``#access_token=…`` is
+    the same credential problem. The helper cuts at the first ``?`` and at
+    the first ``#``.
+
+    One exception, on the record: a *bare* fragment reference — the whole
+    value is ``#…``, like ``#signup-modal`` or ``#footnote`` — is the plan's
+    own anchor-target form, not a URL suffix: it names the element a control
+    reveals and the fixture tests assert it verbatim
+    (test_fixture_a_selectors_and_strategies pins target ==
+    ``"#signup-modal"`` and the ``button[data-bs-target="#signup-modal"]``
+    selector; W0-21-r1's stop rule forbids scrubbing a fixture-asserted
+    value). It keeps its anchor and cuts only a query.
+
+    Called from :func:`_text_of`, the label fallback, the target summary and
+    the selector strategies (where a value that is not its own scrubbed self
+    is never used in a selector — the same gate D18 applied to ``href``, so
+    the emitted selector still matches the node under CSS semantics). There
+    is no second implementation.
     """
-    return (value or "").split("?", 1)[0]
+    text = value or ""
+    if text.startswith("#"):
+        return text.split("?", 1)[0]
+    return text.split("?", 1)[0].split("#", 1)[0]
 
 
 def _keyword_value(node: _Node, name: str) -> str:
@@ -722,13 +747,16 @@ class _PlanIndex:
         structural fallback is verified by :meth:`verify_structural`, not
         counted (D28)."""
         node_id = node.attrs.get("id")
-        if node_id:
+        # D70: a value that carries a query or fragment is never used in a
+        # selector — it would bake the credential into the artifact (D18's
+        # href gate, generalised); such a node names itself structurally.
+        if node_id and _scrub_artifact(node_id) == node_id:
             selector = f"#{_escape_css(node_id)}"
             if self.count_matches(selector) == 1:
                 return selector, "id"
         for attr in STABLE_SELECTOR_ATTRIBUTES:
             value = node.attrs.get(attr)
-            if not value:
+            if not value or _scrub_artifact(value) != value:
                 continue
             selector = f'{node.tag}[{attr}="{_escape_attr_value(value)}"]'
             if self.count_matches(selector) == 1:
@@ -758,7 +786,13 @@ def _structural_path(node: _Node, index: _PlanIndex) -> str:
     while current is not None and current.tag not in ("#root", "html"):
         part = current.tag
         node_id = current.attrs.get("id")
-        if node_id and len(index.by_id.get(node_id, ())) == 1:
+        # D70: only an artifact-clean id decorates its segment (same gate as
+        # unique_selector — one helper); a dirty id falls to :nth-of-type.
+        if (
+            node_id
+            and _scrub_artifact(node_id) == node_id
+            and len(index.by_id.get(node_id, ())) == 1
+        ):
             # The unique id alone disambiguates this segment; the walk still
             # continues to the boundary (D1) instead of shortening the chain.
             parts.insert(0, f"{part}#{_escape_css(node_id)}")
@@ -1241,15 +1275,17 @@ PRIORITY_SUMMARY_DISCLOSURE = 25
 
 
 def _target_summary(index: _PlanIndex, node: _Node) -> tuple[str, Optional[bool]]:
+    # D70: every target source goes through the one scrub — no query string
+    # and no trailing fragment can reach Candidate.target.
     controls = next(
         (
             value
             for value in (
-                node.attrs.get("aria-controls"),
-                node.attrs.get("data-controls"),
-                node.attrs.get("data-target"),
-                node.attrs.get("data-bs-target"),
-                _href_artifact(node.attrs.get("href")),
+                _scrub_artifact(node.attrs.get("aria-controls")),
+                _scrub_artifact(node.attrs.get("data-controls")),
+                _scrub_artifact(node.attrs.get("data-target")),
+                _scrub_artifact(node.attrs.get("data-bs-target")),
+                _scrub_artifact(node.attrs.get("href")),
             )
             if value
         ),
@@ -1416,7 +1452,14 @@ def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
         elif index.count_matches(selector) != 1:
             dropped.add(node)
             return
-        label = _text_of(node) or node.attrs.get("aria-controls") or _href_artifact(node.attrs.get("href")) or kind.value
+        # D70: the label fallback is scrubbed too — every string that can
+        # reach output goes through the one helper.
+        label = (
+            _text_of(node)
+            or _scrub_artifact(node.attrs.get("aria-controls"))
+            or _scrub_artifact(node.attrs.get("href"))
+            or kind.value
+        )
         target, target_visible = _target_summary(index, node)
         existing = seen.get(selector)
         if existing is not None:
