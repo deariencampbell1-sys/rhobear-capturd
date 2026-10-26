@@ -1802,3 +1802,29 @@ def test_aria_current_false_is_not_current():
     by_label = {c.label: c for c in plan.candidates}
     assert by_label["Alpha"].kind == "control"  # not current: a normal action
     assert by_label["Beta"].kind == "page"      # current
+
+
+def test_dropped_ambiguous_counts_each_node_once():
+    # D58: dropped_ambiguous counts DISTINCT dropped nodes. A node reached by
+    # two discovery reasons — a <summary role="tab"> is both a tab and a
+    # summary — that is ambiguous is ONE dropped node, and the counter always
+    # equals the number of distinct dropped nodes. The unrepairable shape is
+    # the two-<html> document: the structural path refuses to cross <html>
+    # and the boundary segment matches two <body> containers, so no strategy
+    # can split it.
+    one_node = (
+        "<html><body><summary role='tab'>S</summary></body></html>"
+        "<html><body><p>static</p></body></html>"
+    )
+    plan = plan_candidates(parse_html(one_node))
+    assert plan.candidates == []
+    assert plan.limits["dropped_ambiguous"] == 1
+
+    # Two distinct dropped nodes, each reached for two reasons: 2, not 4.
+    two_nodes = (
+        "<html><body><summary role='tab' id='dup' title='dup'>S1</summary></body></html>"
+        "<html><body><summary role='tab' id='dup' title='dup'>S2</summary></body></html>"
+    )
+    plan2 = plan_candidates(parse_html(two_nodes))
+    assert plan2.candidates == []
+    assert plan2.limits["dropped_ambiguous"] == 2
