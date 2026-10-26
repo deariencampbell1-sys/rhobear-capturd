@@ -47,10 +47,13 @@ Refusals — every one of these constructs raises ``PathwayMapError``
 rather than half-fill. The list is data (``REFUSALS`` below, D49) and
 is rendered at the end of this docstring, so it cannot live only in a
 PR body. A misaligned row is refused naming its line number;
-pipe-bearing prose immediately after a table is refused the same way —
-the parser cannot tell it from a misaligned row, so put a blank line
-between; a collapsed table header raises the same backtick refusal as
-any confirmed header (D47) — it never drops the table; an
+pipe-bearing prose immediately after a table is refused the same way
+when it is row-shaped — the parser cannot tell it from a misaligned
+row, so put a blank line between; D67 adds the one prose escape: a
+pipe that never forms a second cell (a pipe inside a code span, a
+stray mark) is not row-shaped, and such a line is prose that ends the
+table without error; a collapsed table header raises the same backtick
+refusal as any confirmed header (D47) — it never drops the table; an
 unrecognised count-table header names the vocabulary it accepts
 (D48) — the feed owner fixes the header, the consumer never receives
 nulls.
@@ -1080,12 +1083,17 @@ def _extract_tables(
     ``row_lines`` — the 1-based input line of every body row, in row order —
     so a refusal raised OUTSIDE this function (a duplicate count row, a
     manifest anti-pattern row with no category) can still name its line; the
-    default shape stays exactly ``headers`` + ``rows`` (D40). A body row may omit the leading pipe (GFM). D5: the table
-    ends only at a blank line, a line with no unescaped ``|``, or a new
-    heading; a pipe-bearing line inside the body is a row — aligned it is
-    returned, misaligned it raises ``PathwayMapError`` naming the line and
-    both cell counts. The parser either returns every row of a table or
-    raises — it never returns part of one. D17: the unbalanced-backtick
+    default shape stays exactly ``headers`` + ``rows`` (D40). A body row may omit the leading pipe (GFM). D5/D67: the table
+    ends at a blank line, at prose, or a new heading — prose is a line
+    that is not ROW-SHAPED: a line with no unescaped ``|``, or one whose
+    pipe never forms a second cell (a pipe inside a code span, a stray
+    mark), is prose and ends the table with no error and no row. A
+    row-shaped line (it splits into >=2 cells, leading pipe optional) is
+    a row candidate — aligned it is returned, misaligned it raises
+    ``PathwayMapError`` naming the line and both cell counts; a
+    misaligned row is never let through as prose. The parser either
+    returns every row of a table or raises — it never returns part of
+    one. D17: the unbalanced-backtick
     refusal fires only where the line is already a confirmed header (the
     separator matched) or a confirmed body row — never during header
     detection, so pipe-bearing prose with a stray backtick does not abort
@@ -1125,21 +1133,24 @@ def _extract_tables(
         rows: list[list[str]] = []
         row_line_numbers: list[int] = []
         j = i + 2
-        # D5: the body ends only at a blank line, a line with no unescaped
-        # pipe, or a new heading (headings never reach this loop — sections
-        # are split first). A pipe-bearing line is a ROW: aligned it is
+        # D5/D67: the body ends at a blank line (above), at a line with no
+        # unescaped pipe, and — D67 — at any line that is not ROW-SHAPED: a
+        # pipe that never forms a second cell (a pipe inside a code span, a
+        # stray mark) is prose, and prose ends the table with no error and
+        # no row. A row-shaped line (it splits into >=2 cells; the leading
+        # pipe is optional, GFM) is a row candidate: aligned it is
         # returned, misaligned it is REFUSED naming the line and both
-        # counts. There is no "prose with a pipe" escape: the parser cannot
-        # tell pipe-bearing prose from a misaligned row, and calling it
-        # prose is what silently dropped every row after it. Pipe-bearing
-        # prose after a table needs a blank line between.
+        # counts. The refusal never widens past row-shaped lines, and a
+        # misaligned row is never let through as prose.
         while j < len(lines):
             line = lines[j]
             if not line.strip():
                 break
-            if not re.search(r"(?<!\\)\|", line):
-                break  # no unescaped pipe — not a row, ends the table
             row, backtick_refusal = _split_row(line, first_line + j)
+            if not re.search(r"(?<!\\)\|", line):
+                break  # no unescaped pipe — prose, ends the table
+            if len(row) < 2:
+                break  # D67: not row-shaped — prose, ends the table
             if backtick_refusal is not None:
                 # D17: this line is a confirmed row (the table was
                 # established by header + separator), so the refusal fires
