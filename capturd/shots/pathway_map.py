@@ -285,6 +285,17 @@ _SUMMARY_COUNT_KEYS = (
     "pluginsCount",
 )
 
+# D7: a count row is exactly TWO cells — `| <LABEL> | <N> |` (the label may
+# be bold-wrapped; the leading/trailing pipes are optional per GFM). The
+# pattern is anchored to the whole line, so a pathway row like
+# `| p1 | WIRED | 3 |` — WIRED in a middle cell — can never set a count,
+# even under a ## Summary heading.
+_COUNT_ROW_RE = re.compile(
+    r"^\s*\|?\s*\*{0,2}(WIRED|MOCKED|UNWIRED|INCOMPLETE|UNCLEAR"
+    r"|TOTAL PATHWAYS|ROUTES|PLUGINS)\*{0,2}\s*\|\s*(\d+)\s*\|?\s*$",
+    re.IGNORECASE,
+)
+
 
 def _normalised_summary(source: dict[str, Any]) -> dict[str, Any]:
     """The one summary shape for both flavours: the same 8 count keys, with
@@ -360,13 +371,12 @@ def _extract_summary(sections: list[dict[str, Any]]) -> dict[str, Any]:
         # IGNORECASE makes the uppercase spellings cover every case variant;
         # the two upstream "unfinished" status words map to no downstream
         # branch, so they are gone. ROUTES and PLUGINS ride the same cell
-        # shape — counts come from summary cells only, never from prose or a
-        # pathway row's text.
-        for match in re.finditer(
-            r"\|\s*\*{0,2}(WIRED|MOCKED|UNWIRED|INCOMPLETE|UNCLEAR|TOTAL PATHWAYS|ROUTES|PLUGINS)\*{0,2}\s*\|?\s*(\d+)\s*\|",
-            text,
-            re.IGNORECASE,
-        ):
+        # shape — counts come from summary CELLS only, never from prose or
+        # a pathway row's text, and only from an exactly-two-cell row (D7).
+        for line in text.split("\n"):
+            match = _COUNT_ROW_RE.match(line)
+            if not match:
+                continue
             key = match.group(1).lower()
             val = int(match.group(2))
             if "unwire" in key:
