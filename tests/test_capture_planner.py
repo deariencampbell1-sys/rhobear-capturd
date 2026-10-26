@@ -1947,3 +1947,32 @@ def test_empty_declaration_does_not_hide():
     assert [c.label for c in plan.candidates] == ["Also shown", "Shown"]
 
 
+def test_navigation_is_computed_once_per_node():
+    # D73: _in_navigation is called two to three times per node and each call
+    # walks the ancestor chain against twelve hints — tens of millions of
+    # comparisons on a legal maximum document. It must be computed ONCE per
+    # node and memoised. Proved with the deterministic counter
+    # planner._hint_comparisons (one increment per hint comparison made by
+    # _in_navigation), never a wall clock: on a 2 000-node document the count
+    # stays within a constant multiple of the node count — each node's twelve
+    # hints are compared at most once. An unmemoised walk re-compares every
+    # ancestor's hints on every call and blows the bound by orders of
+    # magnitude (~2 400 000 comparisons here).
+    import capturd.shots.planner as planner_module
+
+    chunks = ["<html><body>"]
+    for _ in range(222):
+        chunks.append("<div>")
+        chunks.extend('<button data-page="p">Go</button>' for _ in range(8))
+    chunks.append("</div>" * 222)
+    chunks.append("</body></html>")
+    root = parse_html("".join(chunks))
+    nodes = list(iter_elements(root))
+    assert len(nodes) == 2_000  # 222 nested wrappers + 1 776 controls + html + body
+
+    before = planner_module._hint_comparisons
+    plan = plan_candidates(root)
+    used = planner_module._hint_comparisons - before
+
+    assert plan.reason == "truncated"  # 1 776 swept controls over the 24 cap
+    assert used <= 12 * len(nodes)

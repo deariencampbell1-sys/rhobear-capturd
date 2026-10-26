@@ -1019,10 +1019,20 @@ def _hint_match(node: _Node, hint: str) -> bool:
     return node.tag == hint
 
 
+#: D73: deterministic cost counter for the navigation check — incremented
+#: once per navigation-hint comparison made by :func:`_in_navigation`, never
+#: a wall clock. The test suite bounds it against the node count; D28 forbids
+#: timing tests. Cumulative, never reset: a test measures the delta around
+#: one call.
+_hint_comparisons = 0
+
+
 def _in_navigation(node: _Node) -> bool:
+    global _hint_comparisons
     current: Optional[_Node] = node
     while current is not None and current.tag != "#root":
         for hint in NAVIGATION_SELECTOR_HINTS:
+            _hint_comparisons += 1  # one hint comparison (D73)
             if _hint_match(current, hint):
                 return True
         current = current.parent
