@@ -1152,11 +1152,17 @@ def test_every_fixture_populates_every_key_main_populated():
             "antiPatterns": [],
         },
     }
-    shipped = sorted(path.name for path in FIXTURES.iterdir())
-    assert sorted(expected) == shipped, (
-        "a fixture joined capture-foundations — give it an explicit row in "
-        "this map instead of letting it skip the comparison"
-    )
+    # D88: the REQUIRED fixtures are asserted present and compared — the
+    # exact iterdir() set is never asserted, so a stray file in the
+    # directory (a .DS_Store, an editor swap file) cannot fail the suite
+    # for a reason unrelated to pathway parsing. A fixture added later
+    # must still join the maps: test_every_manifest_fixture_parses
+    # asserts every *.md in the directory is mapped.
+    for name in expected:
+        assert (FIXTURES / name).is_file(), (
+            f"{name} is missing from capture-foundations — the fixture "
+            "comparison has nothing to compare"
+        )
     for name, want in expected.items():
         path = FIXTURES / name
         parsed = (parse_verifier_json(path) if path.suffix == ".json"
@@ -1820,16 +1826,27 @@ def test_stray_file_in_the_fixtures_directory_does_not_fail_the_suite():
 
 
 def test_permission_error_becomes_pathway_map_error(tmp_path, monkeypatch):
-    # D6: an OSError on read (PermissionError) becomes PathwayMapError with
-    # no host path anywhere in the rendered exception chain — the branch
-    # raises `from None`, so the OS error (which names the path) is gone.
+    # D6/D88: an OSError on read (PermissionError) becomes PathwayMapError
+    # with no host path anywhere in the rendered exception chain — the
+    # branch raises `from None`, so the OS error (which names the path) is
+    # gone. D88: the deny is SCOPED to this manifest's read — patching
+    # Path.read_text wholesale blinds every other read for the whole
+    # test; the deny delegates to the real read_text everywhere else, and
+    # the test proves the scoping.
     manifest = tmp_path / "manifest.md"
     manifest.write_text("# Pathway Manifest\n", encoding="utf-8")
+    neighbour = tmp_path / "neighbour.md"
+    neighbour.write_text("# Neighbour\n", encoding="utf-8")
+    real_read_text = Path.read_text
 
     def deny(self, *args, **kwargs):
-        raise PermissionError(13, "Permission denied", str(self))
+        if self == manifest:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_read_text(self, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", deny)
+    # The deny is scoped: another file in the same directory still reads.
+    assert neighbour.read_text(encoding="utf-8") == "# Neighbour\n"
     with pytest.raises(PathwayMapError) as excinfo:
         parse_manifest_md(manifest)
     rendered = "".join(traceback.format_exception(
