@@ -1976,3 +1976,44 @@ def test_navigation_is_computed_once_per_node():
 
     assert plan.reason == "truncated"  # 1 776 swept controls over the 24 cap
     assert used <= 12 * len(nodes)
+
+
+# ---------------------------------------------------------------------------
+# W0-22-r1 (review round for PR #45): D81 (a fragment is kept only when it is
+# not credential-shaped), D82 (the navigation memo is per-call, never on the
+# public Node) and D83 (every truncation counter counts past the cap).
+# ---------------------------------------------------------------------------
+
+
+def test_credential_shaped_fragment_is_scrubbed():
+    # D81: a fragment is an anchor only when it is NOT credential-shaped. The
+    # bare "#anchor" form stays whole — "#signup-modal" is pinned verbatim by
+    # the fixture and re-pinned here — but an implicit-flow OAuth fragment is
+    # also a bare fragment: "#access_token=xyz&state=abc" carried its
+    # credential whole into Candidate.target and Candidate.label. A fragment
+    # containing "=" and a credential-shaped key (token, access_token,
+    # id_token, sig, signature, key, secret, code) is cut at the "#".
+    root = parse_html(
+        "<main>"
+        '<a href="#access_token=xyz&state=abc" id="implicit">Sign in</a>'
+        '<a href="#access_token=xyz&state=abc" id="bare"></a>'
+        '<button data-bs-target="#signup-modal" id="signup">Open sign-up</button>'
+        "</main>"
+    )
+    plan = plan_candidates(root)
+
+    by_label = {c.label: c for c in plan.candidates}
+    # The implicit-flow link keeps its readable label and loses the credential.
+    assert by_label["Sign in"].target == ""
+    assert "access_token" not in by_label["Sign in"].target
+    assert "access_token" not in by_label["Sign in"].label
+    assert "xyz" not in by_label["Sign in"].label
+    # The empty link's label falls back past the scrubbed href — to the kind,
+    # never to the fragment.
+    assert by_label["hash-link"].target == ""
+    assert "access_token" not in by_label["hash-link"].label
+    # A bare fragment that is not credential-shaped keeps its anchor verbatim.
+    assert by_label["Open sign-up"].target == "#signup-modal"
+    # No credential anywhere in the serialized plan.
+    assert "access_token" not in repr(plan)
+    assert "xyz" not in repr(plan)
