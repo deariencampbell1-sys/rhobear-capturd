@@ -35,8 +35,9 @@ whitespace collapse to one space — so the multi-word count headers
 (``Total Count``, ``Path Count``, ``Wired Count``) and category headers
 (``Category Name``, ``Metric Value``) are recognised, while an
 unrecognised header over count rows still refuses (D38). A summary count
-table key set by two rows is refused (D61) — the
-ambiguity is the duplicate, not the value, exactly like a duplicate pathway
+table key set by two rows is refused when the values conflict (D61; D87 —
+identical duplicates collapse, one fact stated twice), exactly like a
+duplicate pathway
 id. The refusal is decided once a line is KNOWN to be a
 table, never during header detection: a prose line that carries a pipe
 and a stray backtick is skipped like any other non-table line, not a
@@ -114,7 +115,7 @@ nulls. The list, written out:
 * a manifest anti-pattern row with no usable category
 * an unrecognised count-table header over count rows
 * a count cell of two bare integers
-* a duplicate or conflicting count row
+* a conflicting count row
 """
 
 from __future__ import annotations
@@ -154,7 +155,7 @@ REFUSALS: tuple[str, ...] = (
     "a manifest anti-pattern row with no usable category",
     "an unrecognised count-table header over count rows",
     "a count cell of two bare integers",
-    "a duplicate or conflicting count row",
+    "a conflicting count row",
 )
 
 _ROUTE_METHOD_RE = re.compile(
@@ -845,11 +846,12 @@ def _split_sections(raw: str) -> list[dict[str, Any]]:
 
 def _extract_summary(parsed_sections: _ParsedSections) -> dict[str, Any]:
     summary: dict[str, Any] = {key: None for key in _SUMMARY_COUNT_KEYS}
-    # D61: the summary is one document-wide object — the second row to set
-    # a key the first row already set is refused, whatever the values say
-    # (the ambiguity is the duplicate, not the value), exactly like the
-    # duplicate-pathway-id refusal.
-    line_by_count_key: dict[str, int] = {}
+    # D61/D87: the summary is one document-wide object; a second row
+    # setting a key the first row already set is refused when the two
+    # values CONFLICT (the ambiguity is the conflict, not the value).
+    # Identical duplicates are not ambiguous — they collapse (D87): one
+    # count named twice is the same fact stated twice.
+    line_and_value_by_count_key: dict[str, tuple[int, int]] = {}
     # D69: the section heading decides nothing here (D24) — only the tables
     # matter, so the loop binds no `sec` local at all.
     for _, tables in parsed_sections:
@@ -900,18 +902,22 @@ def _extract_summary(parsed_sections: _ParsedSections) -> dict[str, Any]:
                 else:
                     summary_key = "pluginsCount"
                 row_line = row_lines[row_position]
-                first_set_line = line_by_count_key.get(summary_key)
-                if first_set_line is not None:
-                    # D61: refuse, never keep-the-last — a feed that says
-                    # the same count twice is ambiguous, whether the two
-                    # values agree or conflict.
-                    raise PathwayMapError(
-                        f"count row at line {row_line} sets summary key "
-                        f"'{summary_key}' again — already set at line "
-                        f"{first_set_line} — refusing a duplicate or "
-                        "conflicting count row"
-                    )
-                line_by_count_key[summary_key] = row_line
+                first_set = line_and_value_by_count_key.get(summary_key)
+                if first_set is not None:
+                    first_line, first_value = first_set
+                    if val != first_value:
+                        # D61/D87: refuse, never keep-the-last — two rows
+                        # that disagree about the same count are a real
+                        # ambiguity.
+                        raise PathwayMapError(
+                            f"count row at line {row_line} sets summary key "
+                            f"'{summary_key}' to {val} — already set to "
+                            f"{first_value} at line {first_line} — refusing a "
+                            "conflicting count row"
+                        )
+                    # D87: identical duplicate — collapse, never refuse.
+                    continue
+                line_and_value_by_count_key[summary_key] = (row_line, val)
                 summary[summary_key] = val
     return summary
 
