@@ -817,6 +817,25 @@ def test_structural_verification_is_linear_in_depth(monkeypatch):
     assert calls <= len(nodes) * depth
 
 
+def test_deep_but_legal_plans_and_too_deep_refuses():
+    # D29: the old anti-recursion test used 300 nested elements — below
+    # CPython's ~1 000-frame limit — so a recursive walker passed it. These
+    # depths prove something: 200 levels is under the 256-level ceiling and
+    # plans normally; ~2 000 nested elements is over the depth ceiling, under
+    # the 10 000-element ceiling, and must yield reason="too-large" with no
+    # exception escaping (never a RecursionError).
+    legal = parse_html("<div>" * 200 + "<button>Bottom</button>" + "</div>" * 200)
+    plan = plan_candidates(legal)
+    assert plan.reason == "ok"
+    assert [c.label for c in plan.candidates] == ["Bottom"]
+
+    deep = parse_html("<div>" * 2_000 + "<button>Bottom</button>" + "</div>" * 2_000)
+    refused = plan_candidates(deep)
+    assert refused.candidates == []
+    assert refused.reason == "too-large"
+    assert refused.limits["too_large"] == "deeper than 256 levels"
+
+
 def test_oversized_document_fails_with_a_reason_not_a_crash():
     # More than 10 000 elements exceeds the node ceiling -> too-large.
     plan = plan_candidates(_spans_tree(10_001))
