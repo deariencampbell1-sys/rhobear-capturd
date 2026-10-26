@@ -728,10 +728,56 @@ def test_deep_document_fails_with_a_reason_not_a_crash():
     assert plan.limits["too_large"] == "deeper than 256 levels"
 
 
+def _spans_tree(count: int) -> Node:
+    """Hand-built tree of ``count`` ``<span>`` elements.
+
+    Deliberate update (review round 7, D27): ``parse_html`` refuses documents
+    over the walk ceilings at the parse now (see
+    test_parse_refuses_oversized_input_before_building), so the plan-level
+    "too-large" path — what brief 01d hits with a live-DOM tree it built
+    itself — is exercised with a tree built directly from ``Node``. Every
+    assertion is kept at equal strength.
+    """
+    root = Node("#root", {})
+    for _ in range(count):
+        node = Node("span", {})
+        node.parent = root
+        root.children.append(node)
+    return root
+
+
+def test_parse_refuses_oversized_input_before_building(monkeypatch):
+    # D27: the ceiling bounds the parse, not just the walk. parse_html refuses
+    # a document whose serialized length exceeds _MAX_INPUT_CHARS before a
+    # single node is built, and aborts the tree build once _MAX_NODES is
+    # exceeded — raising the too-large error before the full tree is ever
+    # materialised. Nodes built are counted, never timed.
+    import capturd.shots.planner as planner_module
+
+    built = []
+    original_add = planner_module._NodeBuilder._add_element
+
+    def counting_add(self, tag, attrs):
+        built.append(tag)
+        return original_add(self, tag, attrs)
+
+    monkeypatch.setattr(planner_module._NodeBuilder, "_add_element", counting_add)
+
+    # 100 000 elements: refused mid-build, never fully materialised.
+    with pytest.raises(ValueError):
+        planner_module.parse_html("<span></span>" * 100_000)
+    assert len(built) <= planner_module._MAX_NODES + 1
+
+    # A serialized document over the character ceiling is refused before a
+    # single node is built at all.
+    with pytest.raises(ValueError):
+        planner_module.parse_html("x" * (planner_module._MAX_INPUT_CHARS + 1))
+    assert len(built) <= planner_module._MAX_NODES + 1
+
+
 def test_oversized_document_fails_with_a_reason_not_a_crash():
     # More than 10 000 elements exceeds the node ceiling -> too-large.
-    html = "<span></span>" * 10_001
-    plan = plan_candidates(parse_html(html))
+    plan = plan_candidates(_spans_tree(10_001))
 
     assert plan.candidates == []
     assert plan.reason == "too-large"
@@ -746,7 +792,7 @@ def test_too_large_reports_which_ceiling():
     assert deep.reason == "too-large"
     assert deep.limits["too_large"] == "deeper than 256 levels"
 
-    big = plan_candidates(parse_html("<span></span>" * 10_001))
+    big = plan_candidates(_spans_tree(10_001))
     assert big.reason == "too-large"
     assert big.limits["too_large"] == "more than 10000 elements"
 
