@@ -1545,3 +1545,112 @@ def test_kept_equals_len_candidates():
     # exactly one candidate (cap + 1) — not a lower bound.
     zero = plan_candidates(root, max_states=0)
     assert zero.limits["kept"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Parse-layer cost (W0-19, D43-D45): a stray end tag must not scan the whole
+# open-element stack. Cost is proved with a deterministic counter, never a
+# wall clock (D28 stands).
+# ---------------------------------------------------------------------------
+
+
+def _shape(node):
+    """Literal tree shape: (tag, sorted attrs, text chunks, child shapes)."""
+    return (
+        node.tag,
+        tuple(sorted(node.attrs.items())),
+        list(node.text_chunks),
+        [_shape(child) for child in node.children],
+    )
+
+
+def test_stray_end_tags_do_not_scan_the_open_stack():
+    # D43/D44: <div>x2 000 followed by 20 000 unmatched </span> end tags is
+    # legal input under both parse ceilings (2 000 elements <= 10 000;
+    # ~150 000 characters <= 4 000 000) — parse_html must return the tree. A
+    # per-end-tag full-stack scan does ~40 000 000 stack-entry examinations
+    # here and blows the bound by orders of magnitude; a per-tag depth index
+    # matches an end tag without walking the open stack. The bound is
+    # proportional to (elements + end tags) — no wall clock anywhere.
+    import capturd.shots.planner as planner_module
+
+    divs, strays = 2_000, 20_000
+    html = "<div>" * divs + "</span>" * strays
+
+    builder = planner_module._NodeBuilder()
+    builder.feed(html)
+    builder.close()
+    assert builder.stack_scans <= 3 * (divs + strays)
+
+    # D45: the measured shape is a test, not an anecdote. parse_html returns
+    # the tree (under both ceilings), and the strays are ignored: the tree is
+    # exactly the 2 000-deep single-child <div> chain, unchanged.
+    root = parse_html(html)
+    assert root.parent is None and root.tag == "#root"
+    assert sum(1 for _ in iter_elements(root)) == divs
+    node, chain = root, 0
+    while node.children:
+        assert len(node.children) == 1
+        node = node.children[0]
+        assert node.tag == "div"
+        chain += 1
+    assert chain == divs
+
+    # Whichever ceiling the tree's own size dictates: it is under both parse
+    # ceilings but 2 000 levels deep — over the 256-level depth ceiling, so
+    # plan_candidates documents reason="too-large" with that reason text. The
+    # ceilings are NOT changed to make the case illegal.
+    plan = plan_candidates(root)
+    assert plan.reason == "too-large"
+    assert plan.limits["too_large"] == "deeper than 256 levels"
+
+
+def test_stray_end_tag_with_an_empty_stack_does_not_scan():
+    # D43: a stray end tag with nothing open returns immediately — no
+    # exception, and zero stack entries examined.
+    import capturd.shots.planner as planner_module
+
+    builder = planner_module._NodeBuilder()
+    builder.feed("</span></div>tail</i>")
+    builder.close()
+    assert builder.stack_scans == 0
+    assert _shape(builder.root) == ("#root", (), ["tail"], [])
+
+    root = parse_html("</span></div>tail</i>")
+    assert _shape(root) == ("#root", (), ["tail"], [])
+
+
+def test_mismatched_nesting_tree_shape_is_unchanged():
+    # <b><i></b></i>: </b> closes through the open <i> (today's tree, pinned
+    # structurally), and the later </i> is a stray with nothing left to close.
+    root = parse_html("<b><i></b></i>")
+    assert _shape(root) == ("#root", (), [], [("b", (), [], [("i", (), [], [])])])
+
+
+def test_well_formed_document_tree_is_unchanged():
+    # Literal expected tree for a normal document — the end-tag index must
+    # reproduce the current head's tree exactly (the tree wins over the cost).
+    root = parse_html(
+        "<main id='m'><h1>Title</h1><p>Hello <b>world</b>!</p>"
+        "<ul><li><a href='/x'>Link</a></li></ul>"
+        "<br><input type='text' name='q'></main>"
+    )
+    assert _shape(root) == (
+        "#root",
+        (),
+        [],
+        [
+            (
+                "main",
+                (("id", "m"),),
+                [],
+                [
+                    ("h1", (), ["Title"], []),
+                    ("p", (), ["Hello ", "!"], [("b", (), ["world"], [])]),
+                    ("ul", (), [], [("li", (), [], [("a", (("href", "/x"),), ["Link"], [])])]),
+                    ("br", (), [], []),
+                    ("input", (("name", "q"), ("type", "text")), [], []),
+                ],
+            )
+        ],
+    )

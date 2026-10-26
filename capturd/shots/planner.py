@@ -97,6 +97,10 @@ class _NodeBuilder(HTMLParser):
         self.root = _Node("#root", {})
         self._stack = [self.root]
         self._elements = 0
+        #: D44: deterministic cost counter for the end-tag path — incremented
+        #: once per open-stack entry examined while matching an end tag, never
+        #: a wall clock. The test suite bounds it; D28 forbids timing tests.
+        self.stack_scans = 0
 
     def _add_element(self, tag: str, attrs: list[tuple[str, str | None]]) -> _Node:
         cleaned: dict[str, str] = {}
@@ -127,6 +131,7 @@ class _NodeBuilder(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
         for depth in range(len(self._stack) - 1, 0, -1):
+            self.stack_scans += 1  # one stack entry examined (D44)
             if self._stack[depth].tag == tag:
                 del self._stack[depth:]
                 return
