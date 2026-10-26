@@ -1042,11 +1042,13 @@ def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int 
     ``truncated``, ``scan_stopped_at_cap``, ``dropped_ambiguous``,
     ``navigation_excluded``, ``dropped_action_labels``, and ``too_large``
     (the reason text, present only on reason="too-large").
-    The cap really bounds the scan (round 2, D4): discovery stops
-    as soon as the plan holds more than ``cap`` validated candidates — it does
-    not run to the end of the document — and ``limits["scan_stopped_at_cap"]``
-    is True exactly when it stopped early. The cap is overshot by one so the
-    ``truncated`` flag stays exact.
+    The cap bounds the plan, not the scan (round 3, D15): only kept
+    candidates count against it — ``add()`` skips a node that is invisible,
+    disabled or ambiguous before anything is added — so a document full of
+    such controls is still scanned node by node to the end. Discovery stops
+    early — ``limits["scan_stopped_at_cap"]`` is True exactly then — as soon
+    as the plan holds more than ``cap`` kept candidates; the cap is overshot
+    by one so the ``truncated`` flag stays exact.
 
     Raises :class:`NonDocumentRootError` (D4) unless ``root`` is the document
     root produced by :func:`parse_html` — ``root.parent is None`` and
@@ -1099,12 +1101,15 @@ def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int 
         """Validate and append one candidate.
 
         D7: one cap mechanism only — the discovery loops check the cap at the
-        top of every iteration and stop scanning (round 2, D4), bounding the
-        whole scan and not just validation, so the counters reflect the nodes
-        actually visited. ``add()`` itself never consults the cap and its
-        return value is gone. The cap is overshot by one so the ``truncated``
-        flag stays exact: a document with exactly ``cap`` valid candidates is
-        not reported as truncated.
+        top of every iteration and stop iterating once the plan holds more
+        than ``cap`` kept candidates. The cap bounds kept candidates, not the
+        node scan (round 3, D15): ``add()`` itself never consults it and its
+        return value is gone (D7), and a node skipped here — invisible,
+        disabled, ambiguous — does not count against it, so a document of
+        only such nodes is scanned in full.
+        The cap is overshot by one so the ``truncated`` flag stays exact: a
+        document with exactly ``cap`` kept candidates is not reported as
+        truncated.
         """
         nonlocal dropped_ambiguous
         if not _is_visible(node) or _is_disabled(node):
@@ -1143,7 +1148,7 @@ def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int 
 
     for index_no, node in enumerate(tabs):
         if len(candidates) > cap:
-            scan_stopped_at_cap = True  # D4: the cap bounds the scan mid-document.
+            scan_stopped_at_cap = True  # D4/D15: discovery stopped early at the cap.
             break
         # Uniform navigation exclusion (D2): every discovery loop skips nodes
         # inside navigation chrome and counts the skip — once per node (D6).
