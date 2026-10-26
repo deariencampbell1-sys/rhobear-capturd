@@ -7,12 +7,18 @@ re-implements parsing, planning, scrubbing or selectors.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
+import socket
+import warnings
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import capturd.shots.pathway_plan as pathway_plan
+from capturd.shots import capture as capture_mod
 from capturd.shots.capture import (
     CaptureTarget,
     RestedCaptureError,
@@ -80,21 +86,22 @@ def test_resolve_names_no_pathway_when_unnamed():
 def test_plan_targets_carry_pathway_fields():
     pathway_map = _load("named-control-manifest.md")
 
-    def fake_page(url: str) -> str:
-        return (
-            "<html><body>"
-            '<button id="open-settings" data-target="#settings-panel">Settings</button>'
-            "</body></html>"
-        )
+    def fake_pages(urls: list[str]) -> dict[str, str]:
+        return {
+            url: (
+                "<html><body>"
+                '<button id="open-settings" data-target="#settings-panel">Settings</button>'
+                "</body></html>"
+            )
+            for url in urls
+        }
 
-    import capturd.shots.pathway_plan as pathway_plan
-
-    original = pathway_plan._load_page_html
-    pathway_plan._load_page_html = fake_page
+    original = pathway_plan._load_pages_html
+    pathway_plan._load_pages_html = fake_pages
     try:
         urls, targets = plan_targets_from_map(pathway_map, "http://base.test")
     finally:
-        pathway_plan._load_page_html = original
+        pathway_plan._load_pages_html = original
 
     assert len(targets) == 2
     assert all(isinstance(target, CaptureTarget) for target in targets)
@@ -124,17 +131,18 @@ def test_named_selector_comes_from_planner():
     pathway_map = _load("named-control-manifest.md")
     page_without_ids = "<html><body><button>Settings</button></body></html>"
 
-    def fake_page(url: str) -> str:
-        return page_without_ids if url.endswith("/settings") else "<html><body></body></html>"
+    def fake_pages(urls: list[str]) -> dict[str, str]:
+        return {
+            url: page_without_ids if url.endswith("/settings") else "<html><body></body></html>"
+            for url in urls
+        }
 
-    import capturd.shots.pathway_plan as pathway_plan
-
-    original = pathway_plan._load_page_html
-    pathway_plan._load_page_html = fake_page
+    original = pathway_plan._load_pages_html
+    pathway_plan._load_pages_html = fake_pages
     try:
         _urls, targets = plan_targets_from_map(pathway_map, "http://base.test")
     finally:
-        pathway_plan._load_page_html = original
+        pathway_plan._load_pages_html = original
 
     plan = planner.plan_candidates(planner.parse_html(page_without_ids))
     assert len(plan.candidates) == 1
@@ -148,16 +156,14 @@ def test_verifier_call_binds_to_control_target():
     # The verifier flavour names the control by the call it makes
     # (downstream "/api/state"); the fixture page has the control wired to
     # that call, and the planner's selector for it is what the target carries.
-    import capturd.shots.pathway_plan as pathway_plan
-
     pathway_map = _load("sample-verifier-map.json")
 
-    original = pathway_plan._load_page_html
-    pathway_plan._load_page_html = lambda url: TWO_CONTROL_HTML
+    original = pathway_plan._load_pages_html
+    pathway_plan._load_pages_html = lambda urls: {url: TWO_CONTROL_HTML for url in urls}
     try:
         urls, targets = plan_targets_from_map(pathway_map, "http://127.0.0.1:8123")
     finally:
-        pathway_plan._load_page_html = original
+        pathway_plan._load_pages_html = original
 
     assert len(targets) == 2
     selectors = {target.pathway_id: target.trigger_selector for target in targets}
@@ -173,14 +179,12 @@ def test_no_host_path_in_plan_or_error():
     pasted = pathway_map["raw"]
     assert "C:\\Users\\dev" in pasted  # the path is in the map text
 
-    import capturd.shots.pathway_plan as pathway_plan
-
-    original = pathway_plan._load_page_html
-    pathway_plan._load_page_html = lambda url: "<html><body></body></html>"
+    original = pathway_plan._load_pages_html
+    pathway_plan._load_pages_html = lambda urls: {url: "<html><body></body></html>" for url in urls}
     try:
         urls, targets = plan_targets_from_map(pathway_map, "http://base.test")
     finally:
-        pathway_plan._load_page_html = original
+        pathway_plan._load_pages_html = original
 
     plan_text = json.dumps(
         {"urls": urls, "targets": [dataclasses.asdict(target) for target in targets]},
@@ -272,8 +276,6 @@ def test_plan_time_navigation_is_guarded_and_host_paths_are_redacted(monkeypatch
     # private-IP / host guard the capture path uses — reused, not rewritten —
     # and _redact_host_paths redacts POSIX paths as well as Windows ones, so
     # no host path reaches plan-json or an error message on any platform.
-    from capturd.shots import capture as capture_mod
-
     pathway_map = _load("named-control-manifest.md")
     with pytest.raises(RestedCaptureError) as plan_refusal:
         plan_targets_from_map(pathway_map, "http://169.254.169.254")
@@ -284,8 +286,8 @@ def test_plan_time_navigation_is_guarded_and_host_paths_are_redacted(monkeypatch
     assert str(plan_refusal.value) == str(capture_refusal.value)
 
     monkeypatch.setattr(
-        "capturd.shots.pathway_plan._load_page_html",
-        lambda url: "<html><body></body></html>",
+        "capturd.shots.pathway_plan._load_pages_html",
+        lambda urls: {url: "<html><body></body></html>" for url in urls},
     )
     urls, targets, settings = build_capture_plan({
         "manifest_text": _POSIX_MANIFEST,
@@ -302,28 +304,13 @@ def test_plan_time_navigation_is_guarded_and_host_paths_are_redacted(monkeypatch
         assert host_fragment not in plan_text
 
 
-def test_plan_time_navigation_to_a_private_address_is_refused():
-    # Edge 4: plan-time navigation to a private address is refused by the
-    # shared guard, with the same error class the capture path raises.
-    from capturd.shots import capture as capture_mod
-
-    pathway_map = _load("named-control-manifest.md")
-    with pytest.raises(RestedCaptureError) as plan_refusal:
-        plan_targets_from_map(pathway_map, "http://127.0.0.1:9")
-    with pytest.raises(RestedCaptureError) as capture_refusal:
-        capture_mod._reject_private_url("http://127.0.0.1:9/x")
-    assert type(plan_refusal.value) is RestedCaptureError
-    assert str(plan_refusal.value) == str(capture_refusal.value)
-    assert "private/internal" in str(plan_refusal.value)
-
-
 def test_posix_host_path_in_a_manifest_never_reaches_plan_or_error(monkeypatch):
     # Edge 5: a POSIX host path in a manifest resolves, and the path appears
     # in neither plan-json nor an error text.
     pathway_map = load_pathway_map(manifest_text=_POSIX_MANIFEST)
     monkeypatch.setattr(
-        "capturd.shots.pathway_plan._load_page_html",
-        lambda url: "<html><body></body></html>",
+        "capturd.shots.pathway_plan._load_pages_html",
+        lambda urls: {url: "<html><body></body></html>" for url in urls},
     )
     urls, targets = plan_targets_from_map(pathway_map, "http://base.test")
     assert urls and targets  # the manifest resolves
@@ -340,3 +327,444 @@ def test_posix_host_path_in_a_manifest_never_reaches_plan_or_error(monkeypatch):
     assert "route is empty" in message
     for host_fragment in ("/home/dev", "home/dev", "project/src"):
         assert host_fragment not in message
+
+# ---------------------------------------------------------------------------
+# W0-01d-r3 — H1 loopback exception, one batch read, expanded limits,
+# diagnostics. The fake Playwright stack below is driven by the real call
+# signatures (_launch_browser, context.route, page.goto, page.content) — no
+# network, no real browser, no sleeps.
+# ---------------------------------------------------------------------------
+
+
+def _one_control_page() -> str:
+    return (
+        "<html><body>"
+        '<button id="open-settings" data-target="#settings-panel">Settings</button>'
+        "</body></html>"
+    )
+
+
+def _single_named_control_map() -> dict:
+    """A one-pathway verifier map that names a control needing the page."""
+    return load_pathway_map(map_text=json.dumps({
+        "checks": {
+            "smoke-check": {
+                "name": "smoke-check",
+                "passed": False,
+                "findings": [{
+                    "id": "named-control",
+                    "check": "smoke-check",
+                    "severity": "high",
+                    "code": "click `#panel-btn`",
+                    "message": "named control finding",
+                }],
+            }
+        }
+    }))
+
+
+class _FakeRoute:
+    """A route.request / abort() / continue_() stand-in with the real shape."""
+
+    def __init__(self, url: str) -> None:
+        self.request = SimpleNamespace(url=url)
+        self.aborted = False
+        self.continued = False
+
+    async def abort(self) -> None:
+        self.aborted = True
+
+    async def continue_(self) -> None:
+        self.continued = True
+
+
+class _FakePage:
+    def __init__(self, fake: "_FakePlaywrightStack") -> None:
+        self._fake = fake
+        self.url = "about:blank"
+        self.goto_calls: list[tuple[str, dict]] = []
+        self.content_calls = 0
+        self.closed = False
+
+    async def goto(self, url: str, **kwargs) -> None:
+        self.goto_calls.append((url, kwargs))
+        self.url = url
+        if self._fake.goto_hook is not None:
+            await self._fake.goto_hook(self)
+
+    async def content(self) -> str:
+        self.content_calls += 1
+        return self._fake.html_by_url.get(self.url, "")
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class _FakeContext:
+    def __init__(self, fake: "_FakePlaywrightStack") -> None:
+        self._fake = fake
+        self.closed = False
+
+    async def route(self, pattern: str, handler) -> None:
+        self._fake.route_pattern = pattern
+        self._fake.route_handler = handler
+
+    async def new_page(self) -> _FakePage:
+        self._fake.pages_created += 1
+        page = _FakePage(self._fake)
+        self._fake.pages.append(page)
+        return page
+
+    async def close(self) -> None:
+        self.closed = True
+        self._fake.contexts_closed += 1
+
+
+class _FakeBrowser:
+    def __init__(self, fake: "_FakePlaywrightStack") -> None:
+        self._fake = fake
+        self.closed = False
+
+    async def new_context(self) -> _FakeContext:
+        self._fake.contexts_created += 1
+        return _FakeContext(self._fake)
+
+    async def close(self) -> None:
+        self.closed = True
+        self._fake.browsers_closed += 1
+
+
+class _FakePlaywrightStack:
+    """Fake `async_playwright()` stack — real call signatures only."""
+
+    def __init__(
+        self,
+        html_by_url: dict[str, str] | None = None,
+        goto_hook=None,
+    ) -> None:
+        self.html_by_url = dict(html_by_url or {})
+        self.goto_hook = goto_hook
+        self.entries = 0
+        self.launches = 0
+        self.contexts_created = 0
+        self.contexts_closed = 0
+        self.browsers_closed = 0
+        self.pages_created = 0
+        self.route_pattern: str | None = None
+        self.route_handler = None
+        self.pages: list[_FakePage] = []
+
+    def factory(self):
+        self.entries += 1
+        fake = self
+
+        class _Entry:
+            async def __aenter__(self_inner):
+                class _Chromium:
+                    async def launch(self_ch, **kwargs):
+                        fake.launches += 1
+                        return _FakeBrowser(fake)
+
+                return SimpleNamespace(chromium=_Chromium())
+
+            async def __aexit__(self_inner, *exc) -> bool:
+                return False
+
+        return _Entry()
+
+    def install(self, monkeypatch) -> None:
+        monkeypatch.setattr("playwright.async_api.async_playwright", self.factory)
+
+    def assert_all_closed(self) -> None:
+        assert self.contexts_closed == 1, "the context must close exactly once"
+        assert self.browsers_closed == 1, "the browser must close exactly once"
+        assert all(page.closed for page in self.pages), "every page must close"
+
+
+# 1. H1: the plan-navigation guard's ONE named exception is loopback.
+def test_r3_loopback_plan_read_is_allowed(monkeypatch):
+    # the real guard accepts loopback only with the named opt-in ...
+    capture_mod._reject_private_url("http://127.0.0.1:9/x", allow_loopback=True)
+    capture_mod._reject_private_url("http://[::1]:9/x", allow_loopback=True)
+    capture_mod._reject_private_url("http://[::ffff:127.0.0.1]/x", allow_loopback=True)
+
+    # ... and only loopback: a mixed public + loopback answer is fine, a mixed
+    # public + RFC1918 answer is refused even with the opt-in.
+    def _mixed_loopback(host, port=None):
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0)),
+        ]
+
+    monkeypatch.setattr("capturd.shots.capture.socket.getaddrinfo", _mixed_loopback)
+    capture_mod._reject_private_url("http://mixed.test/", allow_loopback=True)
+
+    def _mixed_private(host, port=None):
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.1", 0)),
+        ]
+
+    monkeypatch.setattr("capturd.shots.capture.socket.getaddrinfo", _mixed_private)
+    with pytest.raises(RestedCaptureError):
+        capture_mod._reject_private_url("http://mixed.test/", allow_loopback=True)
+
+    # and a plan against a loopback base binds normally from a stubbed batch read
+    monkeypatch.setattr(
+        "capturd.shots.pathway_plan._load_pages_html",
+        lambda urls: {url: _one_control_page() for url in urls},
+    )
+    pathway_map = _load("named-control-manifest.md")
+    _urls, targets = plan_targets_from_map(pathway_map, "http://127.0.0.1:9")
+    selectors = {target.pathway_id: target.trigger_selector for target in targets}
+    assert selectors["open-settings"] == "#open-settings"
+    assert selectors["open-missing"] == ""
+
+
+# 2. The default capture guard still refuses loopback — H1 is plan-time only.
+def test_r3_capture_guard_still_refuses_loopback_by_default():
+    for ip in ("127.0.0.1", "::1"):
+        url = f"http://[{ip}]:9/x" if ":" in ip else f"http://{ip}:9/x"
+        with pytest.raises(RestedCaptureError) as excinfo:
+            capture_mod._reject_private_url(url)
+        assert str(excinfo.value) == f"url resolves to a private/internal IP ({ip}) — not allowed"
+
+
+# 3. M-redirect-SSRF: every request URL is checked with the loopback-only policy.
+def test_r3_redirect_requests_use_loopback_only_guard(monkeypatch):
+    fake = _FakePlaywrightStack(html_by_url={"http://127.0.0.1:9/page": "<html></html>"})
+    fake.install(monkeypatch)
+
+    checked: list[tuple[str, bool]] = []
+    real = capture_mod._reject_private_url
+
+    def _spy(url, *, allow_loopback=False):
+        checked.append((url, allow_loopback))
+        return real(url, allow_loopback=allow_loopback)
+
+    monkeypatch.setattr("capturd.shots.capture._reject_private_url", _spy)
+
+    result = pathway_plan._load_pages_html(["http://127.0.0.1:9/page"])
+    assert result == {"http://127.0.0.1:9/page": "<html></html>"}
+    assert fake.route_handler is not None
+    assert fake.route_pattern == "**/*"
+
+    # a redirect's request to a loopback subresource continues — the opt-in
+    loopback = _FakeRoute("http://127.0.0.1:9/assets/app.js")
+    asyncio.run(fake.route_handler(loopback))
+    assert loopback.continued is True and loopback.aborted is False
+
+    # a redirect's request to cloud metadata aborts — loopback-only, still
+    metadata = _FakeRoute("http://169.254.169.254/latest/meta-data")
+    asyncio.run(fake.route_handler(metadata))
+    assert metadata.aborted is True and metadata.continued is False
+
+    checked_urls = [url for url, _flag in checked]
+    assert "http://169.254.169.254/latest/meta-data" in checked_urls
+    assert "http://127.0.0.1:9/assets/app.js" in checked_urls
+    assert all(flag is True for _url, flag in checked), (
+        "every request URL must be checked with allow_loopback=True"
+    )
+
+
+# 4. A guard refusal is never swallowed as reachability — it refuses the plan.
+def test_r3_redirect_guard_refusal_is_not_swallowed(monkeypatch):
+    pathway_map = _load("named-control-manifest.md")
+    with pytest.raises(RestedCaptureError) as expected:
+        capture_mod._reject_private_url("http://169.254.169.254/latest")
+    guard_message = str(expected.value)
+
+    # Scenario A: goto fires the route guard at a metadata redirect target and
+    # returns — the recorded refusal must escape from the read.
+    fake = _FakePlaywrightStack()
+
+    async def redirect(page):
+        await fake.route_handler(_FakeRoute("http://169.254.169.254/latest"))
+
+    fake.goto_hook = redirect
+    fake.install(monkeypatch)
+    with pytest.raises(RestedCaptureError) as excinfo:
+        plan_targets_from_map(pathway_map, "http://127.0.0.1:9")
+    assert str(excinfo.value) == guard_message, "the guard's own error must escape"
+    fake.assert_all_closed()
+
+    # Scenario B: goto records the refusal and then fails (aborted navigation) —
+    # the refusal escapes, and it is never converted into an empty-page warning.
+    fake_b = _FakePlaywrightStack()
+
+    async def redirect_then_fail(page):
+        await fake_b.route_handler(_FakeRoute("http://169.254.169.254/latest"))
+        raise TimeoutError("navigation aborted")
+
+    fake_b.goto_hook = redirect_then_fail
+    fake_b.install(monkeypatch)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(RestedCaptureError) as excinfo:
+            plan_targets_from_map(pathway_map, "http://127.0.0.1:9")
+    assert str(excinfo.value) == guard_message
+    assert [w for w in caught if issubclass(w.category, RuntimeWarning)] == [], (
+        "a guard refusal must not become a reachability diagnostic"
+    )
+    fake_b.assert_all_closed()
+
+
+# 5. The final URL after goto is checked before any content is read.
+def test_r3_final_url_is_checked_before_content(monkeypatch):
+    fake = _FakePlaywrightStack()
+
+    async def hijack(page):
+        page.url = "http://169.254.169.254/latest"
+
+    fake.goto_hook = hijack
+    fake.install(monkeypatch)
+    with pytest.raises(RestedCaptureError) as excinfo:
+        pathway_plan._load_pages_html(["http://127.0.0.1:9/page"])
+    assert "169.254.169.254" in str(excinfo.value)
+    assert fake.pages[0].content_calls == 0, "content must never be read for a refused final URL"
+    fake.assert_all_closed()
+
+
+# 6. M-browser-lifecycle: ONE driver/browser/context reads all named pages.
+def test_r3_one_browser_reads_all_named_control_pages(monkeypatch):
+    fake = _FakePlaywrightStack(html_by_url={
+        "http://127.0.0.1:9/a": "<html><a></a></html>",
+        "http://127.0.0.1:9/b": "<html><b></b></html>",
+    })
+    fake.install(monkeypatch)
+
+    result = pathway_plan._load_pages_html(["http://127.0.0.1:9/a", "http://127.0.0.1:9/b"])
+    assert result == fake.html_by_url
+    assert fake.entries == 1, "exactly one Playwright driver per plan"
+    assert fake.launches == 1, "exactly one browser launch per plan"
+    assert fake.contexts_created == 1, "exactly one context per plan"
+    assert fake.pages_created == 2, "one page per URL, sequential in the context"
+    for page in fake.pages:
+        assert len(page.goto_calls) == 1
+        _url, kwargs = page.goto_calls[0]
+        assert kwargs == {"wait_until": "domcontentloaded", "timeout": 15000}
+    assert [page.goto_calls[0][0] for page in fake.pages] == [
+        "http://127.0.0.1:9/a",
+        "http://127.0.0.1:9/b",
+    ]
+    fake.assert_all_closed()
+
+
+# 7. The synchronous contract: planning refuses an already-running event loop.
+@pytest.mark.asyncio
+async def test_r3_sync_plan_refuses_an_active_event_loop(monkeypatch):
+    calls: list[list[str]] = []
+
+    def _record(urls):
+        calls.append(list(urls))
+        raise AssertionError("the batch reader must not run under an active event loop")
+
+    monkeypatch.setattr("capturd.shots.pathway_plan._load_pages_html", _record)
+    pathway_map = _load("named-control-manifest.md")
+
+    with pytest.raises(RestedCaptureError) as excinfo:
+        plan_targets_from_map(pathway_map, "http://127.0.0.1:9")
+    assert str(excinfo.value) == (
+        "pathway planning is synchronous; call it outside an active event loop"
+    )
+    assert calls == []
+
+    # dry-run never performs this check (and launches nothing)
+    _urls, targets = plan_targets_from_map(pathway_map, "http://127.0.0.1:9", dry_run=True)
+    assert targets and calls == []
+
+
+# 8. M-diagnostics: a swallowed read failure warns and keeps the target unbound.
+def test_r3_page_read_failure_emits_diagnostic_and_keeps_unbound(monkeypatch):
+    def _boom(urls):
+        raise RuntimeError("raw /home/dev/secret-path detail")
+
+    monkeypatch.setattr("capturd.shots.pathway_plan._load_pages_html", _boom)
+    pathway_map = _load("named-control-manifest.md")
+
+    with pytest.warns(RuntimeWarning, match="pathway page read failed") as record:
+        _urls, targets = plan_targets_from_map(pathway_map, "http://base.test")
+    message = str(record[0].message)
+    assert message == "pathway page read failed (RuntimeError); affected controls stay unbound"
+    assert "/home/dev" not in message and "secret" not in message
+    assert [target.trigger_selector for target in targets] == ["", ""], (
+        "the targets stay planned and unbound"
+    )
+
+
+# 9. M-diagnostics: a planner failure warns — never raw text, never silent.
+def test_r3_planner_failure_emits_diagnostic(monkeypatch):
+    monkeypatch.setattr(
+        "capturd.shots.pathway_plan._load_pages_html",
+        lambda urls: {url: TWO_CONTROL_HTML for url in urls},
+    )
+
+    def _boom(html):
+        raise RuntimeError("raw secret hunter2 /home/dev/x")
+
+    monkeypatch.setattr("capturd.shots.pathway_plan._plan_page", _boom)
+    pathway_map = _load("named-control-manifest.md")
+
+    with pytest.warns(RuntimeWarning, match="pathway page planning failed") as record:
+        _urls, targets = plan_targets_from_map(pathway_map, "http://base.test")
+    message = str(record[0].message)
+    assert message == (
+        "pathway page planning failed (RuntimeError); affected controls stay unbound"
+    )
+    assert "hunter2" not in message and "/home/dev" not in message
+    assert [target.trigger_selector for target in targets] == ["", ""]
+
+
+# 10. M-directory-base: a directory base is refused — never printed as a host path.
+def test_r3_directory_base_is_refused_without_host_path_leak(monkeypatch):
+    calls: list[list[str]] = []
+
+    def _record(urls):
+        calls.append(list(urls))
+        raise AssertionError(f"a page read happened for {urls}")
+
+    monkeypatch.setattr("capturd.shots.pathway_plan._load_pages_html", _record)
+    pathway_map = _load("named-control-manifest.md")
+    refusal = (
+        "base_url must be an absolute http(s) URL; local directory paths are not allowed"
+    )
+
+    for bad_base in ("/home/dev/build", "C:\\Users\\dev\\build", "file:///home/dev/build", "build"):
+        with pytest.raises(RestedCaptureError) as excinfo:
+            plan_targets_from_map(pathway_map, bad_base)
+        message = str(excinfo.value)
+        assert message == refusal
+        assert "/home/dev" not in message
+        assert "C:\\Users" not in message
+    assert calls == [], "a refused base must trigger no read at all"
+
+
+# 11. M-expanded-targets: the expanded matrix limit fails before navigation.
+def test_r3_expanded_matrix_limit_fails_before_navigation(monkeypatch):
+    calls: list[list[str]] = []
+
+    def _record(urls):
+        calls.append(list(urls))
+        raise AssertionError(f"a page read happened for {urls}")
+
+    monkeypatch.setattr("capturd.shots.pathway_plan._load_pages_html", _record)
+    pathway_map = _single_named_control_map()
+
+    with pytest.raises(RestedCaptureError) as excinfo:
+        plan_targets_from_map(
+            pathway_map,
+            "http://base.test",
+            viewport_count=3,
+            scheme_count=2,
+            max_targets=5,
+        )
+    assert str(excinfo.value) == "too many capture targets; maximum is 5"
+    assert calls == [], "the refusal must happen before any navigation"
+
+    with pytest.raises(RestedCaptureError) as excinfo:
+        plan_targets_from_map(pathway_map, "http://base.test", viewport_count=0)
+    assert str(excinfo.value) == "viewport_count and scheme_count must be positive"
+    with pytest.raises(RestedCaptureError) as excinfo:
+        plan_targets_from_map(pathway_map, "http://base.test", scheme_count=-1)
+    assert str(excinfo.value) == "viewport_count and scheme_count must be positive"
+    assert calls == []

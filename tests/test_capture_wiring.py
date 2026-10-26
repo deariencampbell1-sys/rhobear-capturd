@@ -27,7 +27,10 @@ TWO_CONTROL_HTML = (WIRING / "two-control-page.html").read_text(encoding="utf-8"
 
 
 def _stub_loader(monkeypatch, html: str = TWO_CONTROL_HTML) -> None:
-    monkeypatch.setattr("capturd.shots.pathway_plan._load_page_html", lambda url: html)
+    monkeypatch.setattr(
+        "capturd.shots.pathway_plan._load_pages_html",
+        lambda urls: {url: html for url in urls},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -286,11 +289,11 @@ def _forbid_page_reads(monkeypatch) -> list[str]:
     something navigated."""
     calls: list[str] = []
 
-    def _record(url: str) -> str:
-        calls.append(url)
-        raise AssertionError(f"a page read happened for {url}")
+    def _record(urls) -> dict[str, str]:
+        calls.extend(urls)
+        raise AssertionError(f"a page read happened for {urls}")
 
-    monkeypatch.setattr("capturd.shots.pathway_plan._load_page_html", _record)
+    monkeypatch.setattr("capturd.shots.pathway_plan._load_pages_html", _record)
     return calls
 
 
@@ -471,3 +474,52 @@ def test_map_driven_baseline_only_run_still_exits_four(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert exit_code == cli.EXIT_QUALITY_FAIL == 4
     assert "quality: BASELINE_ONLY" in captured.out + captured.err
+
+
+# ---------------------------------------------------------------------------
+# W0-01d-r3 — M-expanded-targets: the refusal bounds the EXPANDED matrix
+# ---------------------------------------------------------------------------
+
+
+def test_r3_build_plan_enforces_expanded_matrix_limit(monkeypatch):
+    calls: list[list[str]] = []
+
+    def _record(urls) -> dict[str, str]:
+        calls.append(list(urls))
+        return {url: "<html><body></body></html>" for url in urls}
+
+    monkeypatch.setattr("capturd.shots.pathway_plan._load_pages_html", _record)
+    map_text = _verifier_map_text([_finding("named-control", "click `#panel-btn`")])
+    payload = {
+        "map_text": map_text,
+        "base_url": "http://base.test",
+        "viewports": ["desktop", "tablet", "mobile"],
+        "schemes": ["light", "dark"],
+        "max_targets": 5,
+    }
+
+    # one pathway x 3 viewports x 2 schemes = 6 targets — refused at cap 5,
+    # before any navigation
+    with pytest.raises(RestedCaptureError) as excinfo:
+        build_capture_plan(payload)
+    assert str(excinfo.value) == "too many capture targets; maximum is 5"
+    assert calls == [], "the expanded-matrix refusal must fire before any navigation"
+
+    # positive control: exactly six targets at cap 6
+    _urls, targets, settings = build_capture_plan({**payload, "max_targets": 6})
+    assert len(targets) == 6
+    assert settings["capture_count"] == 6
+
+    # and the boundary is exact: seven targets at cap 6 is refused (7/6)
+    seven = _verifier_map_text([_finding(f"p{i}", "click `#panel-btn`") for i in range(7)])
+    before = len(calls)
+    with pytest.raises(RestedCaptureError) as excinfo:
+        build_capture_plan({
+            **payload,
+            "map_text": seven,
+            "max_targets": 6,
+            "viewports": ["desktop"],
+            "schemes": ["light"],
+        })
+    assert str(excinfo.value) == "too many capture targets; maximum is 6"
+    assert len(calls) == before, "the refusal must happen before any navigation"
