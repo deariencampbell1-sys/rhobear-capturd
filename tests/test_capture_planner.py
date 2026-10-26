@@ -879,7 +879,11 @@ def test_public_surface_exports_node_and_iter_elements():
 # ---------------------------------------------------------------------------
 
 
-def test_link_control_is_planned_with_attribute_selector():
+def test_link_control_is_planned_with_structural_selector():
+    # Retargeted under locked D18 (not weakened): href left
+    # STABLE_SELECTOR_ATTRIBUTES, so a link is named by structure. Every
+    # assertion is kept with the same strength on the new truth — an
+    # a[href="..."] selector baked signed URLs into plan artifacts.
     root = parse_html("<main><a href=\"/pricing\">Pricing</a></main>")
     plan = plan_candidates(root)
 
@@ -887,8 +891,8 @@ def test_link_control_is_planned_with_attribute_selector():
     (candidate,) = plan.candidates
     assert candidate.kind == "control"
     assert candidate.label == "Pricing"
-    assert candidate.selector == 'a[href="/pricing"]'
-    assert candidate.selector_strategy == "attribute"
+    assert candidate.selector == "main > a"
+    assert candidate.selector_strategy == "structural"
     assert candidate.priority == 80
     assert candidate.is_navigation is False
 
@@ -1140,3 +1144,52 @@ def test_empty_document_yields_empty_plan():
     whitespace = plan_candidates(parse_html("   \n "))
     assert whitespace.candidates == []
     assert whitespace.reason == "no-candidates"
+
+
+# ---------------------------------------------------------------------------
+# Review round 6: the truth layer — D17 (inline style is last-wins) and D18
+# (href is not a stable selector attribute; no credential-bearing URL ever
+# enters a plan artifact).
+# ---------------------------------------------------------------------------
+
+
+def test_style_declares_is_last_wins():
+    # D17: _style_declares scans every declaration for the property and
+    # compares the LAST match, because CSS is last-wins. This sits in the gate
+    # that decides what gets planned: an inversion silently plans dead controls
+    # or drops live ones. Both directions:
+    #   style="display:none;display:block" -> visible  -> planned
+    #   style="display:block;display:none" -> hidden   -> not planned
+    root = parse_html(
+        "<main>"
+        '<button style="display:none;display:block" id="reshown">Reshown</button>'
+        '<button style="display:block;display:none" id="rehidden">Rehidden</button>'
+        "</main>"
+    )
+    plan = plan_candidates(root)
+    assert [c.label for c in plan.candidates] == ["Reshown"]
+
+
+def test_href_is_not_a_stable_attribute():
+    # D18: href leaves STABLE_SELECTOR_ATTRIBUTES — the structural path
+    # already disambiguates a link, and a[href="...?token=...&sig=..."] bakes
+    # signed URLs and credential-bearing query strings into plan artifacts
+    # that brief 01d writes to disk. A link with ?token=secret produces a
+    # selector containing no token, and neither does the serialized plan
+    # (selector, label fallback and target all included).
+    assert "href" not in STABLE_SELECTOR_ATTRIBUTES
+    root = parse_html(
+        "<main>"
+        '<a href="/x?token=secret">Open</a>'
+        '<a role="tab" href="/y?token=secret"></a>'
+        "</main>"
+    )
+    plan = plan_candidates(root)
+
+    assert plan.reason == "ok"
+    assert len(plan.candidates) == 2
+    for candidate in plan.candidates:
+        assert "token" not in candidate.selector
+        assert candidate.selector_strategy == "structural"
+        assert plan.limits["dropped_ambiguous"] == 0
+    assert "token" not in repr(plan)
