@@ -302,6 +302,36 @@ def test_three_column_table_is_not_a_count_table():
         assert [p["id"] for p in parsed["pathways"]] == ["p1"], heading
 
 
+def test_two_column_pathway_table_is_not_a_count_table():
+    # D24: `| id | status |` is two columns but NOT a count table — its
+    # second header is not a count word. Its pathway rows set no counts,
+    # wherever the table sits; beside it, a table whose header shape says
+    # "counts" (category word first, count word second) does feed the
+    # summary — the contrast pins the shape rule, not the heading.
+    text = "\n".join([
+        "# Pathway Manifest — two-column pathway table",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+        "| p2 | UNWIRED |",
+        "",
+        "## Status Overview",
+        "",
+        "| Category | Count |",
+        "|---|---|",
+        "| **TOTAL PATHWAYS** | 2 |",
+        "| **WIRED** | 1 |",
+    ])
+    parsed = parse_manifest_text(text)
+    assert parsed["summary"]["pathwaysTotal"] == 2
+    assert parsed["summary"]["wired"] == 1
+    assert parsed["summary"]["unwired"] is None
+    assert [p["id"] for p in parsed["pathways"]] == ["p1", "p2"]
+
+
 def test_summary_table_without_a_heading_is_decided():
     # D8, decided: a summary-shaped table outside a summary-named section is
     # REFUSED ("summary table outside a summary section") — never silently
