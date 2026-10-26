@@ -66,7 +66,7 @@ __all__ = [
 class _Node:
     """One element of the parsed document."""
 
-    __slots__ = ("tag", "attrs", "children", "parent", "text_chunks", "content", "nav_memo")
+    __slots__ = ("tag", "attrs", "children", "parent", "text_chunks", "content")
 
     def __init__(self, tag: str, attrs: dict[str, str]) -> None:
         self.tag = tag
@@ -79,10 +79,6 @@ class _Node:
         #: :func:`_full_text` can interleave inline children with text.
         #: ``children`` and ``text_chunks`` stay as the element/text views.
         self.content: list[object] = []
-        #: D73: memo for :func:`_in_navigation` — ``None`` until computed,
-        #: then the node's navigation status. The tree is immutable during a
-        #: plan, so the value never goes stale.
-        self.nav_memo: Optional[bool] = None
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return f"<_Node {self.tag} attrs={sorted(self.attrs.items())!r} children={len(self.children)}>"
@@ -710,6 +706,11 @@ class _PlanIndex:
             if node.tag == "html":
                 self._boundary_nodes.extend(node.children)
         self._counts: dict[str, int] = {}
+        # D82: the per-call navigation memo — created inside the plan and
+        # owned by it, never stored on the public ``Node``. The tree is
+        # immutable during a plan, so the values never go stale; when the
+        # call returns, the memo goes with it.
+        self.nav_memo: dict[_Node, bool] = {}
 
     def count_matches(self, selector: str) -> int:
         """queryCount: 0 for invalid/empty selectors, else number of matches."""
@@ -1089,30 +1090,39 @@ def _hint_match(node: _Node, hint: str) -> bool:
 _hint_comparisons = 0
 
 
-def _in_navigation(node: _Node) -> bool:
+def _in_navigation(node: _Node, nav_memo: Optional[dict[_Node, bool]] = None) -> bool:
     """Is ``node`` inside navigation chrome — itself or an ancestor?
 
-    D73: computed ONCE per node and memoised on the node. This check is
-    called two to three times per node and every call used to re-walk the
-    ancestor chain against twelve hints — tens of millions of comparisons on
-    a legal maximum document. The walk now stops at the first memoised
-    ancestor and fills the memo for every node it passes through
-    (``_in_navigation(n)`` is ``hint-match(n) or _in_navigation(n.parent)``),
-    so each node's twelve hints are compared at most once per tree and the
-    cost is provably bounded by the node count — measured by the
-    ``_hint_comparisons`` counter, never a wall clock (D28).
+    D73: computed ONCE per node and memoised. This check is called two to
+    three times per node and every call used to re-walk the ancestor chain
+    against twelve hints — tens of millions of comparisons on a legal maximum
+    document. The walk stops at the first memoised ancestor and fills the
+    memo for every node it passes through (``_in_navigation(n)`` is
+    ``hint-match(n) or _in_navigation(n.parent)``), so each node's twelve
+    hints are compared at most once per tree and the cost is provably bounded
+    by the node count — measured by the ``_hint_comparisons`` counter, never
+    a wall clock (D28).
+
+    D82: the memo is per-CALL state, never stored on the public ``Node`` —
+    ``plan_candidates`` is promised pure, and a memo surviving the call would
+    let a second plan on the same tree inherit a stale answer. Callers inside
+    a plan pass that plan's own memo dict (``_PlanIndex.nav_memo``); a caller
+    without one — the public :func:`classify_control` — gets an uncached walk
+    that answers correctly and leaves nothing behind.
     """
     global _hint_comparisons
     chain: list[_Node] = []
     result = False
     current: Optional[_Node] = node
     while current is not None and current.tag != "#root":
-        memo = current.nav_memo
-        if memo is not None:
-            # Ancestor already decided: it (or one of its ancestors) matches
-            # exactly when result is True, and every node below it inherits.
-            result = memo
-            break
+        if nav_memo is not None:
+            cached = nav_memo.get(current)
+            if cached is not None:
+                # Ancestor already decided: it (or one of its ancestors)
+                # matches exactly when result is True, and every node below
+                # it inherits.
+                result = cached
+                break
         chain.append(current)
         for hint in NAVIGATION_SELECTOR_HINTS:
             _hint_comparisons += 1  # one hint comparison (D73)
@@ -1122,8 +1132,9 @@ def _in_navigation(node: _Node) -> bool:
         if result:
             break
         current = current.parent
-    for passed in chain:
-        passed.nav_memo = result
+    if nav_memo is not None:
+        for passed in chain:
+            nav_memo[passed] = result
     return result
 
 
@@ -1177,8 +1188,15 @@ def _ancestors_inclusive(node: _Node) -> Iterator[_Node]:
         current = current.parent
 
 
-def _classify_sweep(node: _Node) -> Optional[ControlKind]:
-    """Priority-ordered classification chain; first match wins (planner.js)."""
+def _classify_sweep(
+    node: _Node, nav_memo: Optional[dict[_Node, bool]] = None
+) -> Optional[ControlKind]:
+    """Priority-ordered classification chain; first match wins (planner.js).
+
+    D82: ``nav_memo`` is the caller's per-call navigation memo, passed
+    through to :func:`_in_navigation` — a plan shares one memo so the check
+    is computed once per node, and no memo is stored on the public ``Node``.
+    """
     attrs = node.attrs
     tag = node.tag
     # D21: keyword values read folded to lowercase ("role="TAB"" is "tab").
@@ -1198,7 +1216,7 @@ def _classify_sweep(node: _Node) -> Optional[ControlKind]:
     class_text = attrs.get("class", "").lower()
     label = _text_of(node).lower()
     combined = f"{role} {data_toggle} {target} {class_text} {label}"
-    navigation = _in_navigation(node)
+    navigation = _in_navigation(node, nav_memo)
 
     if role == "tab" or "data-tab" in attrs or _TAB_RE.search(combined):
         return ControlKind.TAB
@@ -1482,7 +1500,7 @@ def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
     # node count, never set iteration order.
     counted: set[_Node] = set()
     for node in [*tabs, *summaries, *swept]:
-        if node not in counted and _in_navigation(node):
+        if node not in counted and _in_navigation(node, index.nav_memo):
             counted.add(node)
     navigation_excluded = len(counted)
 
@@ -1545,7 +1563,7 @@ def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
                 kind=kind.value,
                 label=label,
                 priority=priority,
-                is_navigation=_in_navigation(node),
+                is_navigation=_in_navigation(node, index.nav_memo),
                 kind_note=note,
                 target=target,
                 target_visible=target_visible,
@@ -1577,7 +1595,7 @@ def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
             break
         if node in counted:
             continue
-        kind = _classify_sweep(node)
+        kind = _classify_sweep(node, index.nav_memo)
         if kind is None:
             # D5: every action-word drop is counted and visible to the operator.
             if _ACTION_RE.search(_text_of(node).lower()):
