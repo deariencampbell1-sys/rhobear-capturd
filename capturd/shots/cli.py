@@ -143,10 +143,12 @@ def _print_plan(urls, targets, settings) -> int:
         )
     for flag in settings.get("pathway_flags") or []:
         print(f"flag: {flag['flag']} {flag['pathway_id']}: {flag['reason']}")
+    # Cookie values are credentials; keep them out of shareable dry-run output.
+    safe_settings = {key: value for key, value in settings.items() if key != "cookies"}
     print(
         "plan-json: "
         + json.dumps(
-            {"urls": urls, "targets": [asdict(t) for t in targets], "settings": settings},
+            {"urls": urls, "targets": [asdict(t) for t in targets], "settings": safe_settings},
             sort_keys=True,
         )
     )
