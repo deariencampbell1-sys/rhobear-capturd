@@ -259,9 +259,16 @@ def parse_verifier_json_text(text: str, source: str = "<pasted map>") -> dict[st
             "verifier map 'antiPatterns' must be a list, got "
             f"{type(declared_anti_patterns).__name__}"
         )
-    for entry in declared_anti_patterns or []:
+    for index, entry in enumerate(declared_anti_patterns or []):
         if not isinstance(entry, dict):
-            continue
+            # D22: refuse, never skip. A skipped entry returns a shorter
+            # array than the feed declared with no signal — precisely the
+            # silent half-fill this module exists to prevent. The refusal
+            # names the offending entry's index and type.
+            raise PathwayMapError(
+                "verifier map 'antiPatterns' entry at index "
+                f"{index} must be an object, got {type(entry).__name__} — refusing"
+            )
         pattern = _normalise_anti_pattern(entry)
         if pattern is not None:
             anti_patterns.append(pattern)
