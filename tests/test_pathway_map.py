@@ -786,6 +786,59 @@ def test_comma_formatted_count_is_read_whole_or_refused():
     assert verifier["antiPatterns"][0]["count"] == 2468
 
 
+def test_cell_with_two_integer_runs_is_refused():
+    # D26: `,` and the non-breaking space are grouping separators INSIDE
+    # one number; a plain space between digits is NOT grouping — two
+    # independent integer runs are two numbers and must be REFUSED naming
+    # the cell, never glued into one ("2 5" is not 25). Grouping is
+    # intact: "1,234" is still 1234 at every count site (D19).
+    summary_text = "\n".join([
+        "# Pathway Manifest — two integer runs",
+        "",
+        "## Summary Counts",
+        "",
+        "| Category | Count |",
+        "|---|---|",
+        "| **WIRED** | 2 5 |",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(summary_text)
+    assert "2 5" in str(excinfo.value)
+
+    anti_text = "\n".join([
+        "# Pathway Manifest — two integer runs in an anti-pattern",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+        "",
+        "## 2. Anti-patterns",
+        "",
+        "| Category | Count | File | Line | Quote |",
+        "|---|---|---|---|---|",
+        "| two-runs | 2 5 | hub.ts | 88 | `export const x` |",
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(anti_text)
+    assert "2 5" in str(excinfo.value)
+
+    # Grouping is intact: "1,234" reads whole at both count sites.
+    assert parse_manifest_text(
+        summary_text.replace("2 5", "1,234")
+    )["summary"]["wired"] == 1234
+    assert parse_manifest_text(
+        anti_text.replace("2 5", "1,234")
+    )["antiPatterns"][0]["count"] == 1234
+
+
 def test_prose_line_with_pipe_and_one_backtick_does_not_abort():
     # D17: a refusal is decided once the line is KNOWN to be a table, never
     # during header detection. A prose line in a Notes section that carries a
