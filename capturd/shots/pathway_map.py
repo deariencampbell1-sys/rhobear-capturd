@@ -912,7 +912,10 @@ def _normalise_anti_pattern(entry: dict[str, Any]) -> dict[str, Any] | None:
     on the same input value). Returns None for an entry with no category:
     the manifest caller skips such a table row, while the verifier caller
     REFUSES the entry by index instead (D27) so its returned array can
-    never be shorter than what the feed declared. The verifier's own
+    never be shorter than what the feed declared. Every value is read with
+    absence decided by ``is None`` (D39): a present ``None`` is not a value
+    and becomes ``''`` exactly like an absent key — only a real value
+    round-trips, a present zero as ``"0"`` (D62). The verifier's own
     ``antiPatterns`` array round-trips through here (D23); a non-mapping
     entry never reaches this normaliser — the verifier caller refuses it
     by index and type (D22)."""
@@ -931,7 +934,8 @@ def _normalise_anti_pattern(entry: dict[str, Any]) -> dict[str, Any] | None:
         # D39: `is None`, not truthiness — `str(entry.get(key) or "")`
         # collapses an integer 0 into "", the same falsy collapse D18
         # fixed for `count`. A present zero is a real value and
-        # round-trips as "0"; only an absent key becomes "".
+        # round-trips as "0"; a present None or an absent key becomes ""
+        # (D62 — None is not a value).
         "file": str(entry["file"]) if entry.get("file") is not None else "",
         "line": str(entry["line"]) if entry.get("line") is not None else "",
         "quote": str(entry.get("quote") or entry.get("snippet") or entry.get("code") or ""),
