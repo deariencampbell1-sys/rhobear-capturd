@@ -313,10 +313,13 @@ _SUMMARY_COUNT_KEYS = (
 # be bold-wrapped; the leading/trailing pipes are optional per GFM). The
 # pattern is anchored to the whole line, so a pathway row like
 # `| p1 | WIRED | 3 |` — WIRED in a middle cell — can never set a count,
-# even under a ## Summary heading.
+# even under a ## Summary heading. D19: the count cell may be grouped —
+# digit runs separated by `,` or spaces — and is read WHOLE by stripping
+# the separators before the integer, so "1,234" is 1234, never the
+# truncated first run 1 and never a silent None.
 _COUNT_ROW_RE = re.compile(
     r"^\s*\|?\s*\*{0,2}(WIRED|MOCKED|UNWIRED|INCOMPLETE|UNCLEAR"
-    r"|TOTAL PATHWAYS|ROUTES|PLUGINS)\*{0,2}\s*\|\s*(\d+)\s*\|?\s*$",
+    r"|TOTAL PATHWAYS|ROUTES|PLUGINS)\*{0,2}\s*\|\s*(\d+(?:[,\s]+\d+)*)\s*\|?\s*$",
     re.IGNORECASE,
 )
 
@@ -406,7 +409,9 @@ def _extract_summary(sections: list[dict[str, Any]]) -> dict[str, Any]:
             if not match:
                 continue
             key = match.group(1).lower()
-            val = int(match.group(2))
+            # D19, decided: read whole — strip the `,`/space grouping before
+            # the integer, so "1,234" is 1234, never the truncated run 1.
+            val = int(re.sub(r"[,\s]", "", match.group(2)))
             if "unwire" in key:
                 summary["unwired"] = val
             elif "wire" in key:
@@ -688,11 +693,15 @@ def _count_from_cell(raw: Any) -> int | None:
     only "absent" test — ``0 or ""`` swallowed a JSON integer ``0`` into
     None while the manifest flavour kept the string cell "0" as 0, so the
     two flavours disagreed on the same input value; a real zero is a real
-    count. A string cell keeps D4's semantics: the first integer run
-    ("3.5" reads 3, not 35), no digits at all → None."""
+    count. D19, decided: READ WHOLE — `,` and spaces are stripped before
+    taking the first integer run, so "1,234" is 1234, never the truncated
+    first run 1 and never a silent None. D4's decimal semantics survive:
+    only separators are stripped (never "."), so "3.5" still reads 3, and
+    a cell with no digits at all stays None."""
     if raw is None:
         return None
-    count_match = re.search(r"\d+", str(raw))
+    digits = re.sub(r"[,\s]", "", str(raw))
+    count_match = re.search(r"\d+", digits)
     return int(count_match.group(0)) if count_match else None
 
 
