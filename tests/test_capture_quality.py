@@ -548,7 +548,7 @@ def test_error_text_and_reason_codes_agree_on_inconsistent_object() -> None:
     message = build_quality_error(quality)
     assert message.startswith("[NO_CAPTURES] ")
     bracketed = re.findall(
-        r"\[(?:PASS|FAIL|NO_CAPTURES|BASELINE_ONLY|NO_SUCCESSFUL_CAPTURE)\]",
+        r"\[(PASS|FAIL|NO_CAPTURES|BASELINE_ONLY|NO_SUCCESSFUL_CAPTURE)\]",
         message,
     )
     assert set(bracketed) == set(codes)  # both report exactly {NO_CAPTURES}

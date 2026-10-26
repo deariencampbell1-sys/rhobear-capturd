@@ -248,28 +248,36 @@ def _named(files: list[str]) -> str:
 
 
 def build_quality_error(quality: CaptureQuality) -> str:
-    """One sentence per failing reason, prefixed with its own reason code
-    (D4), naming the files behind it; never a bare "failed". Returns ``""``
+    """One sentence per failing reason, prefixed with its own reason code,
+    naming the files behind it; never a bare "failed". Returns ``""``
     when the summary is passing, so no caller can print a false "this run
-    is not a pass" (D9)."""
+    is not a pass" (D9).
+
+    D4: every sentence is gated on ``quality.reason_codes`` — one source
+    of truth, the same derivation ``classify_result`` reports — so the
+    text and ``reason_codes`` can never disagree about which codes this
+    summary carries, even on a directly constructed inconsistent
+    object. A passing summary (``verdict == PASS``) yields ``""``.
+    """
     if quality.verdict == PASS:
         return ""
+    codes = quality.reason_codes
     parts: list[str] = []
     baseline_count = len(quality.baseline_only_files)
-    if baseline_count:
+    if baseline_count and BASELINE_ONLY in codes:
         plural = "" if baseline_count == 1 else "s"
         parts.append(
             f"[{BASELINE_ONLY}] {baseline_count} file{plural} only produced a "
             f"baseline screenshot: {_named(quality.baseline_only_files)}."
         )
     empty_count = len(quality.empty_files)
-    if empty_count:
+    if empty_count and NO_SUCCESSFUL_CAPTURE in codes:
         plural = "" if empty_count == 1 else "s"
         parts.append(
             f"[{NO_SUCCESSFUL_CAPTURE}] {empty_count} file{plural} produced no "
             f"successful screenshots: {_named(quality.empty_files)}."
         )
-    if quality.no_captures:
+    if quality.no_captures and NO_CAPTURES in codes:
         parts.append(f"[{NO_CAPTURES}] The run produced no capture files at all.")
     parts.append("Captur'd did not capture meaningful UI states, so this run is not a pass.")
     return " ".join(parts)
