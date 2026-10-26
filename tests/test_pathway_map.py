@@ -902,6 +902,175 @@ def test_every_manifest_fixture_parses():
             )
 
 
+def test_every_fixture_populates_every_key_main_populated():
+    # D76: D66's "one table, one extractor" is withdrawn — main's claiming
+    # returns. Each extractor claims a table by its OWN heading and header
+    # shape, and more than one extractor may read the same table: that is
+    # main's behaviour, not a data loss. D66 emptied keys main populated —
+    # a count-shaped table under ## 2. Anti-patterns (or a suspicious
+    # heading) fed the summary on main and feeds it again here, WHILE the
+    # same table still feeds the anti-pattern/suspicious extractor. The
+    # D63 single-parse-per-section optimisation stays.
+    #
+    # Part 1 — the shapes D66 emptied, restored (main populated the summary
+    # from each of these tables; D66 leaves it all-None):
+    anti_text = "\n".join([
+        "# Pathway Manifest — one table, two readers",   # line 1
+        "",                                           # line 2
+        "## 1. Pathways Table",                       # line 3
+        "",                                           # line 4
+        "| id | status |",                            # line 5
+        "|---|---|",                                  # line 6
+        "| p1 | WIRED |",                             # line 7
+        "",                                           # line 8
+        "## 2. Anti-patterns",                        # line 9
+        "",                                           # line 10
+        "| Category | Count |",                       # line 11
+        "|---|---|",                                  # line 12
+        "| WIRED | 5 |",                              # line 13
+    ])
+    parsed = parse_manifest_text(anti_text)
+    assert parsed["antiPatterns"] == [
+        {"category": "WIRED", "count": 5, "file": "", "line": "", "quote": ""},
+    ]
+    assert parsed["summary"]["wired"] == 5
+
+    suspicious_text = anti_text.replace("## 2. Anti-patterns", "## Suspicious Calls")
+    parsed = parse_manifest_text(suspicious_text)
+    assert parsed["suspicious"] == [{"category": "WIRED", "count": "5"}]
+    assert parsed["summary"]["wired"] == 5
+
+    # The brief's own shape: a count table under ## Summary sets the
+    # summary while the SAME document still populates antiPatterns from
+    # its own anti-pattern table — no key main populated is empty.
+    both_text = "\n".join([
+        "# Pathway Manifest — summary and anti-patterns together",
+        "",
+        "## Summary",
+        "",
+        "| Category | Count |",
+        "|---|---|",
+        "| WIRED | 5 |",
+        "",
+        "## 2. Anti-patterns",
+        "",
+        "| Anti-Pattern | Count |",
+        "|---|---|",
+        "| duplicate-fetch | 3 |",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+    ])
+    parsed = parse_manifest_text(both_text)
+    assert parsed["summary"]["wired"] == 5
+    assert parsed["antiPatterns"] == [
+        {"category": "duplicate-fetch", "count": 3, "file": "", "line": "",
+         "quote": ""},
+    ]
+
+    # Part 2 — the fixture-level comparison: for EVERY shipped fixture,
+    # routes, plugins, suspicious, summary and pathways each equal what the
+    # fixture's own content implies — the exact values main produces,
+    # written out. A fixture test that only checked pathways is how D66's
+    # loss slipped through. A fixture added later must join the map.
+    expected = {
+        "pathway-manifest-boolean-columns.md": {
+            "summary": {"pathwaysTotal": 3, "wired": 1, "mocked": None,
+                        "unwired": 2, "incomplete": None, "unclear": None,
+                        "routesCount": 1, "pluginsCount": 0},
+            "pathways": [("boolean-yes", "WIRED"), ("boolean-no", "UNWIRED"),
+                         ("unwired-flagged", "UNWIRED")],
+            "routes": [],
+            "plugins": [],
+            "suspicious": [],
+            "antiPatterns": [],
+        },
+        "pathway-manifest-full.md": {
+            "summary": {"pathwaysTotal": 1, "wired": 1, "mocked": None,
+                        "unwired": None, "incomplete": None, "unclear": None,
+                        "routesCount": None, "pluginsCount": None},
+            "pathways": [("capture-start", "WIRED")],
+            "routes": [("POST", "/api/rested-captures/jobs")],
+            "plugins": ["rested-capture", "vault-sync"],
+            "suspicious": [
+                {"call": "`eval(`", "location": "RestedCaptureView.jsx:101",
+                 "why it is risky": "dynamic code execution"},
+                {"call": "`fetch(BASE + \"/catalog\")`",
+                 "location": "CatalogView.jsx:243",
+                 "why it is risky": "URL built from input"},
+            ],
+            "antiPatterns": [("duplicate-fetch", 3), ("console-log-noise", 12),
+                             ("dead-export", None)],
+        },
+        "pathway-manifest-hardening.md": {
+            "summary": {"pathwaysTotal": 4, "wired": 2, "mocked": 1,
+                        "unwired": 1, "incomplete": None, "unclear": None,
+                        "routesCount": None, "pluginsCount": None},
+            "pathways": [("capture-start", "WIRED"),
+                         ("catalog-search", "UNWIRED"),
+                         ("export-rows", "MOCKED"),
+                         ("settings-open", "WIRED")],
+            "routes": [("GET", "/api/captures"), ("", "/api/catalog")],
+            "plugins": [],
+            "suspicious": [],
+            "antiPatterns": [],
+        },
+        "pathway-manifest-sample.md": {
+            "summary": {"pathwaysTotal": 3, "wired": 2, "mocked": None,
+                        "unwired": 1, "incomplete": None, "unclear": None,
+                        "routesCount": 2, "pluginsCount": 0},
+            "pathways": [("capture-start", "WIRED"),
+                         ("capture-job-poll", "WIRED"),
+                         ("catalog-search", "UNWIRED")],
+            "routes": [("GET", "/setup"),
+                       ("POST", "/api/rested-captures/jobs")],
+            "plugins": [],
+            "suspicious": [],
+            "antiPatterns": [],
+        },
+        "sample-verifier-map.json": {
+            "summary": {"pathwaysTotal": 2, "wired": None, "mocked": None,
+                        "unwired": None, "incomplete": None, "unclear": None,
+                        "routesCount": None, "pluginsCount": None},
+            "pathways": [("route-not-found-_api_state", "UNWIRED"),
+                         ("route-not-found-_api_control", "UNWIRED")],
+            "routes": [("", "/api/state"), ("POST", "/api/control")],
+            "plugins": [],
+            "suspicious": [],
+            "antiPatterns": [],
+        },
+        "single-pathway-manifest.md": {
+            "summary": {"pathwaysTotal": 1, "wired": 1, "mocked": None,
+                        "unwired": None, "incomplete": None, "unclear": None,
+                        "routesCount": None, "pluginsCount": None},
+            "pathways": [("home", "WIRED")],
+            "routes": [],
+            "plugins": [],
+            "suspicious": [],
+            "antiPatterns": [],
+        },
+    }
+    shipped = sorted(path.name for path in FIXTURES.iterdir())
+    assert sorted(expected) == shipped, (
+        "a fixture joined capture-foundations — give it an explicit row in "
+        "this map instead of letting it skip the comparison"
+    )
+    for name, want in expected.items():
+        path = FIXTURES / name
+        parsed = (parse_verifier_json(path) if path.suffix == ".json"
+                  else parse_manifest_md(path))
+        assert parsed["summary"] == want["summary"], name
+        assert [(p["id"], p["status"]) for p in parsed["pathways"]] == want["pathways"], name
+        assert [(r["method"], r["path"]) for r in parsed["routes"]] == want["routes"], name
+        assert [p["name"] for p in parsed["plugins"]] == want["plugins"], name
+        assert parsed["suspicious"] == want["suspicious"], name
+        assert [(a["category"], a["count"])
+                for a in parsed["antiPatterns"]] == want["antiPatterns"], name
+
+
 def test_zero_count_is_kept():
     # D4: a count cell of "0" is 0 — not None. An empty count cell stays
     # None; a real zero is a real count.
