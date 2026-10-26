@@ -6,11 +6,25 @@ cover the four cases that matter plus the shape tolerances.
 
 from __future__ import annotations
 
+import builtins
 import copy
+import io
+import json
 import os
+import sys
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
+
+# D5: this suite must run under any invocation directory — `cd tests &&
+# pytest`, an editor runner, xdist — not only when pytest starts at the
+# repo root (where `python -m` puts cwd on sys.path). Anchor the import
+# on this file's own location; a no-op when the root is already there.
+_REPO_ROOT = str(Path(__file__).resolve().parents[1])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 from capturd.shots.quality import (
     BASELINE_ONLY,
@@ -565,8 +579,10 @@ def test_error_text_and_reason_codes_agree_on_inconsistent_object() -> None:
 # The tests below prove that promise for the whole public surface —
 # summarize_capture_quality, build_quality_error, reason_codes, is_passing.
 # A refactor that mutated the input in place would pass every test above
-# and break every downstream caller that reuses the dict; these two tests
-# are the guard against exactly that.
+# and break every downstream caller that reuses the dict —
+# the deepcopy test below is the guard against exactly that (locked
+# D1), and the write recorder (D4) guards the filesystem half: a write
+# is caught by intercepting it, never by listing a directory.
 # ---------------------------------------------------------------------------
 
 
@@ -621,6 +637,217 @@ def test_summary_does_not_mutate_its_input() -> None:
     # is_passing re-reads the (now mutated) input without writing to it:
     # the passing file lost its captures, so the run is still not a pass.
     assert is_passing(result) is False
+
+
+# --- D4: the write recorder — a write is caught by intercepting it, ------
+# never by listing a directory. A listing diff cannot see a sidecar in a
+# subdirectory, a file in /tmp, or a content change to an existing file;
+# a recorder installed before the call sees every write-mode open.
+
+_WRITE_OPEN_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND
+
+
+def _is_write_mode(mode: object) -> bool:
+    """A mode opens for writing when it carries ``w``, ``a``, ``x`` or
+    ``+`` — the read D4 names. ``r+`` is write-capable via ``+`` and is
+    correctly recorded; plain ``r`` / ``rb`` are not."""
+    return isinstance(mode, str) and any(flag in mode for flag in "wax+")
+
+
+@pytest.fixture
+def write_recorder(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
+    """D4: install the write recorder before the call; teardown runs under
+    try/finally (``monkeypatch.undo()``), so a failing assertion still
+    unpatches.
+
+    Recorded, per D4: ``builtins.open`` in a mode containing
+    ``w``/``a``/``x``/``+`` (and its twin reference ``io.open``, which is
+    what ``Path.open`` reaches through); ``os.open`` with any of
+    ``O_WRONLY``/``O_RDWR``/``O_CREAT``/``O_APPEND`` in flags;
+    ``Path.write_text``/``write_bytes``/``touch``/``mkdir``/``unlink``;
+    ``json.dump``. Yields the live list of recorded entries — the proof
+    is that it stays empty across the public calls (D6: the source grep
+    in test_summary_writes_nothing_to_disk is only the tripwire).
+    """
+    recorded: list[str] = []
+
+    real_open = builtins.open
+
+    def recording_open(file: Any, mode: Any = "r", *args: Any, **kwargs: Any) -> Any:
+        if _is_write_mode(mode):
+            recorded.append(f"open({file}, mode={mode!r})")
+        return real_open(file, mode, *args, **kwargs)
+
+    real_os_open = os.open
+
+    def recording_os_open(path: Any, flags: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(flags, int) and flags & _WRITE_OPEN_FLAGS:
+            recorded.append(f"os.open({path}, flags={flags!r})")
+        return real_os_open(path, flags, *args, **kwargs)
+
+    real_json_dump = json.dump
+
+    def recording_json_dump(obj: Any, fp: Any, *args: Any, **kwargs: Any) -> Any:
+        recorded.append(f"json.dump({type(obj).__name__} -> {fp})")
+        return real_json_dump(obj, fp, *args, **kwargs)
+
+    def recording_path_method(name: str) -> Any:
+        original = getattr(Path, name)
+
+        def method(self: Path, *args: Any, **kwargs: Any) -> Any:
+            recorded.append(f"Path.{name}({self})")
+            return original(self, *args, **kwargs)
+
+        return method
+
+    try:
+        monkeypatch.setattr(builtins, "open", recording_open)
+        monkeypatch.setattr(io, "open", recording_open)
+        monkeypatch.setattr(os, "open", recording_os_open)
+        for name in ("write_text", "write_bytes", "touch", "mkdir", "unlink"):
+            monkeypatch.setattr(Path, name, recording_path_method(name))
+        monkeypatch.setattr(json, "dump", recording_json_dump)
+        yield recorded
+    finally:
+        monkeypatch.undo()
+
+
+def _exercise_public_surface(
+    result: Any,
+) -> tuple[CaptureQuality, str, str, list[str], bool]:
+    """Run all four public functions once — summarize_capture_quality,
+    build_quality_error, classify_result, is_passing — and return what
+    they computed, so every recorder assertion can also assert the calls
+    really happened (an empty recording list must never mean "nothing
+    ran")."""
+    quality = summarize_capture_quality(result)
+    message = build_quality_error(quality)
+    verdict, codes = classify_result(result)
+    passing = is_passing(result)
+    return quality, message, verdict, codes, passing
+
+
+def test_write_recorder_catches_real_writes(
+    tmp_path: Path, write_recorder: list[str]
+) -> None:
+    """The test-of-the-test (D4, edge cases 1 and 2): before the recorder
+    is trusted to prove the ABSENCE of writes, prove it records the
+    PRESENCE of one. A recorder installed in the wrong place would record
+    nothing and make every read-only assertion vacuous — each primitive
+    D4 names is fired once, right here, on a throwaway path in tmp_path.
+    """
+    throwaway = tmp_path / "throwaway.txt"
+
+    # Edge case 1: open(path, "a") is a write-mode open and is caught.
+    with open(throwaway, "a") as handle:
+        handle.write("sidecar")
+    assert any(
+        entry.startswith("open(") and "mode='a'" in entry
+        for entry in write_recorder
+    ), write_recorder
+
+    # Edge case 2: os.open(path, os.O_WRONLY) is caught.
+    fd = os.open(throwaway, os.O_WRONLY)
+    os.close(fd)
+    assert any(entry.startswith("os.open(") for entry in write_recorder), (
+        write_recorder
+    )
+
+    # The rest of D4's list, each proven to fire on a real write.
+    (tmp_path / "cache.json").write_text("{}")
+    assert any("Path.write_text" in entry for entry in write_recorder)
+    (tmp_path / "blob.bin").write_bytes(b"\x00")
+    assert any("Path.write_bytes" in entry for entry in write_recorder)
+    (tmp_path / "marker").touch()
+    assert any("Path.touch" in entry for entry in write_recorder)
+    (tmp_path / "subdir").mkdir()
+    assert any("Path.mkdir" in entry for entry in write_recorder)
+    (tmp_path / "marker").unlink()
+    assert any("Path.unlink" in entry for entry in write_recorder)
+    with open(tmp_path / "dumped.json", "w") as handle:
+        json.dump({}, handle)
+    assert any(entry.startswith("json.dump(") for entry in write_recorder)
+
+    # The recorder counts writes, not reads: no read-mode open is ever
+    # recorded, so the proof below cannot be inflated by ordinary reads.
+    with open(throwaway, "r") as handle:
+        handle.read()
+    assert not any("mode='r'" in entry for entry in write_recorder), write_recorder
+
+
+def test_quality_module_never_opens_for_writing(
+    write_recorder: list[str],
+) -> None:
+    """D4 (edge case 4) — the proof: all four public functions run under
+    the installed write recorder and the recorded list stays empty, so a
+    write-mode open anywhere in capturd/shots/quality.py turns this test
+    red. Which is proof, which is tripwire (D6): THIS assertion is the
+    proof; the source grep kept in test_summary_writes_nothing_to_disk is
+    only the tripwire — a cheap second pair of eyes over primitives the
+    recorder does not intercept (shutil, tempfile, os.makedirs).
+    """
+    result = _mixed_result()
+    quality, message, verdict, codes, passing = _exercise_public_surface(result)
+
+    # Non-vacuous: the four calls really computed the expected verdict,
+    # so an empty recording list cannot mean "nothing ran".
+    assert (verdict, codes) == (FAIL, [BASELINE_ONLY, NO_SUCCESSFUL_CAPTURE])
+    assert quality.verdict == FAIL
+    assert message.startswith("[BASELINE_ONLY] 1 file only produced")
+    assert passing is False
+
+    # Every branch of the module, also under the recorder: no-captures,
+    # empty-only, a clean passing run, and the junk-tolerance shapes.
+    for shape in (
+        {},
+        {"results": []},
+        {"results": [42, None]},
+        {"results": [{"file": "dead.png", "manifest": "junk"}]},
+        _result(_file("rested.png", [_capture("baseline", True)])),
+        _result(
+            _file(
+                "page.png",
+                [_capture("baseline", True), _capture("modal", True)],
+            )
+        ),
+    ):
+        summarize_capture_quality(shape)
+        build_quality_error(summarize_capture_quality(shape))
+        classify_result(shape)
+        is_passing(shape)
+
+    assert write_recorder == []
+
+
+def test_read_only_tests_do_not_depend_on_cwd(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, write_recorder: list[str]
+) -> None:
+    """D5 (edge case 3): the read-only proof runs from a directory that is
+    not the repo root. W0-15-r1's listing test pinned Path.cwd() to the
+    repo root and guarded on "capturd" being in the listing — it would
+    fail under `cd tests && pytest` before asserting anything about
+    writes. Here the cwd is moved to tmp_path first, so the run is
+    deterministic wherever pytest was started from: the recorder must
+    still be empty and the only listing kept is of tmp_path itself,
+    before and after.
+    """
+    monkeypatch.chdir(tmp_path)
+    assert Path.cwd().resolve() == tmp_path.resolve()
+    before = sorted(os.listdir(tmp_path))
+    # This cwd is not the repo root — the old "capturd" in listing guard
+    # would have died right here. Nothing here assumes the repo layout.
+    assert "capturd" not in before
+
+    result = _mixed_result()
+    quality, message, verdict, codes, passing = _exercise_public_surface(result)
+    assert verdict == FAIL and passing is False  # the calls really ran
+    for shape in ({}, {"results": []}):
+        classify_result(shape)
+        is_passing(shape)
+
+    assert Path.cwd().resolve() == tmp_path.resolve()
+    assert sorted(os.listdir(tmp_path)) == before
+    assert write_recorder == []
 
 
 def test_summary_writes_nothing_to_disk() -> None:
