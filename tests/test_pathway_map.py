@@ -1002,13 +1002,17 @@ def test_every_fixture_populates_every_key_main_populated():
     # returns. Each extractor claims a table by its OWN heading and header
     # shape, and more than one extractor may read the same table: that is
     # main's behaviour, not a data loss. D66 emptied keys main populated —
-    # a count-shaped table under ## 2. Anti-patterns (or a suspicious
-    # heading) fed the summary on main and feeds it again here, WHILE the
-    # same table still feeds the anti-pattern/suspicious extractor. The
-    # D63 single-parse-per-section optimisation stays.
+    # a count-shaped table under a suspicious heading fed the summary on
+    # main and feeds it again here, WHILE the same table still feeds the
+    # suspicious extractor. D86 narrows the anti-pattern intersection: a
+    # count-shaped table under ## 2. Anti-patterns populates the summary
+    # and fabricates NO records — records require the record shape, the
+    # heading alone is not one. The D63 single-parse-per-section
+    # optimisation stays.
     #
-    # Part 1 — the shapes D66 emptied, restored (main populated the summary
-    # from each of these tables; D66 leaves it all-None):
+    # Part 1 — the summary keys D66 emptied, restored (main populated the
+    # summary from these tables; D66 leaves them all-None); the
+    # anti-pattern half is re-scoped by D86:
     anti_text = "\n".join([
         "# Pathway Manifest — one table, two readers",   # line 1
         "",                                           # line 2
@@ -1025,9 +1029,9 @@ def test_every_fixture_populates_every_key_main_populated():
         "| WIRED | 5 |",                              # line 13
     ])
     parsed = parse_manifest_text(anti_text)
-    assert parsed["antiPatterns"] == [
-        {"category": "WIRED", "count": 5, "file": "", "line": "", "quote": ""},
-    ]
+    # D86: no record is fabricated from summary rows — the count-shaped
+    # table populates the summary only.
+    assert parsed["antiPatterns"] == []
     assert parsed["summary"]["wired"] == 5
 
     suspicious_text = anti_text.replace("## 2. Anti-patterns", "## Suspicious Calls")
@@ -2493,9 +2497,11 @@ def test_more_than_one_extractor_may_read_the_same_table():
     # extractor claims a table by its OWN heading and header shape, and
     # MORE THAN ONE extractor may read the same table: a count-shaped
     # table (| Category | Count |) whose rows are count rows feeds BOTH
-    # the summary and the anti-pattern extractor under ## 2. Anti-patterns,
-    # and both the summary and the suspicious extractor under a suspicious
-    # heading. Both keys populated is main's behaviour, not a data loss.
+    # the summary and the suspicious extractor under a suspicious heading.
+    # D86 narrows one intersection: under ## 2. Anti-patterns the
+    # count-shaped table feeds the summary ONLY — records are never
+    # fabricated from summary rows, so the anti-pattern reader there needs
+    # the record shape, not merely the heading.
     # (Amends the D66 test, which pinned the withdrawn one-extractor rule;
     # the restored assertions are a superset of what main populated.)
     anti_text = "\n".join([
@@ -2514,12 +2520,11 @@ def test_more_than_one_extractor_may_read_the_same_table():
         "| WIRED | 5 |",                                # line 13
     ])
     parsed = parse_manifest_text(anti_text)
-    # Both readers: the anti-pattern extractor (its heading and its
-    # category-word header both match) AND the summary extractor (the
-    # count-table header shape matches wherever the table sits).
-    assert parsed["antiPatterns"] == [
-        {"category": "WIRED", "count": 5, "file": "", "line": "", "quote": ""},
-    ]
+    # D86: the anti-pattern reader needs the record shape, not merely the
+    # heading — a count-shaped table under ## 2. Anti-patterns feeds the
+    # summary (D76's restoration stands) and fabricates NO antiPatterns
+    # entries; the summary extractor is its only reader now.
+    assert parsed["antiPatterns"] == []
     assert parsed["summary"]["wired"] == 5
 
     # Under ## Summary no heading-specific extractor matches, so only the

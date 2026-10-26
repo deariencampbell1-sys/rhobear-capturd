@@ -70,6 +70,12 @@ behaviour. In a section no extractor reads — ``## Notes``, ``## Legend``,
 backtick or an unrecognised count header is ignored, not refused, and
 every refusal in a consumed section is unchanged.
 
+D86: an anti-pattern record is never fabricated from summary rows — a
+count-shaped table under an anti-patterns heading populates the summary
+(D76's restoration) and yields no records; the anti-pattern extractor
+reads a table by its heading and a category-word header that is not the
+count-table shape (D68's alias shapes keep their reading).
+
 D85: a count-shaped table the parser cannot build — a header collapsed
 over its separator, or a two-column run of pipe lines with no separator —
 inside a section no extractor reads is never silently dropped: it
@@ -269,12 +275,20 @@ def _suspicious_reads(heading: str | None, table: dict[str, Any]) -> bool:
 
 
 def _anti_patterns_reads(heading: str | None, table: dict[str, Any]) -> bool:
-    """D84: the anti-pattern extractor's own gate — an anti-pattern
-    heading and a category word in the header."""
+    """D84/D86: the anti-pattern extractor's own gate — an anti-pattern
+    heading and a category word in the header that is not the count-table
+    shape: a count-shaped table is the summary extractor's (D24 — its
+    rows are summary rows wherever the table sits), and the heading alone
+    fabricates no records from them (D86). D68's alias shapes —
+    ``| Anti-Pattern | Count | File | Line | Quote |``,
+    ``| Category | Snippet|Code |`` — are not count-shaped and keep
+    their reading."""
     if not re.search(_ANTI_PATTERN_HEADING_RE, str(heading or ""), re.I):
         return False
     headers = [h.lower() for h in table["headers"]]
-    return any(re.search(r"category|type|anti-?pattern|pattern", h) for h in headers)
+    if not any(re.search(r"category|type|anti-?pattern|pattern", h) for h in headers):
+        return False
+    return not _is_count_table(table["headers"])
 
 
 def _section_is_consumed(heading: str | None, tables: list[dict[str, Any]]) -> bool:
@@ -715,10 +729,14 @@ def _is_count_table(headers: list[str]) -> bool:
 # D76: D66's one-table-one-extractor exclusivity is withdrawn and main's
 # claiming is restored — each extractor claims a table by its OWN heading
 # and header shape, and more than one extractor may read the same table
-# (a count-shaped table under ## 2. Anti-patterns feeds the summary AND
-# the anti-pattern extractor; that is main's behaviour, not a data loss).
-# The gates below are the ones each extractor applies to the shared parsed
-# tables; the D63 single-parse-per-section optimisation stays.
+# (a count-shaped table under a suspicious heading feeds the summary AND
+# the suspicious extractor; that is main's behaviour, not a data loss).
+# D86 narrows one intersection: a count-shaped table under an
+# anti-patterns heading feeds the summary ONLY — the anti-pattern
+# extractor reads a non-count-shaped header there, so records are never
+# fabricated from summary rows. The gates below are the ones each
+# extractor applies to the shared parsed tables; the D63
+# single-parse-per-section optimisation stays.
 
 # D7: a count row's LABEL decides WHICH count the row sets — WIRED /
 # MOCKED / UNWIRED / INCOMPLETE / UNCLEAR / TOTAL PATHWAYS / ROUTES /
