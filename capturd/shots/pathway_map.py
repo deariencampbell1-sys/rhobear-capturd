@@ -83,7 +83,14 @@ inside a section no extractor reads is never silently dropped: it
 refuses naming the section and the line, exactly as a consumed section's
 own refusal would. The count vocabulary is the summary's own (count
 words in header cells, count rows in the body); a shapeless table with
-no count anywhere still parses untouched (D77).
+no count anywhere still parses untouched (D77). D89: the symmetry runs
+in the safe direction — the same scan runs in a CONSUMED section too,
+after the strict parse: a count-shaped construct the parser cannot
+build refuses there exactly as D85 refuses it in an unconsumed one —
+never an all-None summary with no error, which is a silent drop: the
+caller cannot tell "no counts" from "counts I could not read". The
+scan fires only where no table was built, so no refusal that fires
+today is displaced.
 
 Refusals — every one of these constructs raises ``PathwayMapError``
 rather than half-fill. The list is data (``REFUSALS`` below, D49) and
@@ -412,19 +419,34 @@ def parse_manifest_text(raw: str, source: str = "<pasted manifest>") -> dict[str
     for sec in sections:
         body = "\n".join(sec["body"])
         probe = _extract_tables(body, sec["start"] + 1, refuse=False)
+        section_name = str(sec["heading"]) if sec["heading"] else "(document top)"
         if _section_is_consumed(sec["heading"], probe):
-            parsed_sections.append(
-                (sec, _extract_tables(body, sec["start"] + 1, row_lines=True))
-            )
+            tables = _extract_tables(body, sec["start"] + 1, row_lines=True)
+            # D89: D85's symmetry, in the safe direction — the scan runs
+            # in a CONSUMED section too, AFTER the strict parse above. A
+            # count-shaped construct the parser cannot build (a two-column
+            # run of pipe lines with no separator, or a header collapsed
+            # to fewer than two cells over a two-column separator) built
+            # no table, so no extractor gate ever saw it and its counts
+            # would read as all-None — the silent drop D85 forbids in an
+            # unconsumed section. It refuses here the same way, naming
+            # the section and the line. The scan judges only constructs
+            # the table parser cannot build, so it can never displace a
+            # refusal the strict parse raises nor change a read any
+            # extractor makes.
+            refusal = _count_intent_refusal(sec["body"], sec["start"] + 1, section_name)
+            if refusal is not None:
+                raise PathwayMapError(refusal)
+            parsed_sections.append((sec, tables))
         else:
             # D85: a count-shaped-by-intent construct the parser cannot
             # build (a collapsed header over a separator, a two-column run
             # of pipe lines with no separator) never silently drops its
             # counts in a section no extractor reads — refuse, naming the
             # section and the line, exactly as a consumed section's own
-            # refusal would. A shapeless table with no count anywhere
-            # still parses untouched (D77).
-            section_name = str(sec["heading"]) if sec["heading"] else "(document top)"
+            # refusal would (and, since D89, as its scan actually does).
+            # A shapeless table with no count anywhere still parses
+            # untouched (D77).
             refusal = _count_intent_refusal(sec["body"], sec["start"] + 1, section_name)
             if refusal is not None:
                 raise PathwayMapError(refusal)
@@ -1284,20 +1306,24 @@ def _is_separator_line(line: str) -> bool:
 
 
 def _count_intent_refusal(lines: list[str], first_line: int, section: str) -> str | None:
-    """D85: the refusal for a count-shaped-by-intent table construct the
-    table parser cannot build — a collapsed header over a separator, or a
-    two-column run of pipe lines with no separator — inside a section no
-    extractor reads. `parse_manifest_text` runs this scan on an UNCONSUMED
-    section only: there the construct would silently drop its counts (the
-    probe built no table, so no extractor gate ever saw it), and it
-    refuses instead, naming the section and the line, exactly as a
-    consumed section's own refusal would. The count vocabulary is the
+    """D85/D89: the refusal for a count-shaped-by-intent table construct
+    the table parser cannot build — a collapsed header over a separator,
+    or a two-column run of pipe lines with no separator.
+    `parse_manifest_text` runs this scan on EVERY section. In an
+    UNCONSUMED section the construct would silently drop its counts (the
+    probe built no table, so no extractor gate ever saw it); in a
+    CONSUMED section the strict parse built no table for it either, so
+    the extractors would read all-None counts with no error (D89 — the
+    same silent drop in the sections that matter most). It refuses
+    instead, naming the section and the line, in both alike. The count
+    vocabulary is the
     summary's own — `_is_count_cell` for header words (D75's containment
     check), `_reads_as_count_row` for body rows (D38's deformed-count
     shape, D60's demotion included) — no new words. An INTACT header over
-    a separator is never judged here: the probe built that table and
-    D84's gates already decided it. A misaligned or backtick-broken row
-    is untrustworthy and decides nothing (D77)."""
+    a separator is never judged here: the probe (unconsumed) or the
+    strict parse (consumed) built that table and D84's gates already
+    decided it. A misaligned or backtick-broken row is untrustworthy and
+    decides nothing (D77)."""
     def cells_of(line: str) -> list[str] | None:
         if not re.search(r"(?<!\\)\|", line):
             return None
