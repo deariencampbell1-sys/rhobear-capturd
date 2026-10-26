@@ -251,7 +251,14 @@ def parse_verifier_json_text(text: str, source: str = "<pasted map>") -> dict[st
     # use: the no-pathways/no-routes refusal below is unchanged.
     declared_anti_patterns = data.get("antiPatterns")
     if declared_anti_patterns is not None and not isinstance(declared_anti_patterns, list):
-        raise PathwayMapError("verifier map 'antiPatterns' must be a list")
+        # D21: name the field AND the type it got — a dict yields its keys
+        # and a string its characters, so a bare "must be a list" hides
+        # what actually arrived and the caller cannot tell a shape bug
+        # from a payload bug.
+        raise PathwayMapError(
+            "verifier map 'antiPatterns' must be a list, got "
+            f"{type(declared_anti_patterns).__name__}"
+        )
     for entry in declared_anti_patterns or []:
         if not isinstance(entry, dict):
             continue
