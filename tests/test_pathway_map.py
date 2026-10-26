@@ -709,6 +709,31 @@ def test_verifier_anti_pattern_entry_must_be_a_mapping():
         )
 
 
+def test_anti_pattern_entry_without_category_is_refused():
+    # D27: a mapping entry with no usable category is REFUSED, not skipped
+    # — mirroring D22 — so the returned array can never be shorter than
+    # what the feed declared. The refusal names the entry's index. A
+    # falsy-but-present category (0, "") is no category at all.
+    for entries, index in (
+        ([{"category": 0}], 0),
+        ([{"type": ""}], 0),
+        ([{"category": "ok"}, {"count": 3}], 1),
+    ):
+        text = json.dumps({
+            "antiPatterns": entries,
+            "checks": {"api-wiring": {"findings": [{"id": "f1", "path": "/api/x"}]}},
+        })
+        with pytest.raises(PathwayMapError) as excinfo:
+            parse_verifier_json_text(text)
+        message = str(excinfo.value)
+        assert f"index {index}" in message, (
+            f"refusal must name the entry's index ({index}): {message}"
+        )
+        assert "category" in message, (
+            f"refusal must name the missing thing (category): {message}"
+        )
+
+
 def test_verifier_anti_patterns_round_trip():
     # D23: the verifier's own `antiPatterns` array is parsed into the
     # returned map. The key is part of the returned shape and the feed
