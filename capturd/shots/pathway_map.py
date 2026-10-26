@@ -20,8 +20,8 @@ as the equivalent file. Output is deterministic: same input bytes, same dict
 
 The parser refuses rather than half-fill: a table is returned with every row
 or the parse raises ``PathwayMapError`` — never part of one. Counts come from
-count tables — tables whose header SHAPE is exactly two columns, a category
-word first and a count word second (D24) — wherever they sit; a three-column
+count tables — tables whose header SHAPE is exactly two columns carrying a
+category word and a count word in either order (D24, D59) — wherever they sit; a three-column
 table sets no counts and raises nothing, and a two-column pathway table
 (``| id | status |``) is not a count table because its second header is not
 a count word. The refusal is decided once a line is KNOWN to be a
@@ -376,8 +376,8 @@ _SUMMARY_COUNT_KEYS = (
 )
 
 # D24: a count table is identified by its header SHAPE, not by the section
-# heading — exactly two columns, the first a category word, the second a
-# count word. Wherever such a table sits, its rows are count rows: there is
+# heading — exactly two columns carrying a category word and a count word
+# in either order (D59). Wherever such a table sits, its rows are count rows: there is
 # no "wrong place" for a count table to be, so a real feed whose counts
 # live under ## Status Overview or ## Breakdown reads them instead of
 # raising. A three-column table is never a count table, and a two-column
@@ -413,17 +413,35 @@ _CATEGORY_WORDS_TEXT = ", ".join(sorted(_CATEGORY_WORDS))
 _EMPHASIS_RE = re.compile(r"[\s*_`]+")
 
 
-def _is_count_table(headers: list[str]) -> bool:
-    """D24: the count-table header shape — exactly two columns, the first a
-    category word, the second a count word. This decides WHERE counts may
-    be read from; the section heading is irrelevant. D31: the comparison
-    runs on the header cells with markdown emphasis removed (`*`, `_`,
-    backticks and whitespace stripped), so a bold or italic header is
-    still a count table — never a silent drop of every count under it."""
+def _count_table_order(headers: list[str]) -> tuple[int, int] | None:
+    """D24/D59: the count-table header shape — exactly two columns carrying
+    a category word and a count word in EITHER order. Returns the
+    ``(label_cell_index, count_cell_index)`` a recognised header's rows are
+    read with, or None when the header is not a count-table shape. This
+    decides WHERE counts may be read from; the section heading is
+    irrelevant. D31: the comparison runs on the header cells with markdown
+    emphasis removed (`*`, `_`, backticks and whitespace stripped), so a
+    bold or italic header is still a count table — never a silent drop of
+    every count under it. D59: a feed that writes its count column first
+    (``| Count | Category |``) is the same shape — recognised and read,
+    never an all-None summary with no error."""
     if len(headers) != 2:
-        return False
+        return None
     first, second = (_EMPHASIS_RE.sub("", header).lower() for header in headers)
-    return first in _CATEGORY_WORDS and second in _COUNT_WORDS
+    if first in _CATEGORY_WORDS and second in _COUNT_WORDS:
+        return (0, 1)
+    if first in _COUNT_WORDS and second in _CATEGORY_WORDS:
+        return (1, 0)
+    return None
+
+
+def _is_count_table(headers: list[str]) -> bool:
+    """D24: the count-table header shape — exactly two columns, a category
+    word and a count word in either column order (D59). This decides WHERE
+    counts may be read from; the section heading is irrelevant. See
+    `_count_table_order` for the shape's details (D31 emphasis stripping
+    included)."""
+    return _count_table_order(headers) is not None
 
 
 # D7: a count row's LABEL decides WHICH count the row sets — WIRED /
@@ -522,19 +540,22 @@ def _extract_summary(sections: list[dict[str, Any]]) -> dict[str, Any]:
         # pathway row shaped `| p1 | WIRED | 3 |` lives in a three-column
         # table, which is never a count table, so it cannot set a count.
         for table in _extract_tables("\n".join(sec["body"]), sec["start"] + 1):
-            if not _is_count_table(table["headers"]):
+            order = _count_table_order(table["headers"])
+            if order is None:
                 continue
+            label_index, count_index = order
             # Counts come from the table's CELLS only, never from prose.
-            # The row label decides WHICH count the row sets (D7).
+            # The row label decides WHICH count the row sets (D7); which
+            # cell carries the label is the header's column order (D59).
             for row in table["rows"]:
-                match = _count_label_match(row[0])
+                match = _count_label_match(row[label_index])
                 if not match:
                     continue
                 key = match.group(1).lower()
                 # D25: one parser for every count — the cell itself goes
                 # through `_count_from_cell`, exactly like an anti-pattern
                 # entry's count, so the two sites cannot disagree.
-                val = _count_from_cell(row[1])
+                val = _count_from_cell(row[count_index])
                 if val is None:
                     # An empty or digit-less cell sets nothing — a real
                     # zero is a real count (D4).
@@ -989,14 +1010,21 @@ def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, Any]]:
         # refused wherever the cell sits.
         if len(headers) == 2 and not _is_count_table(headers):
             for row in rows:
+                # D38: the probe reads rows in the NORMAL column order only.
+                # A reversed probe would read a pathway table's status cell
+                # (`| p1 | WIRED |`) as a count label over the id's leading
+                # integer and refuse every two-column pathway table — the
+                # header shape (D24/D59), not a row probe, decides whether
+                # a table counts.
                 if _count_label_match(row[0]) and _count_from_cell(row[1]) is not None:
                     raise PathwayMapError(
                         f"table header at line {first_line + i} is "
                         f"'{' | '.join(headers)}' — its rows read like count "
                         f"rows (count label '{row[0]}' with a numeric count) "
                         "but the header is not a recognised count-table "
-                        "header (category word first, count word second; "
-                        "accepted category words: "
+                        "header (accepted orders: a category word first and "
+                        "a count word second, or a count word first and a "
+                        "category word second; accepted category words: "
                         f"{_CATEGORY_WORDS_TEXT}; accepted count words: "
                         f"{_COUNT_WORDS_TEXT}) — refusing rather than "
                         "returning nulls"
