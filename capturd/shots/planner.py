@@ -1075,7 +1075,12 @@ def _classify_sweep(node: _Node) -> Optional[ControlKind]:
     # D21: keyword values read folded to lowercase ("role="TAB"" is "tab").
     role = _keyword_value(node, "role")
     aria_expanded = attrs.get("aria-expanded")
-    aria_current = attrs.get("aria-current")
+    aria_current = _keyword_value(node, "aria-current")
+    # D57: aria-current is a value keyword (page|step|location|date|time|true,
+    # D21 folded lowercase) and "false" means NOT current — the old presence
+    # check marked an aria-current="false" control current and classified it
+    # PAGE; it plans as a normal action instead.
+    current = aria_current in ("page", "step", "location", "date", "time", "true")
     aria_has_popup = attrs.get("aria-haspopup")
     data_toggle = (attrs.get("data-bs-toggle") or attrs.get("data-toggle") or "").lower()
     target = (
@@ -1090,7 +1095,7 @@ def _classify_sweep(node: _Node) -> Optional[ControlKind]:
         return ControlKind.TAB
     if (
         navigation
-        or aria_current is not None
+        or current
         or "data-page" in attrs
         or "data-view" in attrs
         or "data-section" in attrs
