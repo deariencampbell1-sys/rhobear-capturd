@@ -142,10 +142,11 @@ def test_summary_counts_come_from_cells_not_prose():
 
 
 def test_summary_ignores_pathway_rows():
-    # D1: counts come from the summary section's cells only — a pathway row
-    # shaped `| p1 | WIRED | 3 |` lives in a pathways table and must never
-    # set summary["wired"] = 3. And with no summary-named section at all,
-    # every count stays None.
+    # D24: counts come from count TABLES only (two columns, category word
+    # then count word) — a pathway row shaped `| p1 | WIRED | 3 |` lives in
+    # a three-column table, which is never a count table, so it must never
+    # set summary["wired"] = 3. And with no count table anywhere, every
+    # count stays None.
     text = "\n".join([
         "# Pathway Manifest — row shape",
         "",
@@ -178,10 +179,10 @@ def test_summary_ignores_pathway_rows():
 
 
 def test_accounting_heading_is_not_a_summary_section():
-    # D1': the summary heading match is word-anchored with an explicit
-    # allow-list — "Accounting" contains the letters "count" but is not a
-    # summary section, so its `| WIRED | 3 |` row must not leak 3 into
-    # summary["wired"]. A heading outside the allow-list stays outside.
+    # D24: the heading never mattered — this stray two-cell pipe table
+    # (`| WIRED | 3 |` over a separator, no body rows) is not a count table
+    # under ANY heading: its headers ("WIRED", "3") are not a category word
+    # followed by a count word. No counts, no error.
     text = "\n".join([
         "# Pathway Manifest — accounting heading",
         "",
@@ -203,8 +204,9 @@ def test_accounting_heading_is_not_a_summary_section():
 
 
 def test_totals_heading_is_a_summary_section():
-    # D1': the allow-list also covers headings the old bare substring
-    # missed — "## Totals" is a summary section and still yields its counts.
+    # D24: `## Totals` yields its counts because its table has the count-
+    # table header shape (`| Category | Count |`) — not because of the
+    # heading. The heading name is decorative.
     text = "\n".join([
         "# Pathway Manifest — totals heading",
         "",
@@ -330,32 +332,6 @@ def test_two_column_pathway_table_is_not_a_count_table():
     assert parsed["summary"]["wired"] == 1
     assert parsed["summary"]["unwired"] is None
     assert [p["id"] for p in parsed["pathways"]] == ["p1", "p2"]
-
-
-def test_summary_table_without_a_heading_is_decided():
-    # D8, decided: a summary-shaped table outside a summary-named section is
-    # REFUSED ("summary table outside a summary section") — never silently
-    # ignored, never read as summary. Reading it as summary would void the
-    # D1' heading gate (## Accounting must not set counts); silently
-    # ignoring it would hide a misplaced summary block behind an all-None
-    # summary.
-    text = "\n".join([
-        "# Pathway Manifest — misplaced summary",
-        "",
-        "## Notes",
-        "",
-        "| Category | Count |",
-        "|---|---|",
-        "| **WIRED** | 2 |",
-        "",
-        "## 1. Pathways Table",
-        "",
-        "| id | status |",
-        "|---|---|",
-        "| p1 | WIRED |",
-    ])
-    with pytest.raises(PathwayMapError, match="summary table outside a summary section"):
-        parse_manifest_text(text)
 
 
 def test_both_flavours_return_the_same_key_set():

@@ -19,9 +19,12 @@ as the equivalent file. Output is deterministic: same input bytes, same dict
 (no timestamps, no host paths).
 
 The parser refuses rather than half-fill: a table is returned with every row
-or the parse raises ``PathwayMapError`` — never part of one — and a
-summary-shaped table outside a summary-named section is refused, not
-silently ignored. The refusal is decided once a line is KNOWN to be a
+or the parse raises ``PathwayMapError`` — never part of one. Counts come from
+count tables — tables whose header SHAPE is exactly two columns, a category
+word first and a count word second (D24) — wherever they sit; a three-column
+table sets no counts and raises nothing, and a two-column pathway table
+(``| id | status |``) is not a count table because its second header is not
+a count word. The refusal is decided once a line is KNOWN to be a
 table, never during header detection: a prose line that carries a pipe
 and a stray backtick is skipped like any other non-table line, not a
 parse abort (D17).
@@ -329,14 +332,37 @@ _SUMMARY_COUNT_KEYS = (
     "pluginsCount",
 )
 
-# D7: a count row is exactly TWO cells — `| <LABEL> | <N> |` (the label may
-# be bold-wrapped; the leading/trailing pipes are optional per GFM). The
-# pattern is anchored to the whole line, so a pathway row like
-# `| p1 | WIRED | 3 |` — WIRED in a middle cell — can never set a count,
-# even under a ## Summary heading. D19: the count cell may be grouped —
-# digit runs separated by `,` or spaces — and is read WHOLE by stripping
-# the separators before the integer, so "1,234" is 1234, never the
-# truncated first run 1 and never a silent None.
+# D24: a count table is identified by its header SHAPE, not by the section
+# heading — exactly two columns, the first a category word, the second a
+# count word. Wherever such a table sits, its rows are count rows: there is
+# no "wrong place" for a count table to be, so a real feed whose counts
+# live under ## Status Overview or ## Breakdown reads them instead of
+# raising. A three-column table is never a count table, and a two-column
+# pathway table (| id | status |) is not one because `status` is not a
+# count word.
+_COUNT_WORDS = frozenset(
+    {"count", "counts", "n", "total", "totals", "paths", "pathways", "#"}
+)
+_CATEGORY_WORDS = frozenset(
+    {"category", "status", "kind", "label", "state", "type", "name"}
+)
+
+
+def _is_count_table(headers: list[str]) -> bool:
+    """D24: the count-table header shape — exactly two columns, the first a
+    category word, the second a count word. This decides WHERE counts may
+    be read from; the section heading is irrelevant."""
+    if len(headers) != 2:
+        return False
+    first, second = (header.strip().lower() for header in headers)
+    return first in _CATEGORY_WORDS and second in _COUNT_WORDS
+
+
+# D7: a count row's LABEL decides WHICH count the row sets — WIRED /
+# MOCKED / UNWIRED / INCOMPLETE / UNCLEAR / TOTAL PATHWAYS / ROUTES /
+# PLUGINS, optionally bold-wrapped. D19: the count cell may be grouped —
+# digit runs separated by `,` or spaces — and is read WHOLE, so "1,234"
+# is 1234, never the truncated first run 1 and never a silent None.
 _COUNT_ROW_RE = re.compile(
     r"^\s*\|?\s*\*{0,2}(WIRED|MOCKED|UNWIRED|INCOMPLETE|UNCLEAR"
     r"|TOTAL PATHWAYS|ROUTES|PLUGINS)\*{0,2}\s*\|\s*(\d+(?:[,\s]+\d+)*)\s*\|?\s*$",
@@ -401,78 +427,42 @@ def _split_sections(raw: str) -> list[dict[str, Any]]:
 def _extract_summary(sections: list[dict[str, Any]]) -> dict[str, Any]:
     summary: dict[str, Any] = {key: None for key in _SUMMARY_COUNT_KEYS}
     for sec in sections:
-        # Counts come from the summary section ONLY: the body of the section
-        # whose heading carries a summary word — word-anchored against the
-        # allow-list summary/count(s)/total(s)/metric(s), so "Accounting",
-        # "Discount" or "Counter" is not a summary section while "Totals"
-        # is. A pathway row shaped `| p1 | WIRED | 3 |` sits in a pathways
-        # table and must never set summary["wired"] — if no such section
-        # exists, counts stay None.
-        if not re.search(
-            r"\b(summary|counts?|totals?|metrics?)\b",
-            str(sec.get("heading") or ""),
-            re.I,
-        ):
-            # D8: a summary-shaped table outside a summary-named section is
-            # a decision, not an accident — refused, never silently ignored
-            # and never read as summary (that would void this gate).
-            _refuse_misplaced_summary_table(sec)
-            continue
-        text = "\n".join(sec["body"])
-        # IGNORECASE makes the uppercase spellings cover every case variant;
-        # the two upstream "unfinished" status words map to no downstream
-        # branch, so they are gone. ROUTES and PLUGINS ride the same cell
-        # shape — counts come from summary CELLS only, never from prose or
-        # a pathway row's text, and only from an exactly-two-cell row (D7).
-        for line in text.split("\n"):
-            match = _COUNT_ROW_RE.match(line)
-            if not match:
+        # D24: the section heading no longer decides anything — every table
+        # in the document is checked against the count-table header shape,
+        # and a matching table's rows are read wherever the table sits. A
+        # pathway row shaped `| p1 | WIRED | 3 |` lives in a three-column
+        # table, which is never a count table, so it cannot set a count.
+        for table in _extract_tables("\n".join(sec["body"]), sec["start"] + 1):
+            if not _is_count_table(table["headers"]):
                 continue
-            key = match.group(1).lower()
-            # D19, decided: read whole — strip the `,`/space grouping before
-            # the integer, so "1,234" is 1234, never the truncated run 1.
-            val = int(re.sub(r"[,\s]", "", match.group(2)))
-            if "unwire" in key:
-                summary["unwired"] = val
-            elif "wire" in key:
-                summary["wired"] = val
-            elif "mock" in key:
-                summary["mocked"] = val
-            elif "incomplete" in key:
-                summary["incomplete"] = val
-            elif "unclear" in key:
-                summary["unclear"] = val
-            elif "total" in key:
-                summary["pathwaysTotal"] = val
-            elif "route" in key:
-                summary["routesCount"] = val
-            elif "plugin" in key:
-                summary["pluginsCount"] = val
+            # Counts come from the table's CELLS only, never from prose.
+            # The row label decides WHICH count the row sets (D7).
+            for row in table["rows"]:
+                match = _COUNT_ROW_RE.match("| " + " | ".join(row) + " |")
+                if not match:
+                    continue
+                key = match.group(1).lower()
+                # D19, decided: read whole — strip the `,`/space grouping
+                # before the integer, so "1,234" is 1234, never the
+                # truncated run 1.
+                val = int(re.sub(r"[,\s]", "", match.group(2)))
+                if "unwire" in key:
+                    summary["unwired"] = val
+                elif "wire" in key:
+                    summary["wired"] = val
+                elif "mock" in key:
+                    summary["mocked"] = val
+                elif "incomplete" in key:
+                    summary["incomplete"] = val
+                elif "unclear" in key:
+                    summary["unclear"] = val
+                elif "total" in key:
+                    summary["pathwaysTotal"] = val
+                elif "route" in key:
+                    summary["routesCount"] = val
+                elif "plugin" in key:
+                    summary["pluginsCount"] = val
     return summary
-
-
-def _refuse_misplaced_summary_table(sec: dict[str, Any]) -> None:
-    """D8, decided: a summary-shaped table outside a summary-named section is
-    REFUSED ("summary table outside a summary section") — never silently
-    ignored, and never read as summary. Reading it as summary would void the
-    heading gate (## Accounting must not set counts, D1'); silently ignoring
-    it would hide a misplaced summary block behind an all-None summary. A
-    header-only count table — `| WIRED | 3 |` over a separator, no body rows
-    — is a stray header, not a summary table, and stays outside."""
-    heading = str(sec.get("heading") or "")
-    for table in _extract_tables("\n".join(sec["body"]), sec["start"] + 1):
-        if len(table["headers"]) != 2:
-            continue
-        for idx, row in enumerate(table["rows"]):
-            # Rebuild the line so the same two-cell count-row shape (bold
-            # label included) decides here as in a summary section.
-            match = _COUNT_ROW_RE.match("| " + " | ".join(row) + " |")
-            if match:
-                raise PathwayMapError(
-                    f"summary table outside a summary section: section "
-                    f"'{heading or '<no heading>'}' has a '{match.group(1)}' "
-                    f"count row at line {table['first_row'] + idx} — refusing"
-                )
 
 
 def _extract_pathways(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
