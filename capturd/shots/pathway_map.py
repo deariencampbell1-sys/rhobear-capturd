@@ -70,6 +70,14 @@ behaviour. In a section no extractor reads — ``## Notes``, ``## Legend``,
 backtick or an unrecognised count header is ignored, not refused, and
 every refusal in a consumed section is unchanged.
 
+D85: a count-shaped table the parser cannot build — a header collapsed
+over its separator, or a two-column run of pipe lines with no separator —
+inside a section no extractor reads is never silently dropped: it
+refuses naming the section and the line, exactly as a consumed section's
+own refusal would. The count vocabulary is the summary's own (count
+words in header cells, count rows in the body); a shapeless table with
+no count anywhere still parses untouched (D77).
+
 Refusals — every one of these constructs raises ``PathwayMapError``
 rather than half-fill. The list is data (``REFUSALS`` below, D49) and
 is written out at the end of this docstring as text (D79 — the
@@ -394,6 +402,17 @@ def parse_manifest_text(raw: str, source: str = "<pasted manifest>") -> dict[str
                 (sec, _extract_tables(body, sec["start"] + 1, row_lines=True))
             )
         else:
+            # D85: a count-shaped-by-intent construct the parser cannot
+            # build (a collapsed header over a separator, a two-column run
+            # of pipe lines with no separator) never silently drops its
+            # counts in a section no extractor reads — refuse, naming the
+            # section and the line, exactly as a consumed section's own
+            # refusal would. A shapeless table with no count anywhere
+            # still parses untouched (D77).
+            section_name = str(sec["heading"]) if sec["heading"] else "(document top)"
+            refusal = _count_intent_refusal(sec["body"], sec["start"] + 1, section_name)
+            if refusal is not None:
+                raise PathwayMapError(refusal)
             parsed_sections.append((sec, []))
     parsed = {
         "raw": raw,
@@ -1231,6 +1250,104 @@ def _extract_anti_patterns(parsed_sections: _ParsedSections) -> list[dict[str, A
     return patterns
 
 
+# The table separator test, shared by `_extract_tables` and the D85
+# intent scan so the two cannot disagree about what a separator is.
+_SEP_LINE_RE = re.compile(r"^\s*\|?[\s\-:|]+\|?\s*$")
+
+
+def _is_separator_line(line: str) -> bool:
+    return bool(_SEP_LINE_RE.match(line)) and "-" in line
+
+
+def _count_intent_refusal(lines: list[str], first_line: int, section: str) -> str | None:
+    """D85: the refusal for a count-shaped-by-intent table construct the
+    table parser cannot build — a collapsed header over a separator, or a
+    two-column run of pipe lines with no separator — inside a section no
+    extractor reads. `parse_manifest_text` runs this scan on an UNCONSUMED
+    section only: there the construct would silently drop its counts (the
+    probe built no table, so no extractor gate ever saw it), and it
+    refuses instead, naming the section and the line, exactly as a
+    consumed section's own refusal would. The count vocabulary is the
+    summary's own — `_is_count_cell` for header words (D75's containment
+    check), `_reads_as_count_row` for body rows (D38's deformed-count
+    shape, D60's demotion included) — no new words. An INTACT header over
+    a separator is never judged here: the probe built that table and
+    D84's gates already decided it. A misaligned or backtick-broken row
+    is untrustworthy and decides nothing (D77)."""
+    def cells_of(line: str) -> list[str] | None:
+        if not re.search(r"(?<!\\)\|", line):
+            return None
+        cells, _ = _split_row(line, first_line)
+        return cells
+
+    def body_after(index: int) -> list[list[str]]:
+        rows: list[list[str]] = []
+        j = index
+        while j < len(lines):
+            line = lines[j]
+            if not line.strip():
+                break
+            row = cells_of(line)
+            if row is None or len(row) < 2:
+                break
+            rows.append(row)
+            j += 1
+        return rows
+
+    i = 0
+    while i < len(lines):
+        cells = cells_of(lines[i])
+        if cells is None:
+            i += 1
+            continue
+        if i + 1 < len(lines) and _is_separator_line(lines[i + 1]):
+            body = body_after(i + 2)
+            columns = len(cells_of(lines[i + 1]) or [])
+            if len(cells) < 2 and columns == 2 and (
+                # D47's collapsed header: the probe built no table, so no
+                # extractor gate ever saw this attempt. Count intent is a
+                # count word in the collapsed header cell(s), or a body
+                # row aligned to the separator's two columns that reads as
+                # a count row.
+                any(_is_count_cell(cell) for cell in cells)
+                or any(
+                    _reads_as_count_row(row[0], row[1])
+                    for row in body
+                    if len(row) == 2
+                )
+            ):
+                return (
+                    f"section '{section}': a count table at line {first_line + i} "
+                    f"cannot be read — its header collapsed to one cell "
+                    f"'{cells[0]}' over a two-column separator — counts are never "
+                    "silently dropped: refusing"
+                )
+            i = i + 2 + len(body)
+            continue
+        if len(cells) == 2:
+            # No separator: a two-column run of pipe lines — GFM builds no
+            # table from it, the probe sees nothing, and a count word in a
+            # header cell or a count row in the run means counts sit here
+            # unread.
+            run = body_after(i + 1)
+            if run and (
+                any(_is_count_cell(cell) for cell in cells)
+                or any(
+                    _reads_as_count_row(row[0], row[1])
+                    for row in run
+                    if len(row) == 2
+                )
+            ):
+                return (
+                    f"section '{section}': a count table at line {first_line + i} "
+                    f"cannot be read — its header "
+                    f"'{' | '.join(cells)}' has no separator row — counts are "
+                    "never silently dropped: refusing"
+                )
+        i += 1
+    return None
+
+
 def _extract_tables(
     text: str,
     first_line: int = 1,
@@ -1278,9 +1395,7 @@ def _extract_tables(
             continue
         cells, backtick_refusal = _split_row(header_line, first_line + i)
         sep_line = lines[i + 1] if i + 1 < len(lines) else ""
-        next_is_separator = (
-            bool(re.match(r"^\s*\|?[\s\-:|]+\|?\s*$", sep_line)) and "-" in sep_line
-        )
+        next_is_separator = _is_separator_line(sep_line)
         if backtick_refusal is not None and next_is_separator:
             # D17/D47: the separator matched, so this line IS a table
             # header — only now is the unbalanced-backtick refusal decided.
