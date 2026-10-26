@@ -1888,3 +1888,38 @@ def test_no_query_string_reaches_a_label_or_target():
     assert "sig" not in repr(plan)
 
 
+def test_control_sweep_includes_checkbox_radio_select_and_names_the_exclusion():
+    # D71: the control sweep is decided, not accidental. checkbox, radio and
+    # select are clickable controls a capture tool must be able to reach and
+    # are swept; text, textarea and the other free-text inputs are NOT swept
+    # as click targets — a capture tool clicks, it does not type — and the
+    # exclusion is named in the module docstring's accepted-limitations
+    # paragraph. Free-text controls are excluded even when they carry a
+    # perfectly good label; the exclusion is about the control, not its name.
+    import capturd.shots.planner as planner_module
+
+    root = parse_html(
+        "<main>"
+        '<input type="checkbox" aria-label="Accept terms">'
+        '<input type="radio" value="Pick plan">'
+        '<select aria-label="Choose country"></select>'
+        '<input type="text" aria-label="Search">'
+        '<textarea aria-label="Notes"></textarea>'
+        "</main>"
+    )
+    plan = plan_candidates(root)
+
+    labels = [c.label for c in plan.candidates]
+    assert sorted(labels) == ["Accept terms", "Choose country", "Pick plan"]
+    assert "Search" not in labels
+    assert "Notes" not in labels
+
+    accepted = next(
+        part
+        for part in (planner_module.__doc__ or "").split("\n\n")
+        if "Accepted, on the record" in part
+    )
+    assert "textarea" in accepted
+    assert "not swept" in accepted
+
+
