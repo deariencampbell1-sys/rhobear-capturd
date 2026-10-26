@@ -867,6 +867,17 @@ def test_ancestor_aria_disabled_and_unrendered_containers_are_not_planned():
     assert [c.label for c in plan2.candidates] == ["Gamma", "Zeta", "Eta"]
 
 
+def test_out_of_range_css_escape_counts_zero():
+    # D36: a 6-hex-digit CSS escape can name code points beyond chr()'s range
+    # (\ffffff is 0xFFFFFF, over the 0x10FFFF maximum). The verifier must
+    # count 0 matches instead of aborting the whole plan with a ValueError
+    # out of _css_unescape.
+    import capturd.shots.planner as planner_module
+
+    root = parse_html('<main><button title="Tap">Go</button></main>')
+    assert planner_module._count_matches(root, 'button[title="\\ffffff "]') == 0
+
+
 def test_oversized_document_fails_with_a_reason_not_a_crash():
     # More than 10 000 elements exceeds the node ceiling -> too-large.
     plan = plan_candidates(_spans_tree(10_001))
