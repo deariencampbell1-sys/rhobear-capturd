@@ -353,6 +353,101 @@ def test_bold_italic_count_row_is_counted():
         assert [p["id"] for p in parsed["pathways"]] == ["p1"], label
 
 
+def test_multi_word_count_headers_are_recognised():
+    # D75: emphasis is stripped; whitespace is not. D31's strip removed
+    # internal spaces too, so a multi-word count header — | Total Count |,
+    # | Path Count |, | Wired Count | — collapsed to one unrecognised token
+    # and D38 then refused a feed that parsed the day before. Header cells
+    # lose *, _ and backticks only, runs of whitespace collapse to one
+    # space, and the words are matched by PHRASE CONTAINMENT: a header cell
+    # is a count cell when it contains a count word as a word, and a
+    # category cell when it contains a category word as a word. Edge case 2
+    # rides at the bottom: a header neither of whose cells carries a count
+    # or category word still refuses over count rows — D38 stands.
+    documents = [
+        (
+            "| Category Name | Total Count |",
+            ["| WIRED | 5 |", "| TOTAL PATHWAYS | 7 |"],
+            {"wired": 5, "pathwaysTotal": 7},
+            "multi-word count and category cells",
+        ),
+        (
+            "| Status | Wired Count |",
+            ["| WIRED | 3 |"],
+            {"wired": 3},
+            "wired count",
+        ),
+        (
+            "| Category | Path Count |",
+            ["| TOTAL PATHWAYS | 4 |"],
+            {"pathwaysTotal": 4},
+            "path count",
+        ),
+        (
+            "| Category Name | Metric Value |",
+            ["| WIRED | 5 |"],
+            {"wired": 5},
+            "metric value",
+        ),
+        (
+            "| **Category Name** | **Total Count** |",
+            ["| **WIRED** | 5 |"],
+            {"wired": 5},
+            "emphasis on a multi-word header",
+        ),
+        (
+            "| Total Count | Category Name |",
+            ["| 5 | WIRED |"],
+            {"wired": 5},
+            "multi-word count cell first (D59's reversed order)",
+        ),
+    ]
+    for header_row, count_rows, expected, label in documents:
+        text = "\n".join([
+            "# Pathway Manifest — multi-word count header",
+            "",
+            "## Summary Counts",
+            "",
+            header_row,
+            "|---|---|",
+            *count_rows,
+            "",
+            "## 1. Pathways Table",
+            "",
+            "| id | status |",
+            "|---|---|",
+            "| p1 | WIRED |",
+        ])
+        parsed = parse_manifest_text(text)
+        for key, value in expected.items():
+            assert parsed["summary"][key] == value, (label, key)
+        assert [p["id"] for p in parsed["pathways"]] == ["p1"], label
+
+    # D75 does not widen recognition to nonsense: a header neither of whose
+    # cells carries a count or category word still refuses over count rows
+    # (D38, unchanged — the refusal names the header).
+    thing_text = "\n".join([
+        "# Pathway Manifest — unrecognised header still refuses",  # line 1
+        "",                                                     # line 2
+        "## Status Overview",                                   # line 3
+        "",                                                     # line 4
+        "| Thing | Blah |",                                     # line 5
+        "|---|---|",                                            # line 6
+        "| WIRED | 5 |",                                        # line 7
+        "",                                                     # line 8
+        "## 1. Pathways Table",                                 # line 9
+        "",                                                     # line 10
+        "| id | status |",                                      # line 11
+        "|---|---|",                                            # line 12
+        "| p1 | WIRED |",                                       # line 13
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(thing_text)
+    message = str(excinfo.value)
+    assert "Thing" in message
+    assert "Blah" in message
+
+
 def test_three_column_table_is_not_a_count_table():
     # D24: a count table has EXACTLY two columns. A three-column table —
     # `| Category | Count | Notes |`, wherever it sits — sets no counts and
