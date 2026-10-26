@@ -870,6 +870,9 @@ def build_capture_plan(payload: dict[str, Any]) -> tuple[list[str], list[Capture
             pathway_map,
             base_url,
             max_targets=int(payload.get("max_targets") or MAX_TARGETS),
+            # D92: a dry-run plan is built with no navigation and no network
+            # call — never a page read to bind a named control.
+            dry_run=bool(payload.get("dry_run")),
         )
         crawl_enabled = False
         local_enabled = False
@@ -998,6 +1001,26 @@ def build_capture_plan(payload: dict[str, Any]) -> tuple[list[str], list[Capture
                         "but its control may not be wired to a real state"
                     ),
                 })
+        if bool(payload.get("dry_run")):
+            from .pathway_plan import named_control_needs_the_page
+
+            # D92: in dry-run nothing is bound from a page. A named control
+            # the map hands no selector for is reported unbound (selector=-)
+            # with a flag saying so — planned and kept, never silently dropped.
+            for pathway, pathway_target in zip(
+                pathway_map.get("pathways") or [], pathway_targets
+            ):
+                if not pathway_target.trigger_selector and named_control_needs_the_page(pathway):
+                    pathway_flags.append({
+                        "pathway_id": pathway_target.pathway_id,
+                        "flag": "UNBOUND",
+                        "reason": (
+                            "the map names this control only by label or call — dry-run "
+                            "launches no browser and makes no network call, so it stays "
+                            "unbound (selector=-); run without --dry-run to bind it from "
+                            "the page"
+                        ),
+                    })
 
     settings = {
         "format": str(payload.get("format") or "png").lower(),

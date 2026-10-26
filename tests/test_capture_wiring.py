@@ -236,7 +236,15 @@ def test_cli_accepts_a_pasted_map_and_a_file_map_identically(monkeypatch, capsys
     assert line_pasted == line_file
     plan = json.loads(line_pasted[len("plan-json: "):])
     assert plan["targets"], "the plan must carry targets"
-    assert any(target["trigger_selector"] for target in plan["targets"])
+    # D92: dry-run binds nothing. This map names its controls only by the
+    # calls they make, so they are all reported unbound (selector=-) with a
+    # flag — the pasted and file flavours say so identically.
+    unbound = {
+        flag["pathway_id"]
+        for flag in plan["settings"]["pathway_flags"]
+        if flag["flag"] == "UNBOUND"
+    }
+    assert unbound == {target["pathway_id"] for target in plan["targets"]}
 
 
 def test_cli_map_input_needs_a_base_url(monkeypatch, capsys):

@@ -26,6 +26,13 @@ selector-shaped token in its ``trigger``, and the call the pathway names
 call it makes). The named control is matched against the page's planner
 candidates by exact selector, then exact target, then label.
 
+In dry-run there is no page read at all: the plan is built without launching
+a browser and without any network call. A target's ``trigger_selector`` then
+comes only from what the map itself names (the ``selector``/``css`` column, or
+a selector-shaped token in its ``trigger``), and a named control that would
+need the page to bind is reported unbound (``selector=-``) with a flag saying
+so (:func:`named_control_needs_the_page`).
+
 Determinism: the same map plus the same base URL produces the same plan, byte
 for byte. Nothing here embeds host paths — ``pathway_trigger`` is carried with
 host-path-shaped tokens redacted, and errors name the pathway id, never a path.
@@ -49,6 +56,7 @@ from .pathway_map import PathwayMapError
 __all__ = [
     "MAX_TARGETS",
     "PathwayMapError",
+    "named_control_needs_the_page",
     "plan_targets_from_map",
     "resolve_pathway_url",
 ]
@@ -219,7 +227,10 @@ _TRIGGER_VERBS = frozenset({
 
 _QUOTED_RE = re.compile(r"[\"'`]([^\"'`\n]+)[\"'`]")
 _WORD_RE = re.compile(r"[A-Za-z][\w\-]*")
-_SELECTORISH_RE = re.compile(r"#[A-Za-z][\w\-]*|\.[A-Za-z][\w\-]*")
+# A selector-shaped token is a standalone ``#id`` / ``.class`` token — the
+# lookbehind keeps a method access (``el.querySelector``) from reading as one.
+# The alternation is group(1) so its matches read as the token itself.
+_SELECTORISH_RE = re.compile(r"(?<![\w])(#[A-Za-z][\w\-]*|\.[A-Za-z][\w\-]*)")
 
 
 def _named_control_tokens(pathway: dict[str, Any]) -> list[str]:
@@ -253,6 +264,32 @@ def _named_control_tokens(pathway: dict[str, Any]) -> list[str]:
         add(route)
         add(route.rstrip("/").rsplit("/", 1)[-1], min_len=3)
     return tokens
+
+
+def _explicit_selector(pathway: dict[str, Any]) -> str:
+    """The selector the map itself names — never read from a page.
+
+    D92: exactly two sources, in priority order — the pathway's
+    ``selector``/``css`` column (the explicit control reference) and a
+    selector-shaped token in its ``trigger``. Anything else (a quoted label,
+    a bare word, the call the pathway names) names a control that would need
+    the page to bind, and yields no explicit selector.
+    """
+    explicit = str(pathway.get("selector") or pathway.get("css") or "").strip().strip("`").strip()
+    if explicit:
+        return explicit
+    match = _SELECTORISH_RE.search(str(pathway.get("trigger") or ""))
+    return match.group(1) if match else ""
+
+
+def named_control_needs_the_page(pathway: dict[str, Any]) -> bool:
+    """True when the map names a control only in a way that needs the page.
+
+    D92: a named control the map hands no selector for can only be bound by
+    reading the page, so a plan that reads no page (dry-run) reports it as
+    unbound (``selector=-``) with a flag saying so.
+    """
+    return not _explicit_selector(pathway) and bool(_named_control_tokens(pathway))
 
 
 def _norm_label(value: str) -> str:
@@ -337,6 +374,7 @@ def plan_targets_from_map(
     base_url: str,
     *,
     max_targets: int = MAX_TARGETS,
+    dry_run: bool = False,
 ) -> tuple[list[str], list[CaptureTarget]]:
     """Expand a parsed map into unique URLs and one target per capturable
     pathway.
@@ -344,6 +382,12 @@ def plan_targets_from_map(
     Each target carries ``pathway_id``, ``pathway_status``, ``pathway_trigger``
     (host paths redacted), the resolved URL and — where the map names a
     control — the selector from the planner's candidate for that control.
+
+    With ``dry_run`` the plan is built without launching a browser and
+    without any network call: ``trigger_selector`` comes only from what the
+    map itself names (:func:`_explicit_selector`), and a named control that
+    would need the page to bind is left unbound (``selector=-``) — whether it
+    needs the page is :func:`named_control_needs_the_page`.
 
     More than ``max_targets`` named pathways is refused before anything is
     planned, with the service's MAX_TARGETS refusal text verbatim.
@@ -387,7 +431,11 @@ def plan_targets_from_map(
     targets: list[CaptureTarget] = []
     for index, (url, pathway, tokens) in enumerate(resolved, start=1):
         trigger_selector = ""
-        if tokens:
+        if dry_run:
+            # D92: dry-run navigates nothing — the selector comes only from
+            # what the map itself names, never from a page.
+            trigger_selector = _explicit_selector(pathway)
+        elif tokens:
             match = _match_control(tokens, candidates_for(url))
             if match is not None:
                 trigger_selector = match.selector

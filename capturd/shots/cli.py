@@ -6,9 +6,13 @@ the legacy ``sunsponge-capture ...`` alias (backwards compat for older scripts).
 The batch takes ONE source: explicit URLs, a sitemap, a crawl, a local build,
 or a pathway map (verifier JSON or the markdown manifest) resolved against a
 ``--base-url``. The map path is the new wiring: a pathway map goes in and a
-real capture plan comes out — ``--dry-run`` prints that plan without running a
-browser. The quality gate (01c) decides whether a finished run is evidence;
-its reason code reaches this caller unchanged.
+real capture plan comes out — ``--dry-run`` prints that plan with no browser
+and no network call: a ``trigger_selector`` comes only from what the map
+itself names (the ``selector``/``css`` column or a selector-shaped token in
+its ``trigger``), and a named control that would need the page to bind is
+reported unbound (``selector=-``) with a flag. The quality gate (01c) decides
+whether a finished run is evidence; its reason code reaches this caller
+unchanged.
 """
 
 from __future__ import annotations
@@ -62,7 +66,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-targets", type=int, default=5000, metavar="N",
                         help="Refuse a map naming more than N capture targets (default 5000)")
     parser.add_argument("--dry-run", action="store_true",
-                        help="Print the capture plan and exit - no browser runs, no shots")
+                        help="Print the capture plan and exit - no shots. A map plan "
+                             "launches no browser and makes no network call: trigger_selector "
+                             "comes only from what the map itself names (selector/css column, "
+                             "or a selector-shaped token in trigger), and a named control that "
+                             "would need the page to bind is reported unbound (selector=-) with "
+                             "a flag. (--site / --sitemap page discovery still reads its input.)")
 
     parser.add_argument("--viewports", default="desktop,tablet,mobile",
                         help="Any of desktop,tablet,mobile (default: all three)")
@@ -170,6 +179,9 @@ def main(argv: list[str] | None = None) -> int:
         "states": args.states,
         "states_limit": args.states_limit,
         "state_wait_ms": args.state_wait_ms,
+        # D92: dry-run planning navigates nothing (the map planner binds no
+        # selectors from the page).
+        "dry_run": bool(args.dry_run),
         "name": "sunsponge-captures",
     }
     if map_input:
