@@ -1654,3 +1654,40 @@ def test_well_formed_document_tree_is_unchanged():
             )
         ],
     )
+
+
+# ---------------------------------------------------------------------------
+# W0-19 round 2: the quote state (D52), the cascade (D53), the aria overrides
+# (D54, D57), the <details> gate (D55) and the two counters that lie (D56,
+# D58).
+# ---------------------------------------------------------------------------
+
+
+def test_escaped_quote_outside_quotes_does_not_open_a_string():
+    # D52: the backslash escapes the next character EVERYWHERE; a quote opens
+    # a string only when it is not escaped. _split_chain used to treat the
+    # backslash as an escape only inside quotes, so an escaped quote in an
+    # unquoted segment flipped the quote state and every later " > " was
+    # swallowed into one part — the chain never split, and a structural path
+    # whose id segment held an escaped quote failed to verify and was dropped
+    # as ambiguous.
+    import capturd.shots.planner as planner_module
+
+    # An escaped quote in an UNQUOTED segment still splits on the next " > ".
+    assert planner_module._split_chain('#say\\"hi > button') == ['#say\\"hi', 'button']
+    # div[k="v\"w"] > button splits into two segments: the escaped quote sits
+    # inside the string and does not end it early.
+    assert planner_module._split_chain('div[k="v\\"w"] > button') == ['div[k="v\\"w"]', 'button']
+    # div[a="x > y"] > button splits into two segments: the quoted " > " is
+    # not a separator.
+    assert planner_module._split_chain('div[a="x > y"] > button') == ['div[a="x > y"]', 'button']
+
+    # End to end: the structural path of a button under a unique id holding an
+    # escaped quote splits, verifies and plans — it is never dropped as
+    # ambiguous.
+    root = parse_html("<main><div id='say\"hi'><button>Go</button></div></main>")
+    plan = plan_candidates(root)
+    assert plan.limits["dropped_ambiguous"] == 0
+    (candidate,) = plan.candidates
+    assert candidate.label == "Go"
+    assert candidate.selector == 'main > div#say\\"hi > button'
