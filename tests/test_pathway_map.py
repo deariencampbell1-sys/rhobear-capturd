@@ -279,6 +279,41 @@ def test_count_table_under_any_heading_is_read():
         assert [p["id"] for p in parsed["pathways"]] == ["p1"], heading
 
 
+def test_bold_header_is_still_a_count_table():
+    # D31: header cells are matched after removing markdown emphasis —
+    # `*`, `_`, backticks and whitespace are stripped from both header
+    # cells before the word-set comparison, so a bold, italic or code-span
+    # header is still the count-table shape. This is a REGRESSION guard:
+    # the old row-regex read these counts; a verbatim header comparison
+    # silently drops every one of them — and a silent drop is the one
+    # thing this module must never do.
+    for header_row, label in (
+        ("| **Category** | **Count** |", "bold"),
+        ("| _Category_ | _Count_ |", "italic"),
+        ("| `Category` | `Count` |", "code span"),
+    ):
+        text = "\n".join([
+            "# Pathway Manifest — emphasised count header",
+            "",
+            "## Status Overview",
+            "",
+            header_row,
+            "|---|---|",
+            "| **WIRED** | 2 |",
+            "| **TOTAL PATHWAYS** | 3 |",
+            "",
+            "## 1. Pathways Table",
+            "",
+            "| id | status |",
+            "|---|---|",
+            "| p1 | WIRED |",
+        ])
+        parsed = parse_manifest_text(text)
+        assert parsed["summary"]["wired"] == 2, label
+        assert parsed["summary"]["pathwaysTotal"] == 3, label
+        assert [p["id"] for p in parsed["pathways"]] == ["p1"], label
+
+
 def test_three_column_table_is_not_a_count_table():
     # D24: a count table has EXACTLY two columns. A three-column table —
     # `| Category | Count | Notes |`, wherever it sits — sets no counts and
