@@ -101,6 +101,12 @@ class PathwayMapError(ValueError):
     """Raised when a pathway map is missing, ambiguous or unparseable."""
 
 
+# D63: a section body is table-parsed ONCE, in the manifest parse; each
+# extractor reads the section's already-parsed tables instead of reparsing
+# the body. The tuple is (section, tables in that section).
+_ParsedSections = list[tuple[dict[str, Any], list[dict[str, Any]]]]
+
+
 def load_pathway_map(
     *,
     manifest_path: str | Path | None = None,
@@ -177,18 +183,25 @@ def parse_manifest_text(raw: str, source: str = "<pasted manifest>") -> dict[str
     if not (raw or "").strip():
         raise PathwayMapError("pathway manifest is empty")
     sections = _split_sections(raw)
+    # D63: each section body is table-parsed exactly ONCE, here; every
+    # extractor below reads these same parsed tables. Row lines ride along
+    # (D61) so a refusal raised outside `_extract_tables` can name its line.
+    parsed_sections: _ParsedSections = [
+        (sec, _extract_tables("\n".join(sec["body"]), sec["start"] + 1, row_lines=True))
+        for sec in sections
+    ]
     parsed = {
         "raw": raw,
         "hash": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
         # Basename only: the parsed map must not carry host paths.
         "file": Path(source).name,
         "flavour": "manifest",
-        "summary": _extract_summary(sections),
-        "pathways": _extract_pathways(sections),
-        "routes": _extract_routes(sections),
-        "plugins": _extract_plugins(sections),
-        "suspicious": _extract_suspicious(sections),
-        "antiPatterns": _extract_anti_patterns(sections),
+        "summary": _extract_summary(parsed_sections),
+        "pathways": _extract_pathways(parsed_sections),
+        "routes": _extract_routes(parsed_sections),
+        "plugins": _extract_plugins(parsed_sections),
+        "suspicious": _extract_suspicious(parsed_sections),
+        "antiPatterns": _extract_anti_patterns(parsed_sections),
         # The manifest says nothing about these — None, not a borrowed value.
         "metadata": {
             "file": Path(source).name,
@@ -550,22 +563,21 @@ def _split_sections(raw: str) -> list[dict[str, Any]]:
     return sections
 
 
-def _extract_summary(sections: list[dict[str, Any]]) -> dict[str, Any]:
+def _extract_summary(parsed_sections: _ParsedSections) -> dict[str, Any]:
     summary: dict[str, Any] = {key: None for key in _SUMMARY_COUNT_KEYS}
     # D61: the summary is one document-wide object — the second row to set
     # a key the first row already set is refused, whatever the values say
     # (the ambiguity is the duplicate, not the value), exactly like the
     # duplicate-pathway-id refusal.
     line_by_count_key: dict[str, int] = {}
-    for sec in sections:
+    for sec, tables in parsed_sections:
         # D24: the section heading no longer decides anything — every table
         # in the document is checked against the count-table header shape,
         # and a matching table's rows are read wherever the table sits. A
         # pathway row shaped `| p1 | WIRED | 3 |` lives in a three-column
         # table, which is never a count table, so it cannot set a count.
-        for table in _extract_tables(
-            "\n".join(sec["body"]), sec["start"] + 1, row_lines=True
-        ):
+        # D63: the tables arrive already parsed (once per section).
+        for table in tables:
             order = _count_table_order(table["headers"])
             if order is None:
                 continue
@@ -620,14 +632,15 @@ def _extract_summary(sections: list[dict[str, Any]]) -> dict[str, Any]:
     return summary
 
 
-def _extract_pathways(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _extract_pathways(parsed_sections: _ParsedSections) -> list[dict[str, Any]]:
     pathways: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
-    for sec in sections:
+    for sec, tables in parsed_sections:
         heading = str(sec.get("heading") or "")
         if re.search(r"suspicious|risk|anti-?pattern|open questions|plugin", heading, re.I):
             continue
-        for table in _extract_tables("\n".join(sec["body"]), sec["start"] + 1):
+        # D63: the tables arrive already parsed (once per section).
+        for table in tables:
             headers = [h.lower() for h in table["headers"]]
             if "rank" in headers:
                 continue
@@ -787,10 +800,11 @@ def _normalize_status(status: str) -> str:
     return "UNCLEAR"
 
 
-def _extract_routes(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _extract_routes(parsed_sections: _ParsedSections) -> list[dict[str, Any]]:
     routes: list[dict[str, Any]] = []
-    for sec in sections:
-        for table in _extract_tables("\n".join(sec["body"]), sec["start"] + 1):
+    for sec, tables in parsed_sections:
+        # D63: the tables arrive already parsed (once per section).
+        for table in tables:
             headers = [h.lower() for h in table["headers"]]
             # Anchored: a `pathway` column in a pathways table must not pull
             # its rows into routes.
@@ -814,12 +828,13 @@ def _extract_routes(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return routes
 
 
-def _extract_plugins(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _extract_plugins(parsed_sections: _ParsedSections) -> list[dict[str, Any]]:
     plugins: list[dict[str, Any]] = []
-    for sec in sections:
+    for sec, tables in parsed_sections:
         if not re.search(r"plugin", sec.get("heading") or "", re.I):
             continue
-        for table in _extract_tables("\n".join(sec["body"]), sec["start"] + 1):
+        # D63: the tables arrive already parsed (once per section).
+        for table in tables:
             headers = [h.lower() for h in table["headers"]]
             if not any(re.search(r"^name$|plugin|skill", h) for h in headers):
                 continue
@@ -834,12 +849,13 @@ def _extract_plugins(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return plugins
 
 
-def _extract_suspicious(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _extract_suspicious(parsed_sections: _ParsedSections) -> list[dict[str, Any]]:
     suspicious: list[dict[str, Any]] = []
-    for sec in sections:
+    for sec, tables in parsed_sections:
         if not re.search(r"suspicious|top\s+\d|risk", sec.get("heading") or "", re.I):
             continue
-        for table in _extract_tables("\n".join(sec["body"]), sec["start"] + 1):
+        # D63: the tables arrive already parsed (once per section).
+        for table in tables:
             headers = [h.lower() for h in table["headers"]]
             if not headers:
                 continue
@@ -942,12 +958,13 @@ def _normalise_anti_pattern(entry: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def _extract_anti_patterns(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _extract_anti_patterns(parsed_sections: _ParsedSections) -> list[dict[str, Any]]:
     patterns: list[dict[str, Any]] = []
-    for sec in sections:
+    for sec, tables in parsed_sections:
         if not re.search(r"anti-?pattern|finding|grep|catch", sec.get("heading") or "", re.I):
             continue
-        for table in _extract_tables("\n".join(sec["body"]), sec["start"] + 1):
+        # D63: the tables arrive already parsed (once per section).
+        for table in tables:
             headers = [h.lower() for h in table["headers"]]
             if not any(re.search(r"category|type|anti-?pattern|pattern", h) for h in headers):
                 continue
