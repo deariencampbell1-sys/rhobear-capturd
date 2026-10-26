@@ -613,7 +613,9 @@ def test_deep_document_fails_with_a_reason_not_a_crash():
 
     assert plan.candidates == []
     assert plan.reason == "too-large"
-    assert plan.limits["too_large"] is True
+    # Deliberate update (review round 3, D9): limits["too_large"] names the
+    # ceiling that was exceeded instead of a bare True.
+    assert plan.limits["too_large"] == "deeper than 256 levels"
 
 
 def test_oversized_document_fails_with_a_reason_not_a_crash():
@@ -623,7 +625,20 @@ def test_oversized_document_fails_with_a_reason_not_a_crash():
 
     assert plan.candidates == []
     assert plan.reason == "too-large"
-    assert plan.limits["too_large"] is True
+    # Deliberate update (review round 3, D9): the counter names the ceiling.
+    assert plan.limits["too_large"] == "more than 10000 elements"
+
+
+def test_too_large_reports_which_ceiling():
+    # D9: limits["too_large"] carries the reason text — the ceiling that was
+    # exceeded — so the operator can tell "too big" from "too deep".
+    deep = plan_candidates(parse_html("<div>" * 300 + "<button>Go</button>" + "</div>" * 300))
+    assert deep.reason == "too-large"
+    assert deep.limits["too_large"] == "deeper than 256 levels"
+
+    big = plan_candidates(parse_html("<span></span>" * 10_001))
+    assert big.reason == "too-large"
+    assert big.limits["too_large"] == "more than 10000 elements"
 
 
 def test_documents_within_the_ceilings_still_plan():
