@@ -617,6 +617,37 @@ def test_decimal_count_reads_the_integer_part():
     assert parsed["antiPatterns"][0]["count"] == 3
 
 
+def test_summary_decimal_count_reads_the_integer_part():
+    # D25: one parser for every count — the summary path parses its count
+    # cell through `_count_from_cell`, exactly like an anti-pattern entry,
+    # so `| WIRED | 3.5 |` yields 3 in the summary as it does in an
+    # anti-pattern entry (D4): never 35, never None, never a refused row.
+    text = "\n".join([
+        "# Pathway Manifest — decimal summary count",
+        "",
+        "## Summary Counts",
+        "",
+        "| Category | Count |",
+        "|---|---|",
+        "| **WIRED** | 3.5 |",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+        "",
+        "## 2. Anti-patterns",
+        "",
+        "| Category | Count | File | Line | Quote |",
+        "|---|---|---|---|---|",
+        "| decimal-hits | 3.5 | hub.ts | 88 | `export const unusedHelper` |",
+    ])
+    parsed = parse_manifest_text(text)
+    assert parsed["summary"]["wired"] == 3
+    assert parsed["antiPatterns"][0]["count"] == 3
+
+
 def test_verifier_integer_zero_count_is_kept():
     # D18: an integer zero is a real count. The verifier flavour carries the
     # same anti-pattern shape as the manifest flavour, and a count that
