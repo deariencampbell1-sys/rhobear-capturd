@@ -96,6 +96,7 @@ class _NodeBuilder(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.root = _Node("#root", {})
         self._stack = [self.root]
+        self._elements = 0
 
     def _add_element(self, tag: str, attrs: list[tuple[str, str | None]]) -> _Node:
         cleaned: dict[str, str] = {}
@@ -108,6 +109,11 @@ class _NodeBuilder(HTMLParser):
         node.parent = top
         top.children.append(node)
         top.content.append(node)
+        self._elements += 1
+        if self._elements > _MAX_NODES:
+            # D27: abort the tree build the moment the node ceiling is
+            # exceeded — the full tree is never materialised.
+            raise _DocumentTooLarge(f"more than {_MAX_NODES} elements")
         return node
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -132,7 +138,20 @@ class _NodeBuilder(HTMLParser):
 
 
 def parse_html(html: str) -> Node:
-    """Parse an HTML string into a tree; returns the synthetic ``#root`` node."""
+    """Parse an HTML string into a tree; returns the synthetic ``#root`` node.
+
+    D27: the ceiling bounds the parse, not just the plan's walk. A document
+    whose serialized length exceeds ``_MAX_INPUT_CHARS`` is refused before a
+    single node is built, and the builder aborts the tree build the moment
+    more than ``_MAX_NODES`` elements exist — both raise
+    :class:`_DocumentTooLarge` (a ``ValueError``) with the ceiling's reason
+    text, before the full tree is materialised. A caller with a tree larger
+    than the ceilings — brief 01d builds from the live DOM — hands it to
+    :func:`plan_candidates`, which reports ``reason="too-large"`` instead of
+    raising.
+    """
+    if len(html) > _MAX_INPUT_CHARS:
+        raise _DocumentTooLarge(f"more than {_MAX_INPUT_CHARS} characters")
     builder = _NodeBuilder()
     builder.feed(html)
     builder.close()
@@ -991,10 +1010,19 @@ def classify_control(node: Optional[Node]) -> tuple[ControlKind, bool]:
 #: RecursionError, and never unbounded work.
 _MAX_NODES = 10_000
 _MAX_DEPTH = 256
+#: Serialized-input ceiling (D27): ``parse_html`` refuses a document whose
+#: source is longer than this before a single node is built. The value
+#: comfortably fits the 10 000-element ceiling (400 characters per element),
+#: so a legal document is never refused here — this ceiling bounds the shapes
+#: the node ceiling cannot see (huge text nodes, huge attribute values).
+_MAX_INPUT_CHARS = 4_000_000
 
 
-class _DocumentTooLarge(Exception):
-    """Internal: the document exceeds the planner's walk ceilings."""
+class _DocumentTooLarge(ValueError):
+    """Internal: the document exceeds the planner's walk ceilings.
+
+    A ``ValueError`` so a caller of :func:`parse_html` can catch the refusal
+    without importing a private name (D27)."""
 
 
 def _check_size(root: _Node) -> None:
@@ -1110,7 +1138,9 @@ def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
     ``max_states`` cap cut the plan, to any size, including zero and including
     a plan that still holds candidates) and ``"too-large"`` (the document
     exceeds the walk ceilings: more than 10 000 elements or deeper than 256
-    levels). D3 invariant: ``reason == "truncated"`` whenever
+    levels). A tree over the ceilings reaches this function only when the
+    caller built it itself — :func:`parse_html` refuses such documents at the
+    parse (D27) — and it is refused here with the same reason. D3 invariant: ``reason == "truncated"`` whenever
     ``limits["truncated"]`` is true; ``"ok"`` is only for an untruncated plan.
     On ``"too-large"`` the ``limits["too_large"]`` counter carries the reason
     text — the ceiling that was exceeded (D9): ``"more than 10000 elements"``
