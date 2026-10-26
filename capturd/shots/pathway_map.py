@@ -32,8 +32,10 @@ parse abort (D17).
 Verifier JSON may declare the anti-patterns array itself: its well-formed
 entries round-trip into the returned ``antiPatterns`` through the same
 normaliser the manifest flavour uses (D23), while a non-list array is
-refused naming the field and the type it got (D21) and a non-mapping
-entry is refused naming its index and type — never skipped (D22).
+refused naming the field and the type it got (D21), a non-mapping entry is
+refused naming its index and type — never skipped (D22) — and a mapping
+entry with no usable category is refused the same way (D27): the returned
+array is never shorter than what the feed declared.
 """
 
 from __future__ import annotations
@@ -279,8 +281,18 @@ def parse_verifier_json_text(text: str, source: str = "<pasted map>") -> dict[st
                 f"{index} must be an object, got {type(entry).__name__} — refusing"
             )
         pattern = _normalise_anti_pattern(entry)
-        if pattern is not None:
-            anti_patterns.append(pattern)
+        if pattern is None:
+            # D27: refuse, never skip — a mapping entry with no usable
+            # category would return a shorter array than the feed declared
+            # with no signal. Mirrors D22: the refusal names the entry's
+            # index (a falsy-but-present category — 0, "" — is no category
+            # at all).
+            raise PathwayMapError(
+                "verifier map 'antiPatterns' entry at index "
+                f"{index} has no usable category (category/type/anti-pattern/"
+                "pattern all missing or empty) — refusing"
+            )
+        anti_patterns.append(pattern)
 
     # Key presence decides, not truthiness: a present-but-empty
     # manifest_summary must not be swapped for a differently-shaped summary.
@@ -744,10 +756,13 @@ def _normalise_anti_pattern(entry: dict[str, Any]) -> dict[str, Any] | None:
     """One anti-pattern shape for both flavours: the locked 5 keys, with the
     same category aliases and count parser whether the entry came from a
     manifest table row or from verifier JSON (D18 — the flavours must agree
-    on the same input value). Returns None for an entry with no category,
-    which both callers skip. The verifier's own ``antiPatterns`` array
-    round-trips through here (D23); a non-mapping entry never reaches this
-    normaliser — the verifier caller refuses it by index and type (D22)."""
+    on the same input value). Returns None for an entry with no category:
+    the manifest caller skips such a table row, while the verifier caller
+    REFUSES the entry by index instead (D27) so its returned array can
+    never be shorter than what the feed declared. The verifier's own
+    ``antiPatterns`` array round-trips through here (D23); a non-mapping
+    entry never reaches this normaliser — the verifier caller refuses it
+    by index and type (D22)."""
     category = str(
         entry.get("category")
         or entry.get("type")
