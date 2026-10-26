@@ -21,7 +21,9 @@ as the equivalent file. Output is deterministic: same input bytes, same dict
 The parser refuses rather than half-fill: a table is returned with every row
 or the parse raises ``PathwayMapError`` — never part of one. Counts come from
 count tables — tables whose header SHAPE is exactly two columns carrying a
-category word and a count word in either order (D24, D59) — wherever they sit; a three-column
+category word and a count word in either order (D24, D59) — wherever they sit
+and no heading-specific extractor claims the table first (D66: each table is
+consumed by one extractor only); a three-column
 table sets no counts and raises nothing, and a two-column pathway table
 (``| id | status |``) is not a count table because its second header is not
 a count word. A summary count key set by two rows is refused (D61) — the
@@ -193,6 +195,13 @@ def parse_manifest_text(raw: str, source: str = "<pasted manifest>") -> dict[str
         (sec, _extract_tables("\n".join(sec["body"]), sec["start"] + 1, row_lines=True))
         for sec in sections
     ]
+    # D66: each parsed table is claimed by exactly one extractor — the first
+    # whose heading and header shape match (`_claimed_by`) — and the claim
+    # rides on the table dict, so every extractor below skips the tables it
+    # did not claim. A table claimed by none is ignored, exactly as before.
+    for sec, tables in parsed_sections:
+        for table in tables:
+            table["claim"] = _claimed_by(table, sec.get("heading"))
     parsed = {
         "raw": raw,
         "hash": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
@@ -463,6 +472,49 @@ def _is_count_table(headers: list[str]) -> bool:
     return _count_table_order(headers) is not None
 
 
+# D66: one table, one extractor. Each parsed table is claimed by the FIRST
+# extractor whose heading and header shape match, and every other extractor
+# skips it, so one table can never populate two output keys (a count-shaped
+# table under ## 2. Anti-patterns used to feed both the summary and the
+# anti-pattern extractor). Heading-specific extractors claim first — they
+# require BOTH the heading and their header shape — then the heading-
+# agnostic ones in pipeline order (summary, pathways, routes). A table
+# claimed by none is ignored, exactly as before. The predicates below are
+# the gates the _extract_* loops apply — keep the two in sync.
+def _claimed_by(table: dict[str, Any], heading: str | None) -> str | None:
+    """D66: the name of the first extractor whose heading and header shape
+    claim ``table``, or None when no extractor claims it (the table is
+    ignored, as before). ``heading`` is the section heading the table sits
+    under. The claim is decided once, in ``parse_manifest_text``, and every
+    extractor skips the tables it did not claim."""
+    headers = [h.lower() for h in table["headers"]]
+    if re.search(r"plugin", heading or "", re.I) and any(
+        re.search(r"^name$|plugin|skill", h) for h in headers
+    ):
+        return "plugins"
+    if re.search(r"suspicious|top\s+\d|risk", heading or "", re.I) and headers:
+        return "suspicious"
+    if re.search(r"anti-?pattern|finding|grep|catch", heading or "", re.I) and any(
+        re.search(r"category|type|anti-?pattern|pattern", h) for h in headers
+    ):
+        return "antiPatterns"
+    if _count_table_order(table["headers"]) is not None:
+        return "summary"
+    if (
+        any(re.search(r"^id$|slug|element|pathway", h) for h in headers)
+        and any(h in {"status", "wired", "unwired flag", "unwired"} for h in headers)
+        and not re.search(
+            r"suspicious|risk|anti-?pattern|open questions|plugin",
+            heading or "",
+            re.I,
+        )
+    ):
+        return "pathways"
+    if any(re.search(r"^path$|^route$|^endpoint$", h) for h in headers):
+        return "routes"
+    return None
+
+
 # D7: a count row's LABEL decides WHICH count the row sets — WIRED /
 # MOCKED / UNWIRED / INCOMPLETE / UNCLEAR / TOTAL PATHWAYS / ROUTES /
 # PLUGINS. D25: the label is ALL the regex decides — the count VALUE is
@@ -581,6 +633,11 @@ def _extract_summary(parsed_sections: _ParsedSections) -> dict[str, Any]:
         # table, which is never a count table, so it cannot set a count.
         # D63: the tables arrive already parsed (once per section).
         for table in tables:
+            # D66: the summary extractor reads only the tables it claimed —
+            # a count-shaped table under an anti-patterns, suspicious or
+            # plugins heading is claimed by that extractor instead.
+            if table.get("claim") != "summary":
+                continue
             order = _count_table_order(table["headers"])
             if order is None:
                 continue
@@ -644,6 +701,9 @@ def _extract_pathways(parsed_sections: _ParsedSections) -> list[dict[str, Any]]:
             continue
         # D63: the tables arrive already parsed (once per section).
         for table in tables:
+            # D66: only the tables the pathways extractor claimed.
+            if table.get("claim") != "pathways":
+                continue
             headers = [h.lower() for h in table["headers"]]
             if "rank" in headers:
                 continue
@@ -808,6 +868,9 @@ def _extract_routes(parsed_sections: _ParsedSections) -> list[dict[str, Any]]:
     for sec, tables in parsed_sections:
         # D63: the tables arrive already parsed (once per section).
         for table in tables:
+            # D66: only the tables the routes extractor claimed.
+            if table.get("claim") != "routes":
+                continue
             headers = [h.lower() for h in table["headers"]]
             # Anchored: a `pathway` column in a pathways table must not pull
             # its rows into routes.
@@ -838,6 +901,9 @@ def _extract_plugins(parsed_sections: _ParsedSections) -> list[dict[str, Any]]:
             continue
         # D63: the tables arrive already parsed (once per section).
         for table in tables:
+            # D66: only the tables the plugins extractor claimed.
+            if table.get("claim") != "plugins":
+                continue
             headers = [h.lower() for h in table["headers"]]
             if not any(re.search(r"^name$|plugin|skill", h) for h in headers):
                 continue
@@ -859,6 +925,9 @@ def _extract_suspicious(parsed_sections: _ParsedSections) -> list[dict[str, Any]
             continue
         # D63: the tables arrive already parsed (once per section).
         for table in tables:
+            # D66: only the tables the suspicious extractor claimed.
+            if table.get("claim") != "suspicious":
+                continue
             headers = [h.lower() for h in table["headers"]]
             if not headers:
                 continue
@@ -969,6 +1038,11 @@ def _extract_anti_patterns(parsed_sections: _ParsedSections) -> list[dict[str, A
             continue
         # D63: the tables arrive already parsed (once per section).
         for table in tables:
+            # D66: only the tables the anti-pattern extractor claimed — a
+            # count-shaped table under this heading claimed by the summary
+            # extractor (no category word in its header) is skipped here.
+            if table.get("claim") != "antiPatterns":
+                continue
             headers = [h.lower() for h in table["headers"]]
             if not any(re.search(r"category|type|anti-?pattern|pattern", h) for h in headers):
                 continue
