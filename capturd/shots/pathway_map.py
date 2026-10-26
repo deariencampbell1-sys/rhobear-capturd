@@ -36,6 +36,19 @@ refused naming the field and the type it got (D21), a non-mapping entry is
 refused naming its index and type — never skipped (D22) — and a mapping
 entry with no usable category is refused the same way (D27): the returned
 array is never shorter than what the feed declared.
+
+Refusals — every one of these constructs raises ``PathwayMapError``
+rather than half-fill, and each is named here so the list cannot live
+only in a PR body: a misaligned row (a row whose cell count differs
+from its header's, named with its line number); pipe-bearing prose
+immediately after a table, which the parser cannot tell from a
+misaligned row — put a blank line between; a duplicate ``id`` or an
+over-long ``id`` (over 200 characters); an unbalanced backtick in a
+confirmed table header or row; a verifier ``antiPatterns`` value that
+is not a list; an anti-pattern entry that is not a mapping; an
+anti-pattern entry with no usable category; a count cell of
+two bare integers (``2 5`` — nothing between the runs but whitespace),
+which is ambiguous and is never glued into one number.
 """
 
 from __future__ import annotations
