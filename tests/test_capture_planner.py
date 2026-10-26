@@ -1361,3 +1361,17 @@ def test_scan_stopped_at_cap_tracks_truncated_exactly():
     )
     assert exact.limits["truncated"] is False
     assert exact.limits["scan_stopped_at_cap"] is False
+
+
+def test_exactly_cap_is_not_truncated():
+    # D25: a document with exactly N eligible candidates and max_states=N is
+    # NOT truncated — reason "ok". This is the whole rationale for overshooting
+    # the cap by one; an off-by-one from '>' to '>=' in the truncation test
+    # must fail this test.
+    html = "<main>" + "".join(f"<button>Item {n}</button>" for n in range(1, 4)) + "</main>"
+    plan = plan_candidates(parse_html(html), max_states=3)
+
+    assert plan.reason == "ok"
+    assert plan.limits["truncated"] is False
+    assert plan.limits["scan_stopped_at_cap"] is False
+    assert len(plan.candidates) == 3
