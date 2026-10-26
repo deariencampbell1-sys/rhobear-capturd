@@ -360,13 +360,26 @@ _CATEGORY_WORDS = frozenset(
 )
 
 
+# D31: header cells are matched after removing markdown emphasis — `*`,
+# `_`, backticks and whitespace are stripped from both header cells before
+# the word-set comparison, so `| **Category** | **Count** |`,
+# `| _Category_ | _Count_ |` and `` | `Count` | ... `` are all count
+# tables. The old row-regex tolerated the emphasis in row labels; the
+# shape check must tolerate it in headers too, or every summary count
+# under an emphasised header is silently dropped.
+_EMPHASIS_RE = re.compile(r"[\s*_`]+")
+
+
 def _is_count_table(headers: list[str]) -> bool:
     """D24: the count-table header shape — exactly two columns, the first a
     category word, the second a count word. This decides WHERE counts may
-    be read from; the section heading is irrelevant."""
+    be read from; the section heading is irrelevant. D31: the comparison
+    runs on the header cells with markdown emphasis removed (`*`, `_`,
+    backticks and whitespace stripped), so a bold or italic header is
+    still a count table — never a silent drop of every count under it."""
     if len(headers) != 2:
         return False
-    first, second = (header.strip().lower() for header in headers)
+    first, second = (_EMPHASIS_RE.sub("", header).lower() for header in headers)
     return first in _CATEGORY_WORDS and second in _COUNT_WORDS
 
 
