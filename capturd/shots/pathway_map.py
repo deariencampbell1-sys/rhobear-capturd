@@ -383,6 +383,12 @@ _CATEGORY_WORDS = frozenset(
      "metric", "metrics", "measure", "item"}
 )
 
+# D48: the refusal renders its accepted vocabulary straight from these
+# sets, so the message can never drift from the words the shape check
+# actually matches — widening the vocabulary widens the message with it.
+_COUNT_WORDS_TEXT = ", ".join(sorted(_COUNT_WORDS))
+_CATEGORY_WORDS_TEXT = ", ".join(sorted(_CATEGORY_WORDS))
+
 
 # D31: header cells are matched after removing markdown emphasis — `*`,
 # `_`, backticks and whitespace are stripped from both header cells before
@@ -973,8 +979,11 @@ def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, Any]]:
                         f"'{' | '.join(headers)}' — its rows read like count "
                         f"rows (count label '{row[0]}' with a numeric count) "
                         "but the header is not a recognised count-table "
-                        "header (category word first, count word second) — "
-                        "refusing rather than returning nulls"
+                        "header (category word first, count word second; "
+                        "accepted category words: "
+                        f"{_CATEGORY_WORDS_TEXT}; accepted count words: "
+                        f"{_COUNT_WORDS_TEXT}) — refusing rather than "
+                        "returning nulls"
                     )
         tables.append({
             "headers": [c.strip() for c in cells],
