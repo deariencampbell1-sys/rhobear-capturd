@@ -32,7 +32,7 @@ import enum
 import re
 from dataclasses import dataclass, field, replace
 from html.parser import HTMLParser
-from typing import Iterator, Optional
+from typing import Iterator, Literal, Optional
 
 __all__ = [
     "ControlKind",
@@ -1007,7 +1007,12 @@ def _check_size(root: _Node) -> None:
 
 @dataclass(frozen=True)
 class Candidate:
-    """One candidate interaction target, ready for capture to click."""
+    """One candidate interaction target, ready for capture to click.
+
+    ``kind_note`` (D22) is the per-candidate note about how the planner found
+    and classified this control — it can never be confused with
+    ``CapturePlan.reason``, whose domain is the four plan statuses.
+    """
 
     id: str
     selector: str
@@ -1016,7 +1021,7 @@ class Candidate:
     label: str
     priority: int
     is_navigation: bool
-    reason: str
+    kind_note: str
     target: str = ""
     target_visible: Optional[bool] = None
 
@@ -1028,7 +1033,7 @@ class CapturePlan:
     classify from the DOM."""
 
     candidates: list[Candidate] = field(default_factory=list)
-    reason: str = "ok"
+    reason: Literal["ok", "no-candidates", "truncated", "too-large"] = "ok"
     limits: dict = field(default_factory=dict)
 
 
@@ -1086,7 +1091,8 @@ def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
     ``(priority, label)``, ties keep insertion order, and everything is sorted —
     never set iteration. Dedupe is by selector (D8): one node is one candidate,
     however many discovery loops reach it (a ``<summary role="tab">``) — the
-    second kind stays visible in the candidate's ``reason`` text, never as a
+    second kind stays visible in the candidate's ``kind_note`` text (D22 —
+    renamed so it cannot be confused with ``CapturePlan.reason``), never as a
     second row. There is no ``base_url`` parameter (D19): one that is
     accepted and ignored is a silent no-op that reads as a planner bug in the
     layer above — brief 01d gets it back when 01d actually resolves links.
@@ -1166,7 +1172,7 @@ def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
     # skipped node, so navigation_excluded counts it once across all loops.
     counted: set[_Node] = set()
 
-    def add(node: _Node, kind: ControlKind, reason: str, priority: int) -> None:
+    def add(node: _Node, kind: ControlKind, note: str, priority: int) -> None:
         """Validate and append one candidate.
 
         D7: one cap mechanism only — the discovery loops check the cap at the
@@ -1192,11 +1198,11 @@ def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
         existing = seen.get(selector)
         if existing is not None:
             # D8: dedupe by selector — one node is one candidate. The second
-            # kind stays visible in the kept candidate's reason text.
+            # kind stays visible in the kept candidate's kind_note.
             kept = candidates[existing]
             candidates[existing] = replace(
                 kept,
-                reason=f"{kept.reason}; also {kind.value}: {reason}",
+                kind_note=f"{kept.kind_note}; also {kind.value}: {note}",
             )
             return
         seen[selector] = len(candidates)
@@ -1209,7 +1215,7 @@ def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
                 label=label,
                 priority=priority,
                 is_navigation=_in_navigation(node),
-                reason=reason,
+                kind_note=note,
                 target=target,
                 target_visible=target_visible,
             )
