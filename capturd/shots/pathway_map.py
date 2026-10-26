@@ -43,10 +43,12 @@ only in a PR body: a misaligned row (a row whose cell count differs
 from its header's, named with its line number); pipe-bearing prose
 immediately after a table, which the parser cannot tell from a
 misaligned row — put a blank line between; a duplicate ``id`` or an
-over-long ``id`` (over 200 characters); an unbalanced backtick in a
-confirmed table header or row; a verifier ``antiPatterns`` value that
-is not a list; an anti-pattern entry that is not a mapping; an
-anti-pattern entry with no usable category; a count cell of
+over-long ``id`` (over 200 characters); an unbalanced backtick in a confirmed table header or row; a verifier
+``antiPatterns`` value that is not a list; an anti-pattern entry that is
+not a mapping; an anti-pattern entry with no usable category; a two-column
+table whose rows are count rows (a count label with a numeric count) but
+whose header is not a recognised count-table header — the feed owner fixes
+the header, the consumer never receives nulls (D38); and a count cell of
 two bare integers (``2 5`` — nothing between the runs but whitespace),
 which is ambiguous and is never glued into one number.
 """
@@ -364,12 +366,18 @@ _SUMMARY_COUNT_KEYS = (
 # live under ## Status Overview or ## Breakdown reads them instead of
 # raising. A three-column table is never a count table, and a two-column
 # pathway table (| id | status |) is not one because `status` is not a
-# count word.
+# count word. D38: the vocabulary is wider — a feed that names its count
+# column Metric / Value / Number / Amount / Qty, or its category column
+# Metric / Measure / Item, is still the count-table shape; before the
+# widening those headers were not recognised and every count under them
+# was silently returned as None.
 _COUNT_WORDS = frozenset(
-    {"count", "counts", "n", "total", "totals", "paths", "pathways", "#"}
+    {"count", "counts", "n", "total", "totals", "paths", "pathways", "#",
+     "metric", "metrics", "value", "values", "number", "amount", "qty"}
 )
 _CATEGORY_WORDS = frozenset(
-    {"category", "status", "kind", "label", "state", "type", "name"}
+    {"category", "status", "kind", "label", "state", "type", "name",
+     "metric", "metrics", "measure", "item"}
 )
 
 
@@ -911,6 +919,30 @@ def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, Any]]:
                 )
             rows.append(row)
             j += 1
+        headers = [c.strip() for c in cells]
+        # D38: a two-column table whose rows are COUNT rows — a count label
+        # in the first cell (D7's label set) and a parseable count in the
+        # second — but whose header is not a recognised count-table header
+        # must REFUSE naming the header row, never return every count as
+        # None. The header vocabulary is fixed (D24), so the only
+        # correction available is to the feed: it fixes the header, the
+        # consumer never receives nulls. A row whose second cell has no
+        # integer parses as None and is not a count row — arbitrary
+        # two-column tables (| id | status |, | method | path |) stay
+        # outside the refusal. A row whose cell is two bare integers
+        # raises through `_count_from_cell` on its own — the ambiguity is
+        # refused wherever the cell sits.
+        if len(headers) == 2 and not _is_count_table(headers):
+            for row in rows:
+                if _COUNT_ROW_RE.match(row[0]) and _count_from_cell(row[1]) is not None:
+                    raise PathwayMapError(
+                        f"table header at line {first_line + i} is "
+                        f"'{' | '.join(headers)}' — its rows read like count "
+                        f"rows (count label '{row[0]}' with a numeric count) "
+                        "but the header is not a recognised count-table "
+                        "header (category word first, count word second) — "
+                        "refusing rather than returning nulls"
+                    )
         tables.append({
             "headers": [c.strip() for c in cells],
             "rows": rows,
