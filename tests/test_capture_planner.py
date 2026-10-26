@@ -2017,3 +2017,41 @@ def test_credential_shaped_fragment_is_scrubbed():
     # No credential anywhere in the serialized plan.
     assert "access_token" not in repr(plan)
     assert "xyz" not in repr(plan)
+
+
+def test_memo_state_does_not_outlive_a_call():
+    # D82: the navigation memo is per-call state, never stored on the public
+    # Node. plan_candidates is promised pure — cross-call state in it means a
+    # second plan on the same tree can carry a stale memo, and brief 01d
+    # re-plans a live DOM with exactly this code. Three probes:
+    #   1. purity — two consecutive calls on the same tree return equal plans
+    #      and equal limits;
+    #   2. no state outlives the call — no navigation memo is left sitting on
+    #      any public node of the caller's tree;
+    #   3. counters are not inherited — after the tree's nav-ness source is
+    #      changed between calls, the second plan reads the mutated tree, not
+    #      the first call's cached answer.
+    root = parse_html(
+        '<div class="nav"><a href="/a" id="a">Nav link</a></div>'
+        '<main><a href="/b" id="b">Body link</a></main>'
+    )
+    plan1 = plan_candidates(root)
+    assert plan1.limits["navigation_excluded"] == 1
+    assert all(c.label != "Nav link" for c in plan1.candidates)
+
+    # 1. Purity: a second plan on the SAME tree is identical.
+    plan2 = plan_candidates(root)
+    assert repr(plan2) == repr(plan1)
+    assert plan2.limits == plan1.limits
+
+    # 2. No state outlives the call: the caller's tree carries no memo.
+    assert all(not hasattr(node, "nav_memo") for node in iter_elements(root))
+
+    # 3. The second call's counters are not inherited from the first: change
+    # what made the ancestor navigation chrome, then plan again.
+    for node in iter_elements(root):
+        if node.tag == "div":
+            node.attrs.pop("class")
+    plan3 = plan_candidates(root)
+    assert plan3.limits["navigation_excluded"] == 0
+    assert [c.label for c in plan3.candidates] == ["Nav link", "Body link"]
