@@ -297,11 +297,14 @@ def test_both_flavours_return_the_same_key_set():
     assert manifest["metadata"]["manifest_found"] is None
 
 
-def test_prose_with_pipe_after_a_table_is_not_a_row():
-    # D2: a table row must start with a pipe. A prose line containing a pipe
-    # right after a table is neither injected as a phantom row nor turned
-    # into a false short-row refusal — here a 2-cell prose line follows a
-    # nine-column table, which used to read as a 2-vs-9 short row.
+def test_prose_with_pipe_after_a_table_is_refused():
+    # D5 supersedes the D2 prose escape: a pipe-bearing line inside a table
+    # body must align with the header or be refused. The parser cannot tell
+    # pipe-bearing prose from a misaligned row, and calling it prose is what
+    # silently dropped every row after it — here a 2-cell line follows a
+    # nine-column table. The table ends only at a line with no unescaped
+    # pipe, a blank line, or a new heading; pipe-bearing prose after a
+    # table needs a blank line between.
     text = "\n".join([
         "# Pathway Manifest — prose after table",
         "",
@@ -312,8 +315,12 @@ def test_prose_with_pipe_after_a_table_is_not_a_row():
         "| p1 | A.jsx:1 | onClick | Launch capture | startCapture | POST /api/captures | A.jsx:1 | WIRED |  |",
         "see a | b above for the wiring notes",
     ])
-    parsed = parse_manifest_text(text)
-    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(text)
+    message = str(excinfo.value)
+    assert "line 8" in message
+    assert "2 cells" in message
+    assert "header has 9" in message
 
 
 def test_table_without_leading_pipes_parses():

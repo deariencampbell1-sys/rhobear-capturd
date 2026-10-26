@@ -17,6 +17,9 @@ Captur'd is a desktop tool: the map usually arrives as PASTED text, so
 markdown, pasted verifier JSON — and a pasted input parses to the same content
 as the equivalent file. Output is deterministic: same input bytes, same dict
 (no timestamps, no host paths).
+
+The parser refuses rather than half-fill: a table is returned with every row
+or the parse raises ``PathwayMapError`` — never part of one.
 """
 
 from __future__ import annotations
@@ -658,11 +661,12 @@ def _extract_anti_patterns(sections: list[dict[str, Any]]) -> list[dict[str, Any
 def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, list[str]]]:
     """Extract markdown pipe tables. ``first_line`` is the 1-based line number
     of ``text``'s first line within the original input, so a refused row can
-    name its line. A body row may omit the leading pipe (GFM) as long as it
-    carries an unescaped pipe and aligns with the header's cell count; a row
-    that cannot be aligned is REFUSED, not dropped — a half-filled map, or a
-    table parsing to zero rows beside a skipped pipe-bearing line, is the
-    failure this module exists to prevent."""
+    name its line. A body row may omit the leading pipe (GFM). D5: the table
+    ends only at a blank line, a line with no unescaped ``|``, or a new
+    heading; a pipe-bearing line inside the body is a row — aligned it is
+    returned, misaligned it raises ``PathwayMapError`` naming the line and
+    both cell counts. The parser either returns every row of a table or
+    raises — it never returns part of one."""
     tables: list[dict[str, list[str]]] = []
     lines = text.split("\n")
     i = 0
@@ -681,33 +685,28 @@ def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, list[str]]
             continue
         rows: list[list[str]] = []
         j = i + 2
-        # The body continues while a line starts with a pipe — or, GFM-style,
-        # omits the leading pipe but carries an unescaped one and aligns with
-        # the header's cell count. A line that matches neither ends the
-        # table. A row that cannot be aligned is REFUSED, never dropped: a
-        # table parsing to zero rows beside a skipped pipe-bearing line is
-        # exactly the silent drop this module exists to prevent.
+        # D5: the body ends only at a blank line, a line with no unescaped
+        # pipe, or a new heading (headings never reach this loop — sections
+        # are split first). A pipe-bearing line is a ROW: aligned it is
+        # returned, misaligned it is REFUSED naming the line and both
+        # counts. There is no "prose with a pipe" escape: the parser cannot
+        # tell pipe-bearing prose from a misaligned row, and calling it
+        # prose is what silently dropped every row after it. Pipe-bearing
+        # prose after a table needs a blank line between.
         while j < len(lines):
             line = lines[j]
             if not line.strip():
                 break
-            leading_pipe = re.match(r"^\s*\|", line) is not None
-            has_unescaped_pipe = re.search(r"(?<!\\)\|", line) is not None
-            if not leading_pipe and not has_unescaped_pipe:
-                break  # plain prose — not a row, ends the table
+            if not re.search(r"(?<!\\)\|", line):
+                break  # no unescaped pipe — not a row, ends the table
             row = _split_row(line, first_line + j)
-            if len(row) == len(cells):
-                rows.append(row)
-                j += 1
-                continue
-            if not leading_pipe and rows:
-                # A pipe-bearing line AFTER parsed rows reads as prose (the
-                # trailing-notes case): it ends the table, no refusal.
-                break
-            raise PathwayMapError(
-                f"table row at line {first_line + j} has {len(row)} cells but its "
-                f"header has {len(cells)} — refusing misaligned row, first cell: '{row[0]}'"
-            )
+            if len(row) != len(cells):
+                raise PathwayMapError(
+                    f"table row at line {first_line + j} has {len(row)} cells but its "
+                    f"header has {len(cells)} — refusing misaligned row, first cell: '{row[0]}'"
+                )
+            rows.append(row)
+            j += 1
         tables.append({"headers": [c.strip() for c in cells], "rows": rows})
         i = j
     return tables
