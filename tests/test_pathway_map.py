@@ -683,6 +683,105 @@ def test_summary_decimal_count_reads_the_integer_part():
     assert parsed["antiPatterns"][0]["count"] == 3
 
 
+def test_range_and_annotation_read_the_leading_integer():
+    # D32: a cell's count is its LEADING integer, unless the cell is two
+    # bare integers. A range ("3-5") or an annotation ("3 of 5",
+    # "3 (of 5)", "3+") in a count-shaped table must read its leading
+    # integer, exactly as the old row-regex did — refusing the whole
+    # document over one annotated cell is an abort, not a parse. D26 is
+    # not weakened: two BARE integers ("2 5") are still refused, and a
+    # cell with no integer at all is still None.
+    for cell, expected in (
+        ("3-5", 3),
+        ("3 of 5", 3),
+        ("3 (of 5)", 3),
+        ("3+", 3),
+    ):
+        text = "\n".join([
+            "# Pathway Manifest — annotated summary count",
+            "",
+            "## Summary Counts",
+            "",
+            "| Category | Count |",
+            "|---|---|",
+            f"| **WIRED** | {cell} |",
+            "",
+            "## 1. Pathways Table",
+            "",
+            "| id | status |",
+            "|---|---|",
+            "| p1 | WIRED |",
+        ])
+        parsed = parse_manifest_text(text)
+        assert parsed["summary"]["wired"] == expected, cell
+        # One parser for every count: the same grammar at the anti-pattern
+        # count site.
+        anti_text = "\n".join([
+            "# Pathway Manifest — annotated anti-pattern count",
+            "",
+            "## 1. Pathways Table",
+            "",
+            "| id | status |",
+            "|---|---|",
+            "| p1 | WIRED |",
+            "",
+            "## 2. Anti-patterns",
+            "",
+            "| Category | Count | File | Line | Quote |",
+            "|---|---|---|---|---|",
+            f"| annotation-hits | {cell} | hub.ts | 88 | `export const x` |",
+        ])
+        anti = parse_manifest_text(anti_text)
+        assert anti["antiPatterns"][0]["count"] == expected, cell
+
+    # The verifier flavour rides the same parser too.
+    verifier = parse_verifier_json_text(json.dumps({
+        "antiPatterns": [{"category": "r", "count": "3 of 5"}],
+        "checks": {"api-wiring": {"findings": [{"id": "f1", "path": "/api/x"}]}},
+    }))
+    assert verifier["antiPatterns"][0]["count"] == 3
+
+    # A cell with no integer at all is None — a count-table cell with no
+    # number is not a count (unchanged).
+    none_text = "\n".join([
+        "# Pathway Manifest — digit-less count cell",
+        "",
+        "## Summary Counts",
+        "",
+        "| Category | Count |",
+        "|---|---|",
+        "| **WIRED** | n/a |",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+    ])
+    assert parse_manifest_text(none_text)["summary"]["wired"] is None
+
+    # Two bare integers are still refused — D26 stands (also asserted
+    # unchanged in test_cell_with_two_integer_runs_is_refused).
+    bare_text = "\n".join([
+        "# Pathway Manifest — two bare integers",
+        "",
+        "## Summary Counts",
+        "",
+        "| Category | Count |",
+        "|---|---|",
+        "| **WIRED** | 2 5 |",
+        "",
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(bare_text)
+    assert "2 5" in str(excinfo.value)
+
+
 def test_verifier_integer_zero_count_is_kept():
     # D18: an integer zero is a real count. The verifier flavour carries the
     # same anti-pattern shape as the manifest flavour, and a count that
