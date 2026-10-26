@@ -24,7 +24,9 @@ count tables — tables whose header SHAPE is exactly two columns carrying a
 category word and a count word in either order (D24, D59) — wherever they sit; a three-column
 table sets no counts and raises nothing, and a two-column pathway table
 (``| id | status |``) is not a count table because its second header is not
-a count word. The refusal is decided once a line is KNOWN to be a
+a count word. A summary count key set by two rows is refused (D61) — the
+ambiguity is the duplicate, not the value, exactly like a duplicate pathway
+id. The refusal is decided once a line is KNOWN to be a
 table, never during header detection: a prose line that carries a pipe
 and a stray backtick is skipped like any other non-table line, not a
 parse abort (D17).
@@ -82,6 +84,7 @@ REFUSALS: tuple[str, ...] = (
     "an anti-pattern entry with no usable category",
     "an unrecognised count-table header over count rows",
     "a count cell of two bare integers",
+    "a duplicate or conflicting count row",
 )
 
 __doc__ = (__doc__ or "").rstrip() + "\n\n* " + "\n* ".join(REFUSALS) + ".\n"
@@ -549,21 +552,29 @@ def _split_sections(raw: str) -> list[dict[str, Any]]:
 
 def _extract_summary(sections: list[dict[str, Any]]) -> dict[str, Any]:
     summary: dict[str, Any] = {key: None for key in _SUMMARY_COUNT_KEYS}
+    # D61: the summary is one document-wide object — the second row to set
+    # a key the first row already set is refused, whatever the values say
+    # (the ambiguity is the duplicate, not the value), exactly like the
+    # duplicate-pathway-id refusal.
+    line_by_count_key: dict[str, int] = {}
     for sec in sections:
         # D24: the section heading no longer decides anything — every table
         # in the document is checked against the count-table header shape,
         # and a matching table's rows are read wherever the table sits. A
         # pathway row shaped `| p1 | WIRED | 3 |` lives in a three-column
         # table, which is never a count table, so it cannot set a count.
-        for table in _extract_tables("\n".join(sec["body"]), sec["start"] + 1):
+        for table in _extract_tables(
+            "\n".join(sec["body"]), sec["start"] + 1, row_lines=True
+        ):
             order = _count_table_order(table["headers"])
             if order is None:
                 continue
             label_index, count_index = order
+            row_lines = table["row_lines"]
             # Counts come from the table's CELLS only, never from prose.
             # The row label decides WHICH count the row sets (D7); which
             # cell carries the label is the header's column order (D59).
-            for row in table["rows"]:
+            for row_position, row in enumerate(table["rows"]):
                 match = _count_label_match(row[label_index])
                 if not match:
                     continue
@@ -577,21 +588,35 @@ def _extract_summary(sections: list[dict[str, Any]]) -> dict[str, Any]:
                     # zero is a real count (D4).
                     continue
                 if "unwire" in key:
-                    summary["unwired"] = val
+                    summary_key = "unwired"
                 elif "wire" in key:
-                    summary["wired"] = val
+                    summary_key = "wired"
                 elif "mock" in key:
-                    summary["mocked"] = val
+                    summary_key = "mocked"
                 elif "incomplete" in key:
-                    summary["incomplete"] = val
+                    summary_key = "incomplete"
                 elif "unclear" in key:
-                    summary["unclear"] = val
+                    summary_key = "unclear"
                 elif "total" in key:
-                    summary["pathwaysTotal"] = val
+                    summary_key = "pathwaysTotal"
                 elif "route" in key:
-                    summary["routesCount"] = val
-                elif "plugin" in key:
-                    summary["pluginsCount"] = val
+                    summary_key = "routesCount"
+                else:
+                    summary_key = "pluginsCount"
+                row_line = row_lines[row_position]
+                first_set_line = line_by_count_key.get(summary_key)
+                if first_set_line is not None:
+                    # D61: refuse, never keep-the-last — a feed that says
+                    # the same count twice is ambiguous, whether the two
+                    # values agree or conflict.
+                    raise PathwayMapError(
+                        f"count row at line {row_line} sets summary key "
+                        f"'{summary_key}' again — already set at line "
+                        f"{first_set_line} — refusing a duplicate or "
+                        "conflicting count row"
+                    )
+                line_by_count_key[summary_key] = row_line
+                summary[summary_key] = val
     return summary
 
 
@@ -935,10 +960,16 @@ def _extract_anti_patterns(sections: list[dict[str, Any]]) -> list[dict[str, Any
     return patterns
 
 
-def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, Any]]:
+def _extract_tables(
+    text: str, first_line: int = 1, *, row_lines: bool = False
+) -> list[dict[str, Any]]:
     """Extract markdown pipe tables. ``first_line`` is the 1-based line number
     of ``text``'s first line within the original input, so a refused row can
-    name its line. A body row may omit the leading pipe (GFM). D5: the table
+    name its line. D61: with ``row_lines`` set, each table dict also carries
+    ``row_lines`` — the 1-based input line of every body row, in row order —
+    so a refusal raised OUTSIDE this function (a duplicate count row, a
+    manifest anti-pattern row with no category) can still name its line; the
+    default shape stays exactly ``headers`` + ``rows`` (D40). A body row may omit the leading pipe (GFM). D5: the table
     ends only at a blank line, a line with no unescaped ``|``, or a new
     heading; a pipe-bearing line inside the body is a row — aligned it is
     returned, misaligned it raises ``PathwayMapError`` naming the line and
@@ -981,6 +1012,7 @@ def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, Any]]:
             i += 1
             continue
         rows: list[list[str]] = []
+        row_line_numbers: list[int] = []
         j = i + 2
         # D5: the body ends only at a blank line, a line with no unescaped
         # pipe, or a new heading (headings never reach this loop — sections
@@ -1010,6 +1042,7 @@ def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, Any]]:
                     f"header has {len(cells)} — refusing misaligned row, first cell: '{row[0]}'"
                 )
             rows.append(row)
+            row_line_numbers.append(first_line + j)
             j += 1
         headers = [c.strip() for c in cells]
         # D38: a two-column table whose rows are COUNT rows — a count label
@@ -1047,10 +1080,13 @@ def _extract_tables(text: str, first_line: int = 1) -> list[dict[str, Any]]:
                         f"{_COUNT_WORDS_TEXT}) — refusing rather than "
                         "returning nulls"
                     )
-        tables.append({
+        table: dict[str, Any] = {
             "headers": [c.strip() for c in cells],
             "rows": rows,
-        })
+        }
+        if row_lines:
+            table["row_lines"] = row_line_numbers
+        tables.append(table)
         i = j
     return tables
 
