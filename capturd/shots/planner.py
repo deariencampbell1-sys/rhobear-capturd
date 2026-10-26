@@ -1001,26 +1001,24 @@ def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int 
     # skipped node, so navigation_excluded counts it once across all loops.
     counted: set[_Node] = set()
 
-    def add(node: _Node, kind: ControlKind, reason: str, priority: int) -> bool:
+    def add(node: _Node, kind: ControlKind, reason: str, priority: int) -> None:
         """Validate and append one candidate.
 
-        Returns False once the plan holds more than ``cap`` candidates. The
-        discovery loops check the same condition at the top of every iteration
-        and stop scanning (round 2, D4): the cap bounds the whole scan, not
-        just validation, so the counters reflect the nodes actually visited.
-        The cap is overshot by one so the ``truncated`` flag stays exact: a
-        document with exactly ``cap`` valid candidates is not reported as
-        truncated.
+        D7: one cap mechanism only — the discovery loops check the cap at the
+        top of every iteration and stop scanning (round 2, D4), bounding the
+        whole scan and not just validation, so the counters reflect the nodes
+        actually visited. ``add()`` itself never consults the cap and its
+        return value is gone. The cap is overshot by one so the ``truncated``
+        flag stays exact: a document with exactly ``cap`` valid candidates is
+        not reported as truncated.
         """
         nonlocal dropped_ambiguous
-        if len(candidates) > cap:
-            return False
         if not _is_visible(node) or _is_disabled(node):
-            return True
+            return
         selector, strategy = index.unique_selector(node)
         if selector is None or index.count_matches(selector) != 1:
             dropped_ambiguous += 1
-            return True
+            return
         label = _text_of(node) or node.attrs.get("aria-controls") or node.attrs.get("href") or kind.value
         target, target_visible = _target_summary(index, node)
         existing = seen.get(selector)
@@ -1032,7 +1030,7 @@ def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int 
                 kept,
                 reason=f"{kept.reason}; also {kind.value}: {reason}",
             )
-            return True
+            return
         seen[selector] = len(candidates)
         candidates.append(
             Candidate(
@@ -1048,7 +1046,6 @@ def plan_candidates(root: Node, base_url: Optional[str] = None, max_states: int 
                 target_visible=target_visible,
             )
         )
-        return True
 
     for index_no, node in enumerate(tabs):
         if len(candidates) > cap:
