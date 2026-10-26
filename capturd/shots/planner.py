@@ -839,8 +839,12 @@ def _is_disabled(node: _Node) -> bool:
     plus ``fieldset``), by ``aria-disabled="true"``, or by a ``disabled``
     class. D10: a disabled ancestor disables its descendants too — a
     ``<button>`` inside ``<fieldset disabled>`` is unclickable however deep
-    it is nested, so it is never planned. The ancestor chain is walked via
-    :func:`_ancestors_inclusive`, like :func:`_is_visible`.
+    it is nested, so it is never planned. D34: ``aria-disabled="true"`` is
+    inherited the same way — the standard ARIA disabled-toolbar pattern
+    ``<div aria-disabled="true"><button>Go</button></div>`` renders a control
+    the browser will not activate, and planning it makes brief 01d click a
+    no-op. The ancestor chain is walked via :func:`_ancestors_inclusive`,
+    like :func:`_is_visible`.
 
     D20 exception, per HTML: the first ``<legend>`` subtree of a disabled
     ``<fieldset>`` is interactive — those controls are not disabled by that
@@ -850,11 +854,12 @@ def _is_disabled(node: _Node) -> bool:
     if node.tag in ("button", "input", "select", "textarea", "optgroup", "option", "fieldset"):
         if "disabled" in node.attrs:
             return True
-    if _keyword_value(node, "aria-disabled") == "true":
-        return True
     if "disabled" in _classes(node):
         return True
     for ancestor in _ancestors_inclusive(node):
+        # D34: aria-disabled is inherited down the ancestor chain.
+        if _keyword_value(ancestor, "aria-disabled") == "true":
+            return True
         if ancestor.tag == "fieldset" and "disabled" in ancestor.attrs:
             if not _in_first_legend(ancestor, node):
                 return True
