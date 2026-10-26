@@ -775,6 +775,48 @@ def test_parse_refuses_oversized_input_before_building(monkeypatch):
     assert len(built) <= planner_module._MAX_NODES + 1
 
 
+def test_structural_verification_is_linear_in_depth(monkeypatch):
+    # D28: verifying a structural path must compare the parent chain of the
+    # target node directly (O(depth)) — never re-scan the document per
+    # candidate (O(nodes) per selector). Counted, not timed: on a ~2 000-node
+    # document with no stable attributes at all, the number of _match_chain
+    # calls must stay under a bound proportional to nodes x depth. A
+    # scan-everything implementation makes one call per node per candidate
+    # and blows the bound immediately.
+    import capturd.shots.planner as planner_module
+
+    groups = "".join(
+        f"<div class='g'><span><p>Text {n}</p><button>Go</button></span></div>"
+        for n in range(500)
+    )
+    root = parse_html(f"<main>{groups}</main>")
+    nodes = list(iter_elements(root))
+    assert len(nodes) == 2_001
+
+    depth = 0
+    stack = [(root, 0)]
+    while stack:
+        node, level = stack.pop()
+        depth = max(depth, level)
+        stack.extend((child, level + 1) for child in node.children)
+    assert depth == 4
+
+    calls = 0
+    original = planner_module._match_chain
+
+    def counting_match_chain(node, selector):
+        nonlocal calls
+        calls += 1
+        return original(node, selector)
+
+    monkeypatch.setattr(planner_module, "_match_chain", counting_match_chain)
+    # No cap: every one of the 500 controls is discovered and verified.
+    plan = plan_candidates(root, max_states=len(nodes))
+    assert plan.reason == "ok"
+    assert len(plan.candidates) == 500
+    assert calls <= len(nodes) * depth
+
+
 def test_oversized_document_fails_with_a_reason_not_a_crash():
     # More than 10 000 elements exceeds the node ceiling -> too-large.
     plan = plan_candidates(_spans_tree(10_001))
