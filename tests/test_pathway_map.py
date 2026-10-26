@@ -575,6 +575,25 @@ def test_verifier_integer_zero_count_is_kept():
     ]
 
 
+def test_verifier_anti_patterns_must_be_a_list():
+    # D21: a non-list `antiPatterns` is refused by name. A dict yields its
+    # keys and a string its characters, so either shape would silently
+    # parse to garbage (or zero entries) instead of refusing. The refusal
+    # must name the field AND the type it got.
+    for payload, type_name in (({}, "dict"), ("x", "str")):
+        text = json.dumps({
+            "antiPatterns": payload,
+            "checks": {"api-wiring": {"findings": [{"id": "f1", "path": "/api/x"}]}},
+        })
+        with pytest.raises(PathwayMapError) as excinfo:
+            parse_verifier_json_text(text)
+        message = str(excinfo.value)
+        assert "antiPatterns" in message, f"refusal must name the field: {message}"
+        assert type_name in message, (
+            f"refusal must name the type it got ({type_name}): {message}"
+        )
+
+
 def test_comma_formatted_count_is_read_whole_or_refused():
     # D19, decided: READ WHOLE — `,` and spaces are stripped before taking
     # the first integer run, so "1,234" is 1234: never the truncated first
