@@ -37,7 +37,9 @@ normaliser the manifest flavour uses (D23), while a non-list array is
 refused naming the field and the type it got (D21), a non-mapping entry is
 refused naming its index and type — never skipped (D22) — and a mapping
 entry with no usable category is refused the same way (D27): the returned
-array is never shorter than what the feed declared.
+array is never shorter than what the feed declared. D64: the manifest
+flavour refuses a category-less anti-pattern table row by its line the
+same way.
 
 Refusals — every one of these constructs raises ``PathwayMapError``
 rather than half-fill. The list is data (``REFUSALS`` below, D49) and
@@ -82,6 +84,7 @@ REFUSALS: tuple[str, ...] = (
     "a verifier 'antiPatterns' value that is not a list",
     "an anti-pattern entry that is not a mapping",
     "an anti-pattern entry with no usable category",
+    "a manifest anti-pattern row with no usable category",
     "an unrecognised count-table header over count rows",
     "a count cell of two bare integers",
     "a duplicate or conflicting count row",
@@ -926,9 +929,10 @@ def _normalise_anti_pattern(entry: dict[str, Any]) -> dict[str, Any] | None:
     same category aliases and count parser whether the entry came from a
     manifest table row or from verifier JSON (D18 — the flavours must agree
     on the same input value). Returns None for an entry with no category:
-    the manifest caller skips such a table row, while the verifier caller
-    REFUSES the entry by index instead (D27) so its returned array can
-    never be shorter than what the feed declared. Every value is read with
+    the manifest caller REFUSES such a table row by its line (D64), and the
+    verifier caller REFUSES the entry by index (D27), so either flavour's
+    returned array can never be shorter than what the feed declared. Every
+    value is read with
     absence decided by ``is None`` (D39): a present ``None`` is not a value
     and becomes ``''`` exactly like an absent key — only a real value
     round-trips, a present zero as ``"0"`` (D62). The verifier's own
@@ -968,7 +972,8 @@ def _extract_anti_patterns(parsed_sections: _ParsedSections) -> list[dict[str, A
             headers = [h.lower() for h in table["headers"]]
             if not any(re.search(r"category|type|anti-?pattern|pattern", h) for h in headers):
                 continue
-            for row in table["rows"]:
+            row_lines = table["row_lines"]
+            for row_position, row in enumerate(table["rows"]):
                 entry: dict[str, str] = {}
                 for i, header in enumerate(headers):
                     entry[header] = row[i]
@@ -976,8 +981,19 @@ def _extract_anti_patterns(parsed_sections: _ParsedSections) -> list[dict[str, A
                 # flavour (one shape, one count parser), so an integer 0
                 # count is a real count in both flavours alike.
                 pattern = _normalise_anti_pattern(entry)
-                if pattern is not None:
-                    patterns.append(pattern)
+                if pattern is None:
+                    # D64: refuse, never skip — the manifest flavour now
+                    # agrees with the verifier flavour (D27): a declared
+                    # row with no usable category must not shorten the
+                    # returned array with no signal. The refusal names the
+                    # row's line.
+                    raise PathwayMapError(
+                        "manifest anti-pattern table row at line "
+                        f"{row_lines[row_position]} has no usable category "
+                        "(category/type/anti-pattern/pattern all missing or "
+                        "empty) — refusing"
+                    )
+                patterns.append(pattern)
     return patterns
 
 
