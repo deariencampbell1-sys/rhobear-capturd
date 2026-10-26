@@ -710,18 +710,34 @@ def _count_from_cell(raw: Any) -> int | None:
     only "absent" test — ``0 or ""`` swallowed a JSON integer ``0`` into
     None while the manifest flavour kept the string cell "0" as 0, so the
     two flavours disagreed on the same input value; a real zero is a real
-    count. D19, decided: READ WHOLE — `,` and spaces are stripped before
-    taking the first integer run, so "1,234" is 1234, never the truncated
-    first run 1 and never a silent None. D4's decimal semantics survive:
-    only separators are stripped (never "."), so "3.5" still reads 3, and
-    a cell with no digits at all stays None. The verifier anti-patterns
-    round trip (D23) parses each entry's ``count`` through this same
-    parser."""
+    count. D19: grouping separators are read WHOLE — `,` and the
+    non-breaking space sit INSIDE one number and are stripped before the
+    integer, so "1,234" is 1234, never the truncated first run 1 and never
+    a silent None. D26: any other whitespace between digit runs is NOT
+    grouping — two independent integer runs are two numbers and are
+    REFUSED naming the cell ("2 5" raises; it must not glue into 25).
+    D4's decimal semantics survive: a decimal number is one run and reads
+    its integer part ("3.5" → 3), and a cell with no digits at all stays
+    None. The verifier anti-patterns round trip (D23) parses each entry's
+    ``count`` through this same parser."""
     if raw is None:
         return None
-    digits = re.sub(r"[,\s]", "", str(raw))
-    count_match = re.search(r"\d+", digits)
-    return int(count_match.group(0)) if count_match else None
+    text = str(raw)
+    # Grouping separators live INSIDE one number: `,` and the non-breaking
+    # space are stripped, so "1,234" reads whole (D19). Any other
+    # whitespace between digit runs separates two numbers (D26).
+    joined = text.replace(",", "").replace("\u00a0", "")
+    # A decimal point does not split: one decimal number is one run, so
+    # "3.5" keeps its integer part (D4) and "2 5" is two runs, never 25.
+    runs = re.findall(r"\d+(?:\.\d+)?", joined)
+    if not runs:
+        return None
+    if len(runs) > 1:
+        raise PathwayMapError(
+            f"count cell '{text}' has two independent integer runs "
+            f"('{runs[0].split('.')[0]}' and '{runs[1].split('.')[0]}') — refusing"
+        )
+    return int(runs[0].split(".", 1)[0])
 
 
 def _normalise_anti_pattern(entry: dict[str, Any]) -> dict[str, Any] | None:
