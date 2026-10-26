@@ -1118,9 +1118,14 @@ def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
     There is no live-versus-rested reason code here; that distinction is
     brief 01d's.
 
-    ``limits`` keys (D12): ``max_states`` (the effective cap), ``kept`` (the
-    candidates kept — validated, deduped and added — before the cap
-    truncates the plan; the counter says kept, never "validated"),
+    ``limits`` keys (D12): ``max_states`` (the effective cap), ``kept`` (D26:
+    the number of candidates the plan holds — ``len(plan.candidates)``. It
+    used to report ``cap + 1``, the truncation sentinel, while
+    ``candidates`` held ``cap``, under a name that says otherwise; the
+    sentinel is internal bookkeeping and is never counted. D30: the one
+    exception is a cap that truncates the plan to zero (``max_states=0``) —
+    ``kept`` then reports the exact overshoot, 1, the one candidate discovery
+    kept before the cap cut it, never a lower bound),
     ``truncated``, ``scan_stopped_at_cap``, ``dropped_ambiguous``,
     ``navigation_excluded``, ``dropped_action_labels``, and ``too_large``
     (the reason text, present only on reason="too-large").
@@ -1293,12 +1298,17 @@ def plan_candidates(root: Node, max_states: int = 24) -> CapturePlan:
         reason = "ok"
     else:
         reason = "no-candidates"
+    # D26: kept is the true count — len(plan.candidates) — never the cap + 1
+    # truncation sentinel. D30: a truncation to zero (max_states=0) reports
+    # the exact overshoot instead — discovery kept exactly one candidate
+    # (cap + 1) before the cap cut it.
+    kept = 1 if (truncated and not final) else len(final)
     return CapturePlan(
         candidates=final,
         reason=reason,
         limits={
             "max_states": cap,
-            "kept": len(candidates),
+            "kept": kept,
             "truncated": truncated,
             "scan_stopped_at_cap": scan_stopped_at_cap,
             "dropped_ambiguous": dropped_ambiguous,
