@@ -7,6 +7,7 @@ output. No network, no Playwright — this module is pure parsing.
 
 from __future__ import annotations
 
+import ast
 import inspect
 import json
 import re
@@ -2294,3 +2295,30 @@ def test_anti_pattern_quote_aliases_normalise():
             {"category": "dup-fetch", "count": None, "file": "", "line": "",
              "quote": quote},
         ]
+
+
+def test_extractor_locals_are_used():
+    # D69: the D63 refactor left the `sec` loop variable unused in
+    # `_extract_summary` and `_extract_routes` — a dead local each, left
+    # behind when the extractors stopped needing the section heading.
+    # Structural, not behavioural: every local the two functions STORE must
+    # also be READ somewhere in the same function (the `_` placeholder
+    # excepted). No behaviour is asserted here; the extractors' own tests
+    # pin that.
+    for name in ("_extract_summary", "_extract_routes"):
+        func = getattr(pathway_map, name)
+        tree = ast.parse(inspect.getsource(func))
+        fn = tree.body[0]
+        stored = {
+            node.id for node in ast.walk(fn)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+        }
+        loaded = {
+            node.id for node in ast.walk(fn)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+        }
+        unused = stored - loaded - {"_"}
+        assert not unused, (
+            f"{name} stores locals it never reads: {sorted(unused)} — "
+            "dead locals left behind by the D63 refactor must be deleted"
+        )
