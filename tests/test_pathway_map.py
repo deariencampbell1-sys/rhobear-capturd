@@ -2073,3 +2073,35 @@ def test_manifest_anti_pattern_row_without_category_refuses():
     with pytest.raises(PathwayMapError) as excinfo:
         parse_verifier_json_text(verifier_text)
     assert "index 1" in str(excinfo.value)
+
+
+def test_reversed_order_probe_refuses_an_unrecognised_header():
+    # D65: the D38 unrecognised-header probe reads rows as (label, count)
+    # in the NORMAL column order only, so a REVERSED count table (count
+    # word first) under an unrecognised category header drops every count
+    # with no signal — the parse "succeeds" with an all-None summary.
+    # D59 taught the header SHAPE both orders; the probe must try both
+    # orders too, and the refusal names the header while its message lists
+    # both accepted orders.
+    text = "\n".join([
+        "# Pathway Manifest — reversed probe",       # line 1
+        "",                                         # line 2
+        "## Status Overview",                       # line 3
+        "",                                         # line 4
+        "| Count | Blah |",                         # line 5
+        "|---|---|",                                # line 6
+        "| 5 | **WIRED** |",                        # line 7 — count first
+        "",                                         # line 8
+        "## 1. Pathways Table",                     # line 9
+        "",                                         # line 10
+        "| id | status |",                          # line 11
+        "|---|---|",                                # line 12
+        "| p1 | WIRED |",                           # line 13
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(text)
+    message = str(excinfo.value)
+    assert "Count | Blah" in message          # names the offending header
+    assert "line 5" in message                # names the header row's line
+    assert "category word first" in message   # both accepted orders listed
+    assert "count word first" in message
