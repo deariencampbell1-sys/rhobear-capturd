@@ -18,7 +18,7 @@ import threading
 import time
 import uuid
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -28,6 +28,7 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 from xml.etree import ElementTree
 
 from capturd._net import is_private_ip
+from capturd.shots.pathway_map import PathwayMapError, load_pathway_map
 
 
 DEFAULT_VIEWPORTS: dict[str, dict[str, int]] = {
@@ -137,9 +138,20 @@ class CaptureTarget:
     width: int
     height: int
     scheme: str
+    # Map-driven plans (capturd.shots.pathway_plan) carry the pathway identity
+    # and the named control's planner selector; URL-driven plans leave them
+    # empty. Nothing downstream branches on which input arrived.
+    pathway_id: str = ""
+    pathway_status: str = ""
+    pathway_trigger: str = ""
+    trigger_selector: str = ""  # planner selector to click after load, to reach the rested state
 
     @property
     def state_id(self) -> str:
+        if self.pathway_id:
+            status = _slug(self.pathway_status or "unknown", "unknown")
+            pid = _slug(self.pathway_id, "pathway")
+            return f"{pid}-{status}-{self.viewport_id}-{self.scheme}"
         return f"{self.viewport_id}-{self.scheme}"
 
 
@@ -806,48 +818,106 @@ def discover_site_urls(
 
 
 def build_capture_plan(payload: dict[str, Any]) -> tuple[list[str], list[CaptureTarget], dict[str, Any]]:
-    raw_urls = payload.get("urls") or []
-    if isinstance(raw_urls, str):
-        raw_urls = re.split(r"[\r\n,]+", raw_urls)
-    if not isinstance(raw_urls, list):
-        raise RestedCaptureError("urls must be a list or newline text")
-
-    urls = [str(item).strip() for item in raw_urls if str(item).strip()]
-    sitemap_url = str(payload.get("sitemap_url") or "").strip()
-    crawl_url = str(payload.get("crawl_url") or "").strip()
-    local_path = str(payload.get("local_path") or "").strip()
-    crawl_enabled = bool(payload.get("crawl") or crawl_url)
-    local_enabled = bool(payload.get("local") or local_path)
-    discovery: dict[str, Any] = {"mode": "manual", "page_count": 0}
-    if crawl_url:
-        urls.append(crawl_url)
-
-    if local_enabled:
-        urls, discovery = discover_local_html(
-            local_path or (urls[0] if urls else ""),
-            max_urls=int(payload.get("max_pages") or payload.get("max_urls") or MAX_CRAWL_URLS),
-            max_depth=int(payload.get("crawl_depth") or DEFAULT_CRAWL_DEPTH),
+    # The input seam: exactly one of the plain URL family or one map input.
+    # Zero or two sources is the same named refusal load_pathway_map makes —
+    # PathwayMapError, never a raw ValueError.
+    map_inputs = [
+        ("manifest_path", payload.get("manifest_path")),
+        ("map_path", payload.get("map_path")),
+        ("manifest_text", payload.get("manifest_text")),
+        ("map_text", payload.get("map_text")),
+    ]
+    supplied_maps = [name for name, value in map_inputs if value is not None]
+    url_supplied = bool(
+        payload.get("url")
+        or payload.get("urls")
+        or payload.get("sitemap_url")
+        or payload.get("crawl_url")
+        or payload.get("local_path")
+        or payload.get("crawl")
+        or payload.get("local")
+    )
+    source_names = (["url"] if url_supplied else []) + supplied_maps
+    if not source_names:
+        raise PathwayMapError(
+            "a pathway map is required — paste the manifest markdown (or pass a file)"
         )
-    elif crawl_enabled:
-        urls, discovery = discover_site_urls(
-            urls,
-            explicit_sitemap_urls=[sitemap_url] if sitemap_url else [],
-            max_urls=int(payload.get("max_pages") or payload.get("max_urls") or MAX_CRAWL_URLS),
-            max_depth=int(payload.get("crawl_depth") or DEFAULT_CRAWL_DEPTH),
-            concurrency=int(payload.get("crawl_concurrency") or DEFAULT_CRAWL_CONCURRENCY),
-            timeout_ms=int(payload.get("discovery_timeout_ms") or DEFAULT_DISCOVERY_TIMEOUT_MS),
-            wait_ms=int(payload.get("discovery_wait_ms") or DEFAULT_DISCOVERY_WAIT_MS),
-            include_sitemaps=bool(payload.get("include_sitemaps", True)),
+    if len(source_names) > 1:
+        raise PathwayMapError(
+            "provide a manifest or a map, not both — got " + ", ".join(sorted(source_names))
         )
-    elif sitemap_url:
-        urls.extend(expand_sitemap(sitemap_url))
 
-    urls = _dedupe_urls(urls)
+    pathway_targets: list[CaptureTarget] | None = None
+    if supplied_maps:
+        from .pathway_plan import MAX_TARGETS, plan_targets_from_map
 
-    if not urls:
-        raise RestedCaptureError("add at least one URL")
-    if len(urls) > MAX_URLS:
-        raise RestedCaptureError(f"too many URLs; maximum is {MAX_URLS}")
+        base_url = str(payload.get("base_url") or "").strip()
+        if not base_url:
+            raise RestedCaptureError("base_url is required when feeding a pathway map")
+        pathway_map = load_pathway_map(
+            manifest_path=payload.get("manifest_path"),
+            map_path=payload.get("map_path"),
+            manifest_text=payload.get("manifest_text"),
+            map_text=payload.get("map_text"),
+        )
+        urls, pathway_targets = plan_targets_from_map(
+            pathway_map,
+            base_url,
+            max_targets=int(payload.get("max_targets") or MAX_TARGETS),
+        )
+        crawl_enabled = False
+        local_enabled = False
+        discovery: dict[str, Any] = {
+            "mode": "map",
+            "pathway_count": len(pathway_map.get("pathways") or []),
+            "route_count": len(pathway_map.get("routes") or []),
+            "manifest_hash": pathway_map.get("hash"),
+        }
+    else:
+        raw_urls = payload.get("urls") or []
+        if isinstance(raw_urls, str):
+            raw_urls = re.split(r"[\r\n,]+", raw_urls)
+        if not isinstance(raw_urls, list):
+            raise RestedCaptureError("urls must be a list or newline text")
+
+        urls = [str(item).strip() for item in raw_urls if str(item).strip()]
+        if payload.get("url"):
+            urls.append(str(payload.get("url")).strip())
+        sitemap_url = str(payload.get("sitemap_url") or "").strip()
+        crawl_url = str(payload.get("crawl_url") or "").strip()
+        local_path = str(payload.get("local_path") or "").strip()
+        crawl_enabled = bool(payload.get("crawl") or crawl_url)
+        local_enabled = bool(payload.get("local") or local_path)
+        discovery = {"mode": "manual", "page_count": 0}
+        if crawl_url:
+            urls.append(crawl_url)
+
+        if local_enabled:
+            urls, discovery = discover_local_html(
+                local_path or (urls[0] if urls else ""),
+                max_urls=int(payload.get("max_pages") or payload.get("max_urls") or MAX_CRAWL_URLS),
+                max_depth=int(payload.get("crawl_depth") or DEFAULT_CRAWL_DEPTH),
+            )
+        elif crawl_enabled:
+            urls, discovery = discover_site_urls(
+                urls,
+                explicit_sitemap_urls=[sitemap_url] if sitemap_url else [],
+                max_urls=int(payload.get("max_pages") or payload.get("max_urls") or MAX_CRAWL_URLS),
+                max_depth=int(payload.get("crawl_depth") or DEFAULT_CRAWL_DEPTH),
+                concurrency=int(payload.get("crawl_concurrency") or DEFAULT_CRAWL_CONCURRENCY),
+                timeout_ms=int(payload.get("discovery_timeout_ms") or DEFAULT_DISCOVERY_TIMEOUT_MS),
+                wait_ms=int(payload.get("discovery_wait_ms") or DEFAULT_DISCOVERY_WAIT_MS),
+                include_sitemaps=bool(payload.get("include_sitemaps", True)),
+            )
+        elif sitemap_url:
+            urls.extend(expand_sitemap(sitemap_url))
+
+        urls = _dedupe_urls(urls)
+
+        if not urls:
+            raise RestedCaptureError("add at least one URL")
+        if len(urls) > MAX_URLS:
+            raise RestedCaptureError(f"too many URLs; maximum is {MAX_URLS}")
 
     viewport_ids = payload.get("viewports") or list(DEFAULT_VIEWPORTS)
     if not isinstance(viewport_ids, list):
@@ -866,24 +936,62 @@ def build_capture_plan(payload: dict[str, Any]) -> tuple[list[str], list[Capture
         raise RestedCaptureError("choose at least one color scheme")
 
     targets: list[CaptureTarget] = []
-    for url_index, url in enumerate(urls, start=1):
-        for viewport_id in viewport_ids:
-            viewport = DEFAULT_VIEWPORTS.get(viewport_id)
-            if not viewport:
-                raise RestedCaptureError(f"unknown viewport: {viewport_id}")
-            for scheme in schemes:
-                if scheme not in {"light", "dark", "no-preference"}:
-                    raise RestedCaptureError(f"unknown color scheme: {scheme}")
-                targets.append(
-                    CaptureTarget(
-                        index=url_index,
-                        url=url,
-                        viewport_id=viewport_id,
-                        width=int(viewport["width"]),
-                        height=int(viewport["height"]),
-                        scheme=scheme,
+    if pathway_targets is not None:
+        # Map-driven: every pathway target expands across the same
+        # viewport x scheme matrix a URL-driven plan builds, so the two plans
+        # are one shape.
+        for pathway_target in pathway_targets:
+            for viewport_id in viewport_ids:
+                viewport = DEFAULT_VIEWPORTS.get(viewport_id)
+                if not viewport:
+                    raise RestedCaptureError(f"unknown viewport: {viewport_id}")
+                for scheme in schemes:
+                    if scheme not in {"light", "dark", "no-preference"}:
+                        raise RestedCaptureError(f"unknown color scheme: {scheme}")
+                    targets.append(
+                        replace(
+                            pathway_target,
+                            viewport_id=viewport_id,
+                            width=int(viewport["width"]),
+                            height=int(viewport["height"]),
+                            scheme=scheme,
+                        )
                     )
-                )
+    else:
+        for url_index, url in enumerate(urls, start=1):
+            for viewport_id in viewport_ids:
+                viewport = DEFAULT_VIEWPORTS.get(viewport_id)
+                if not viewport:
+                    raise RestedCaptureError(f"unknown viewport: {viewport_id}")
+                for scheme in schemes:
+                    if scheme not in {"light", "dark", "no-preference"}:
+                        raise RestedCaptureError(f"unknown color scheme: {scheme}")
+                    targets.append(
+                        CaptureTarget(
+                            index=url_index,
+                            url=url,
+                            viewport_id=viewport_id,
+                            width=int(viewport["width"]),
+                            height=int(viewport["height"]),
+                            scheme=scheme,
+                        )
+                    )
+
+    # The plan says why a pathway is flagged. Status is read by the closed
+    # set (WIRED/MOCKED/UNWIRED/INCOMPLETE/UNCLEAR/UNKNOWN), never by
+    # substring; an UNWIRED pathway is planned AND flagged, never dropped.
+    pathway_flags: list[dict[str, str]] = []
+    if pathway_targets is not None:
+        for pathway_target in pathway_targets:
+            if pathway_target.pathway_status == "UNWIRED":
+                pathway_flags.append({
+                    "pathway_id": pathway_target.pathway_id,
+                    "flag": "UNWIRED",
+                    "reason": (
+                        "the map marks this pathway UNWIRED — planned and kept, "
+                        "but its control may not be wired to a real state"
+                    ),
+                })
 
     settings = {
         "format": str(payload.get("format") or "png").lower(),
@@ -909,6 +1017,7 @@ def build_capture_plan(payload: dict[str, Any]) -> tuple[list[str], list[Capture
         "crawl": crawl_enabled,
         "local": local_enabled,
         "page_count": len(urls),
+        "pathway_flags": pathway_flags,
         "discovery": {**discovery, "page_count": len(urls)},
     }
     if settings["format"] not in {"png", "jpeg"}:
@@ -1098,6 +1207,28 @@ async def _sweep_states(page: Any, target: CaptureTarget, settings: dict[str, An
     return shots
 
 
+async def _apply_trigger(page: Any, selector: str, wait_ms: int) -> bool:
+    """Click the pathway's named control to reach its rested state.
+
+    The selector is the planner's candidate selector (never hand-rolled).
+    A missing control or a failed click is not a capture error — we shoot the
+    loaded state and report ``trigger_fired`` False; the quality gate reads
+    that flag to tell a baseline from a meaningful state shot.
+    """
+    sel = (selector or "").strip()
+    if not sel:
+        return False
+    try:
+        element = await page.query_selector(sel)
+        if element is None:
+            return False
+        await element.click(timeout=2500)
+        await _settle_page(page, wait_ms)
+        return True
+    except Exception:
+        return False
+
+
 async def _capture_one(context: Any, target: CaptureTarget, settings: dict[str, Any], path: Path) -> dict[str, Any]:
     started = time.perf_counter()
     attempts = max(1, int(settings.get("retries", DEFAULT_RETRIES)) + 1)
@@ -1116,6 +1247,9 @@ async def _capture_one(context: Any, target: CaptureTarget, settings: dict[str, 
             except Exception:
                 pass
             await _settle_page(page, settings["wait_ms"])
+            trigger_fired = False
+            if (target.trigger_selector or "").strip():
+                trigger_fired = await _apply_trigger(page, target.trigger_selector, settings["wait_ms"])
             screenshot_kwargs: dict[str, Any] = {
                 "path": str(path),
                 "type": settings["format"],
@@ -1140,6 +1274,8 @@ async def _capture_one(context: Any, target: CaptureTarget, settings: dict[str, 
                 "status": "ok",
                 "file": path.name,
                 "bytes": stat.st_size,
+                "trigger_selector": target.trigger_selector,
+                "trigger_fired": trigger_fired,
                 "attempts": attempt,
                 "elapsed_ms": int((time.perf_counter() - started) * 1000),
             }
@@ -1259,6 +1395,30 @@ def run_capture(
     progress: Any,
 ) -> list[dict[str, Any]]:
     return asyncio.run(_run_capture_async(targets, settings, shots_dir, progress))
+
+
+def build_quality_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Map run_capture's results to the shape quality.summarize_capture_quality reads.
+
+    One entry per shot file: the page shot is the rested ``baseline`` unless
+    its named control fired (then it is a ``state``), and every swept state
+    shot is a ``state``. The quality module only ever reads — this mapping
+    invents no successes and renames no failure.
+    """
+    entries: list[dict[str, Any]] = []
+    for result in results or []:
+        if not isinstance(result, dict):
+            continue
+        ok = result.get("status") == "ok"
+        captures: list[dict[str, Any]] = [{
+            "kind": "state" if result.get("trigger_fired") else "baseline",
+            "success": bool(ok),
+        }]
+        for state in result.get("states") or []:
+            if isinstance(state, dict):
+                captures.append({"kind": "state", "success": state.get("status") == "ok"})
+        entries.append({"file": result.get("file") or "", "manifest": {"captures": captures}})
+    return {"results": entries}
 
 
 def _write_json(path: Path, data: dict[str, Any]) -> None:
