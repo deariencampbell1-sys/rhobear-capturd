@@ -7,7 +7,9 @@ output. No network, no Playwright — this module is pure parsing.
 
 from __future__ import annotations
 
+import inspect
 import json
+import re
 import traceback
 from pathlib import Path
 
@@ -485,6 +487,41 @@ def test_unrecognised_count_header_refuses_and_wider_vocabulary_reads():
     parsed = parse_manifest_text(plain_text)
     assert all(v is None for v in parsed["summary"].values())
     assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+
+
+def test_unrecognised_header_error_names_the_vocabulary():
+    # D48: the D38 refusal names the vocabulary it accepts, so a feed
+    # owner fixes the header in one read instead of guessing. The message
+    # must state the accepted count words and category words (asserted
+    # against the module's own word sets — at least two of each, matched
+    # on word boundaries so prose like "count label" cannot fake a hit)
+    # and name the offending header.
+    text = "\n".join([
+        "# Pathway Manifest — unrecognised count header",  # line 1
+        "",                                                # line 2
+        "## Status Overview",                              # line 3
+        "",                                                # line 4
+        "| Thing | Blah |",                                # line 5
+        "|---|---|",                                       # line 6
+        "| WIRED | 5 |",                                   # line 7
+        "",                                                # line 8
+        "## 1. Pathways Table",                            # line 9
+        "",                                                # line 10
+        "| id | status |",                                 # line 11
+        "|---|---|",                                       # line 12
+        "| p1 | WIRED |",                                  # line 13
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(text)
+    message = str(excinfo.value)
+    assert "Thing" in message
+    assert "Blah" in message
+
+    def named(words: frozenset[str]) -> list[str]:
+        return [w for w in words if re.search(rf"\b{re.escape(w)}\b", message)]
+
+    assert len(named(pathway_map._COUNT_WORDS)) >= 2, message
+    assert len(named(pathway_map._CATEGORY_WORDS)) >= 2, message
 
 
 def test_tables_have_no_first_row_field():
