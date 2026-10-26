@@ -48,7 +48,8 @@ failed, ``NO_CAPTURES`` when nothing landed at all. An empty or absent
 ``results`` collection is ``NO_CAPTURES`` — a deliberate divergence from
 upstream ``isPassingResult``, which has the same hole and passes on it.
 The verdict vocabulary is closed in ``VERDICTS``; only ``PASS`` is a
-pass, ``NO_CAPTURES`` is a failure.
+pass, ``NO_CAPTURES`` is a failure. The reason vocabulary is closed in
+``REASON_CODES`` (D2) — four codes, never iterated as verdicts.
 """
 
 from __future__ import annotations
@@ -64,6 +65,7 @@ __all__ = [
     "NO_CAPTURES",
     "NO_SUCCESSFUL_CAPTURE",
     "PASS",
+    "REASON_CODES",
     "VERDICTS",
     "CaptureQuality",
     "build_quality_error",
@@ -79,6 +81,12 @@ BASELINE_ONLY = "BASELINE_ONLY"
 NO_SUCCESSFUL_CAPTURE = "NO_SUCCESSFUL_CAPTURE"
 # Nothing landed at all: empty or unreadable results collection (D1).
 NO_CAPTURES = "NO_CAPTURES"
+
+# The four reason codes as one named tuple (D2): reason codes and
+# verdicts are different vocabularies — iterate VERDICTS expecting
+# verdicts, REASON_CODES expecting reasons. Both are closed; drift here
+# is adding a fifth code.
+REASON_CODES: tuple[str, ...] = (PASS, BASELINE_ONLY, NO_SUCCESSFUL_CAPTURE, NO_CAPTURES)
 
 # Verdict values returned by classify_result / CaptureQuality.verdict.
 FAIL = "FAIL"
@@ -112,7 +120,8 @@ class CaptureQuality:
 
     @property
     def reason_codes(self) -> list[str]:
-        """Named reason codes for this quality summary (fixed spellings)."""
+        """Reason codes for this quality summary — always drawn from the
+        closed four-spelling ``REASON_CODES`` tuple (D2)."""
         if self.no_captures:
             return [NO_CAPTURES]
         codes: list[str] = []
