@@ -1064,6 +1064,30 @@ def test_unbalanced_backtick_is_refused():
     assert "onClick" in message
 
 
+def test_unbalanced_backtick_in_header_is_refused():
+    # D37: the header-level unbalanced-backtick refusal gets a test of its
+    # own. A header cell with an odd backtick count opens a code span that
+    # swallows the row's remaining pipes — the header collapses to two
+    # cells, but the separator line still matches, so the line IS a
+    # confirmed table header and the refusal must fire, naming the line.
+    # Every previous backtick test used a body row; this pins the header
+    # half of the same refusal.
+    text = "\n".join([
+        "# Pathway Manifest — unbalanced backtick in a header",  # line 1
+        "",                                                     # line 2
+        "## 1. Pathways Table",                                 # line 3
+        "",                                                     # line 4
+        "| id | `trigger | status |",                           # line 5 — odd backtick
+        "|---|---|---|",                                        # line 6
+        "| p1 | onClick | WIRED |",                             # line 7
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(text)
+    message = str(excinfo.value)
+    assert "line 5" in message
+    assert "trigger" in message
+
+
 def test_unknown_wired_token_is_unclear():
     # D6: the wired column's own polarity — a token outside
     # yes|true|✔|wired / no|false|✗|unwired is UNCLEAR, with the raw cell
