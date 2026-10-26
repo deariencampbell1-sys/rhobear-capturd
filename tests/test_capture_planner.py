@@ -255,6 +255,33 @@ def test_inline_display_none_important_is_skipped():
     assert [c.label for c in plan.candidates] == ["Live"]
 
 
+def test_visibility_and_opacity_important_are_skipped():
+    # D13: "!important" is cascade priority, not a value — visibility:hidden
+    # and opacity:0 hide exactly like their plain forms (three assertions:
+    # the two !important forms here, the non-numeric opacity below).
+    root = parse_html(
+        "<main>"
+        '<button style="visibility: hidden !important" id="veiled">Veiled</button>'
+        '<button style="opacity: 0 !important" id="faint">Faint</button>'
+        '<button id="live" aria-expanded="false">Live</button>'
+        "</main>"
+    )
+    plan = plan_candidates(root)
+    assert [c.label for c in plan.candidates] == ["Live"]
+
+
+def test_non_numeric_opacity_is_not_hidden():
+    # D13: opacity:abc is not a computed 0 — and parsing it must not raise.
+    root = parse_html(
+        "<main>"
+        '<button style="opacity: abc" id="odd">Odd</button>'
+        '<button id="live" aria-expanded="false">Live</button>'
+        "</main>"
+    )
+    plan = plan_candidates(root)
+    assert sorted(c.label for c in plan.candidates) == ["Live", "Odd"]
+
+
 def test_aria_disabled_true_is_skipped():
     root = parse_html(
         "<main>"
@@ -275,6 +302,32 @@ def test_disabled_class_is_skipped():
     )
     plan = plan_candidates(root)
     assert [c.label for c in plan.candidates] == ["Live"]
+
+
+def test_button_inside_disabled_fieldset_is_not_planned():
+    # D10: a disabled <fieldset> disables its descendant controls — the
+    # "never plan an unclickable control" guarantee must cover the normal
+    # form shape, not just a self-disabled control. The ancestor chain is
+    # walked, so a button nested below the fieldset is disabled too.
+    root = parse_html(
+        "<main>"
+        "<fieldset disabled><button>Go</button></fieldset>"
+        "<fieldset disabled><div><button>Deep</button></div></fieldset>"
+        "</main>"
+    )
+    plan = plan_candidates(root)
+    assert plan.candidates == []
+    assert plan.reason == "no-candidates"
+
+    # The skip is fieldset-scoped: a sibling outside it is unaffected.
+    outside = parse_html(
+        "<main>"
+        "<fieldset disabled><button>Go</button></fieldset>"
+        '<button aria-expanded="false">Live</button>'
+        "</main>"
+    )
+    live_plan = plan_candidates(outside)
+    assert [c.label for c in live_plan.candidates] == ["Live"]
 
 
 # ---------------------------------------------------------------------------
@@ -411,6 +464,34 @@ def test_id_with_a_newline_round_trips():
     assert plan.limits["dropped_ambiguous"] == 0
 
 
+def test_attribute_value_with_quote_and_bracket_round_trips():
+    # D11: aria-label='a"]' — a value containing both an escaped quote and a
+    # closing bracket. The generated selector must verify and match exactly
+    # one node. The old parse split the value at the first "]" and read a
+    # greedy (.*) that is not escape-aware, so the module generated a
+    # selector its own matcher rejected.
+    root = parse_html("<main><button aria-label='a\"]'>Tap</button></main>")
+    plan = plan_candidates(root)
+
+    (candidate,) = plan.candidates
+    assert candidate.selector_strategy == "attribute"
+    assert candidate.selector == 'button[aria-label="a\\\"]"]'
+    assert plan.limits["dropped_ambiguous"] == 0
+
+    button = root.children[0].children[0]
+    assert unique_selector(button)[0] == candidate.selector
+    # "matches exactly one node" — through the module's own matcher, not
+    # just the index fast path.
+    import capturd.shots.planner as planner_module
+
+    assert planner_module._count_matches(root, candidate.selector) == 1
+    matching = [
+        node for node in iter_elements(root)
+        if planner_module._match_simple(node, candidate.selector)
+    ]
+    assert matching == [button]
+
+
 def test_attribute_value_with_gt_does_not_break_the_chain():
     # The chain matcher splits on " > "; an attribute value containing ">"
     # used to split its own selector and the candidate was silently dropped.
@@ -427,6 +508,32 @@ def test_attribute_value_with_gt_does_not_break_the_chain():
     assert by_label["Home > Docs"].selector == 'button[aria-label="Home > Docs"]'
     assert by_label["Home > Blog"].selector == 'button[aria-label="Home > Blog"]'
     assert plan.limits["dropped_ambiguous"] == 0
+
+
+def test_attribute_value_with_closing_bracket_matches_on_both_paths():
+    # D16: a single-part attribute selector whose value contains "]" —
+    # _match_simple (per node) and _count_uncached (index) must agree on
+    # which node it names. _match_simple used to find the closing bracket
+    # with rest.find("]"), splitting inside the value, so the two paths
+    # disagreed on exactly this shape.
+    import capturd.shots.planner as planner_module
+
+    root = parse_html(
+        "<main><button aria-label='a]b'>Tap</button></main>"
+        "<main><button>Other</button></main>"
+    )
+    tap = root.children[0].children[0]
+    selector, strategy = unique_selector(tap)
+    assert strategy == "attribute"
+    assert selector == 'button[aria-label="a]b"]'
+
+    index_count = planner_module._count_matches(root, selector)
+    matcher_count = sum(
+        1 for node in iter_elements(root) if planner_module._match_simple(node, selector)
+    )
+    assert index_count == 1
+    assert matcher_count == index_count  # both paths agree
+    assert planner_module._match_simple(tap, selector) is True
 
 
 # ---------------------------------------------------------------------------
@@ -881,6 +988,20 @@ def test_element_matched_only_by_structure():
     assert candidate.selector_strategy == "structural"
     assert "#" not in candidate.selector and "[" not in candidate.selector
     assert candidate.selector == "main > section > div"
+
+
+def test_carousel_control_is_classified():
+    # D14: CAROUSEL is reachable (carousel-control-next is in the control
+    # sweep's class set and _CAROUSEL_RE matches carousel) but nothing
+    # exercised it — one test per kind makes the PR claim true.
+    root = parse_html('<main><button class="carousel-control-next">Next</button></main>')
+    node = root.children[0].children[0]
+
+    assert classify_control(node) == (ControlKind.CAROUSEL, False)
+    plan = plan_candidates(root)
+    (candidate,) = plan.candidates
+    assert candidate.kind == "carousel"
+    assert candidate.priority == 60
 
 
 # ---------------------------------------------------------------------------
