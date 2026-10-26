@@ -2006,3 +2006,32 @@ def test_normalise_anti_pattern_docstring_matches_behaviour():
         "becomes '' (like an absent key) — it currently claims only the "
         "absent-key case"
     )
+
+
+def test_section_body_is_table_parsed_once(monkeypatch):
+    # D63: each section body is table-parsed ONCE and the parsed tables are
+    # shared by every extractor — `_extract_summary` alone reparsed each
+    # section body, so a section was parsed up to six times. Proven with a
+    # counter, not a clock: `_extract_tables` is called at most once per
+    # section for a fixture document.
+    raw = (FIXTURES / "pathway-manifest-sample.md").read_text(encoding="utf-8")
+    sections = pathway_map._split_sections(raw)
+    assert len(sections) > 1, "the fixture must have several sections"
+    calls = {"n": 0}
+    real = pathway_map._extract_tables
+
+    def counting(*args, **kwargs):
+        calls["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(pathway_map, "_extract_tables", counting)
+    parsed = parse_manifest_text(raw)
+    assert calls["n"] <= len(sections), (
+        f"_extract_tables called {calls['n']} times for {len(sections)} "
+        "sections — each section body must be table-parsed once and the "
+        "parsed tables shared by every extractor"
+    )
+    # The parse itself is unchanged.
+    assert [p["id"] for p in parsed["pathways"]] == [
+        "capture-start", "capture-job-poll", "catalog-search",
+    ]
