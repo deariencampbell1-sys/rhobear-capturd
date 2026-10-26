@@ -527,6 +527,12 @@ def _split_chain(selector: str) -> list[str]:
     Quote-aware: an attribute value containing ``>`` — ``aria-label="Home >
     Docs"`` — stays inside its own part instead of splitting the chain into
     garbage.
+
+    D52: the backslash escapes the next character EVERYWHERE, and a quote
+    opens a string only when it is not escaped. The escape used to be honoured
+    only inside quotes, so an escaped ``"`` in an unquoted segment —
+    ``#say\"hi > button`` — flipped ``in_quotes`` and every later `` > `` was
+    swallowed into one part.
     """
     parts: list[str] = []
     current: list[str] = []
@@ -539,7 +545,7 @@ def _split_chain(selector: str) -> list[str]:
             current.append(char)
             escaped = False
             index += 1
-        elif in_quotes and char == "\\":
+        elif char == "\\":
             current.append(char)
             escaped = True
             index += 1
