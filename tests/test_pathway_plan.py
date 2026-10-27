@@ -584,8 +584,8 @@ def test_r3_redirect_requests_use_loopback_only_guard(monkeypatch):
 
     checked_urls = [url for url, _flag in checked]
     assert "http://169.254.169.254/latest/meta-data" in checked_urls
-    # The same-host subresource reuses the entry check's cached allow verdict.
-    assert "http://127.0.0.1:9/assets/app.js" not in checked_urls
+    # Successful verdicts are never cached: each same-host request re-resolves.
+    assert "http://127.0.0.1:9/assets/app.js" in checked_urls
     assert all(flag is True for url, flag in checked if url.startswith("http://127.0.0.1:9/"))
     assert ("http://169.254.169.254/latest/meta-data", False) in checked
     assert all(flag is False for url, flag in checked if "169.254.169.254" in url)
@@ -1061,7 +1061,7 @@ def test_r7_plan_reader_reuses_navigation_cache(monkeypatch):
     cache = {}
     result = pathway_plan._load_pages_html([url], navigation_cache=cache)
     assert result == {url: "<html>ok</html>"}
-    assert resolver.call_count == 1
+    assert resolver.call_count == 2, "entry and final-URL successes both re-resolve"
 
     resolver.reset_mock()
     checked = []
@@ -1080,3 +1080,19 @@ def test_r8_dry_run_selector_requires_explicit_field():
         assert pathway_plan._explicit_selector({
             "trigger": trigger, "selector": "#settings-button",
         }) == "#settings-button"
+
+
+def test_r9_browser_closes_when_context_creation_fails(monkeypatch):
+    fake = _FakePlaywrightStack()
+    fake.install(monkeypatch)
+
+    async def fail_new_context(self):
+        self._fake.contexts_created += 1
+        raise RuntimeError("context creation failed")
+
+    monkeypatch.setattr(_FakeBrowser, "new_context", fail_new_context)
+    with pytest.raises(RuntimeError, match="^context creation failed$"):
+        pathway_plan._load_pages_html(["https://example.com/page"])
+    assert fake.browsers_closed == 1
+    assert fake.contexts_closed == 0
+    assert fake.pages_created == 0

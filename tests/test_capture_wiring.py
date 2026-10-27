@@ -649,10 +649,16 @@ def test_r5_map_failure_precedes_quality(monkeypatch, capsys, status, expected):
     assert "quality:" not in out.out + out.err
 
 
-def _capture_stack(tmp_path, monkeypatch, *, url="https://example.com/", trigger="", states=False):
+def _capture_stack(
+    tmp_path, monkeypatch, *, url="https://example.com/", trigger="", states=False,
+    allow_private_hosts=(),
+):
     # Mock browser I/O only. Drive the real _capture_one AND _sweep_states.
-    _, targets, settings = build_capture_plan({"urls": [url], "states": states, "retries": 0,
-                                              "viewports": ["desktop"], "schemes": ["light"]})
+    _, targets, settings = build_capture_plan(
+        {"urls": [url], "states": states, "retries": 0,
+         "viewports": ["desktop"], "schemes": ["light"]},
+        allow_private_hosts=allow_private_hosts,
+    )
     target = dataclasses.replace(targets[0], trigger_selector=trigger)
     page = AsyncMock()
     page.url = url
@@ -1098,6 +1104,33 @@ async def test_r7_legacy_urls_private_target_refused_without_flag(tmp_path, monk
     page.screenshot.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_r9_private_host_opt_in_flows_from_plan_to_capture(tmp_path, monkeypatch):
+    context, target, settings, path, page = _capture_stack(
+        tmp_path, monkeypatch, url="http://172.17.0.1:8080/",
+        allow_private_hosts=("172.17.0.1",),
+    )
+    assert settings["allow_private_hosts"] == ("172.17.0.1",)
+    result = await capture._capture_one(context, target, settings, path)
+    assert result["status"] == "ok"
+    page.goto.assert_awaited_once()
+    page.screenshot.assert_awaited_once()
+
+    sibling_context, sibling_target, sibling_settings, sibling_path, sibling_page = _capture_stack(
+        tmp_path, monkeypatch, url="http://172.17.0.2:8080/",
+        allow_private_hosts=("172.17.0.1",),
+    )
+    sibling = await capture._capture_one(
+        sibling_context, sibling_target, sibling_settings, sibling_path,
+    )
+    assert sibling["status"] == "failed"
+    assert sibling["error"] == (
+        "url resolves to a private/internal IP (172.17.0.2) — not allowed"
+    )
+    sibling_page.goto.assert_not_awaited()
+    sibling_page.screenshot.assert_not_awaited()
+
+
 @pytest.mark.parametrize("value", [
     "http://172.17.0.1", "172.17.0.1:8080", "172.17.0.1/", "", "::1",
 ])
@@ -1148,10 +1181,12 @@ def test_r7_legacy_validation_keeps_post_discovery_precedence(monkeypatch):
 async def test_r7_trigger_polls_until_delayed_state_appears(monkeypatch):
     page = AsyncMock()
     page.url = "https://example.com/"
-    page.evaluate.side_effect = ["same", "same", "changed"]
+    # Before + after + five unchanged polls, then a change beyond the old cap.
+    page.evaluate.side_effect = ["same"] * 7 + ["changed"]
     monkeypatch.setattr(capture, "_settle_page", AsyncMock())
     assert await capture._apply_trigger(page, "#load-state", 123) is True
-    page.wait_for_timeout.assert_awaited_once_with(100)
+    assert page.wait_for_timeout.await_count == 6
+    page.wait_for_timeout.assert_awaited_with(100)
 
 
 @pytest.mark.asyncio
@@ -1167,6 +1202,21 @@ async def test_r7_capture_treats_caller_guard_errors_as_read_only(tmp_path, monk
 
 
 @pytest.mark.asyncio
+async def test_r9_caller_guard_errors_never_mask_capture_failure(tmp_path, monkeypatch):
+    context, target, settings, path, page = _capture_stack(tmp_path, monkeypatch)
+    supplied = [RestedCaptureError("caller sentinel")]
+    before = list(supplied)
+    page.goto.side_effect = RuntimeError("real navigation failure")
+    result = await capture._capture_one(
+        context, target, settings, path, guard_errors=supplied,
+    )
+    assert result["status"] == "failed"
+    assert result["error"] == "real navigation failure"
+    assert "caller sentinel" not in result["error"]
+    assert supplied == before
+
+
+@pytest.mark.asyncio
 async def test_r7_navigation_checks_cache_by_host_and_policy(monkeypatch):
     resolver = Mock()
     monkeypatch.setattr(capture, "_reject_navigation_url", resolver)
@@ -1174,20 +1224,21 @@ async def test_r7_navigation_checks_cache_by_host_and_policy(monkeypatch):
     kwargs = dict(allow_loopback=False, loopback_host=None, allow_private_hosts=())
     await capture._check_navigation_url("https://example.com/a", cache=cache, **kwargs)
     await capture._check_navigation_url("https://example.com/b", cache=cache, **kwargs)
-    assert resolver.call_count == 1
+    assert resolver.call_count == 2
+    assert cache == {}, "successful verdicts must be re-resolved, never cached"
     resolver.side_effect = RestedCaptureError("cached refusal")
     cache = {}
     with pytest.raises(RestedCaptureError, match="cached refusal"):
         await capture._check_navigation_url("https://example.com/a", cache=cache, **kwargs)
     with pytest.raises(RestedCaptureError, match="cached refusal"):
         await capture._check_navigation_url("https://example.com/b", cache=cache, **kwargs)
-    assert resolver.call_count == 2
+    assert resolver.call_count == 3
     resolver.side_effect = None
     await capture._check_navigation_url(
         "https://example.com/c", cache=cache,
         allow_loopback=True, loopback_host="example.com", allow_private_hosts=(),
     )
-    assert resolver.call_count == 3
+    assert resolver.call_count == 4
 
 
 def test_r7_ipv4_mapped_private_host_opt_in():
@@ -1341,7 +1392,8 @@ def test_r8_manifest_omits_credentials_and_live_navigation_cache(tmp_path, monke
     assert "_navigation_cache" not in manifest["settings"]
     assert "_navigation_cache" not in settings
     json.dumps(manager.get(job_id)["settings"])
-    assert caches and caches[0], "the real capture must exercise its live navigation cache"
+    assert caches and all(item is caches[0] for item in caches)
+    assert caches[0] == {}, "successful public-host verdicts must not enter the cache"
 
     zip_path = Path(manager.get(job_id)["zip_path"])
     with zipfile.ZipFile(zip_path) as archive:

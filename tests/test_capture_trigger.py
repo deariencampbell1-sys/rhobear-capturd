@@ -117,13 +117,13 @@ async def test_r5_no_op_click_is_not_meaningful_state(monkeypatch):
     page.evaluate.return_value = "same"
     settle = AsyncMock()
     monkeypatch.setattr(capture, "_settle_page", settle)
-    clock = iter([0.0] * 26 + [3.0])
+    clock = iter([0.0] + [step / 10 for step in range(26)])
     monkeypatch.setattr(capture.time, "monotonic", lambda: next(clock, 3.0))
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         assert await _apply_trigger(page, "#load-state", 123) is False
     assert caught == [], "a genuine no-op must not enter the exception handler"
-    assert page.wait_for_timeout.await_count == 5
+    assert page.wait_for_timeout.await_count == capture.TRIGGER_STATE_TIMEOUT_MS // 100 == 25
     page.wait_for_timeout.assert_awaited_with(100)
     page.query_selector.return_value.click.assert_awaited_once()
     settle.assert_awaited_once_with(page, 123)
