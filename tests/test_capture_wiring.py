@@ -760,7 +760,7 @@ async def test_r5_capture_preserves_first_route_error(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_r5_real_capture_context_installs_guard_before_page(tmp_path, monkeypatch):
+async def test_r6_capture_installs_guard_per_page_before_navigation(tmp_path, monkeypatch):
     context, target, settings, path, page = _capture_stack(tmp_path, monkeypatch, states=True)
     events = []
     async def route(pattern, handler):
@@ -769,7 +769,8 @@ async def test_r5_real_capture_context_installs_guard_before_page(tmp_path, monk
     async def new_page():
         events.append("page")
         return page
-    context.route = AsyncMock(side_effect=route)
+    page.route = AsyncMock(side_effect=route)
+    context.route = AsyncMock()
     context.new_page.side_effect = new_page
     context.close = AsyncMock()
     browser = SimpleNamespace(new_context=AsyncMock(return_value=context), close=AsyncMock())
@@ -782,8 +783,186 @@ async def test_r5_real_capture_context_installs_guard_before_page(tmp_path, monk
     monkeypatch.setattr(capture, "_launch_browser", AsyncMock(return_value=browser))
     progress = Mock()
     results = await capture._run_capture_async([target], settings, tmp_path, progress)
-    assert events == ["route", "page"]
+    assert events == ["page", "route"]
+    context.route.assert_not_called()
     assert results[0]["status"] == "ok" and len(results[0]["states"]) == 1
     progress.assert_called_once_with(results[0])
     context.close.assert_awaited_once()
     browser.close.assert_awaited_once()
+
+
+# W0-28-r5: real local-browser boundaries and per-page refusal isolation.
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+class _R6PageHandler(BaseHTTPRequestHandler):
+    body = b"<html><body><h1>local</h1></body></html>"
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(self.body)))
+        self.end_headers()
+        self.wfile.write(self.body)
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.fixture
+def _r6_local_url():
+    original_body = _R6PageHandler.body
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _R6PageHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/index.html"
+    finally:
+        _R6PageHandler.body = original_body
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+
+def test_r6_legacy_loopback_cli_captures(_r6_local_url, tmp_path):
+    out = tmp_path / "shots"
+    code = cli.main(["--urls", _r6_local_url, "--out", str(out),
+                     "--viewports", "desktop", "--schemes", "light"])
+    assert code == 0
+    assert any(path.stat().st_size > 0 for path in out.rglob("*.png"))
+
+
+def test_r6_private_subresource_does_not_fail_capture(_r6_local_url, tmp_path):
+    _R6PageHandler.body = b'<html><body><img src="http://10.0.0.5/private.png"></body></html>'
+    _, targets, settings = capture.build_capture_plan({
+        "urls": [_r6_local_url], "viewports": ["desktop"], "schemes": ["light"], "retries": 0,
+    })
+    with pytest.warns(RuntimeWarning, match="capture subresource refused"):
+        results = asyncio.run(capture._run_capture_async(targets, settings, tmp_path, lambda result: None))
+    assert [result["status"] for result in results] == ["ok"]
+    assert (tmp_path / results[0]["file"]).stat().st_size > 0
+
+
+@pytest.mark.asyncio
+async def test_r6_document_refusal_does_not_poison_sibling_page(tmp_path, monkeypatch):
+    _, targets, settings = capture.build_capture_plan({
+        "urls": ["http://93.184.216.34/bad", "http://93.184.216.34/good"],
+        "viewports": ["desktop"], "schemes": ["light"], "retries": 0, "concurrency": 2,
+    })
+    bad_ready = asyncio.Event()
+    shared = {"handler": None}
+
+    class Page:
+        def __init__(self, bad):
+            self.bad = bad
+            self.url = "about:blank"
+            self.handler = None
+
+        async def route(self, pattern, handler):
+            assert pattern == "**/*"
+            self.handler = handler
+
+        def set_default_timeout(self, timeout):
+            pass
+
+        async def goto(self, url, **kwargs):
+            self.url = url
+            if self.bad:
+                route = SimpleNamespace(
+                    request=SimpleNamespace(url="http://169.254.169.254/latest", resource_type="document"),
+                    abort=AsyncMock(), continue_=AsyncMock(),
+                )
+                await (self.handler or shared["handler"])(route)
+                bad_ready.set()
+            else:
+                await bad_ready.wait()
+
+        async def wait_for_load_state(self, *args, **kwargs):
+            pass
+
+        async def screenshot(self, **kwargs):
+            Path(kwargs["path"]).write_bytes(b"png")
+
+        async def close(self):
+            pass
+
+    pages = [Page(True), Page(False)]
+
+    class Context:
+        route = AsyncMock()
+
+        async def new_page(self):
+            return pages.pop(0)
+
+        async def add_cookies(self, cookies):
+            pass
+
+        async def close(self):
+            pass
+
+    context = Context()
+    async def context_route(pattern, handler):
+        shared["handler"] = handler
+    context.route.side_effect = context_route
+    browser = SimpleNamespace(new_context=AsyncMock(return_value=context), close=AsyncMock())
+
+    class Entry:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *args):
+            return False
+
+    monkeypatch.setattr("playwright.async_api.async_playwright", Entry)
+    monkeypatch.setattr(capture, "_launch_browser", AsyncMock(return_value=browser))
+    monkeypatch.setattr(capture, "_settle_page", AsyncMock())
+    monkeypatch.setattr(capture, "_dismiss_overlays", AsyncMock())
+    results = await capture._run_capture_async(targets, settings, tmp_path, lambda result: None)
+    by_url = {result["url"]: result for result in results}
+    bad = by_url["http://93.184.216.34/bad"]
+    good = by_url["http://93.184.216.34/good"]
+    assert bad["status"] == "failed" and "private/internal" in bad["error"]
+    assert good["status"] == "ok"
+    assert (tmp_path / good["file"]).stat().st_size > 0
+    assert not (tmp_path / capture._capture_file_name(targets[0], settings["format"])).exists()
+    context.route.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_r6_legacy_loopback_host_is_derived_per_target(tmp_path, monkeypatch):
+    context, target, settings, path, page = _capture_stack(tmp_path, monkeypatch)
+    installed = []
+    real_install = capture._install_navigation_guard
+
+    async def spy(page_arg, **kwargs):
+        installed.append(kwargs)
+        return await real_install(page_arg, **kwargs)
+
+    monkeypatch.setattr(capture, "_install_navigation_guard", spy)
+    for host in ("127.0.0.1", "localhost"):
+        page.url = f"http://{host}/"
+        page.goto.reset_mock()
+        page.screenshot.reset_mock()
+        page.route = AsyncMock()
+        result = await capture._capture_one(
+            context, dataclasses.replace(target, url=page.url), settings,
+            tmp_path / f"{host.replace('.', '-')}.png",
+        )
+        assert result["status"] == "ok"
+    assert settings["loopback_host"] is None
+    assert installed == [
+        {"allow_loopback": True, "loopback_host": "127.0.0.1", "guard_errors": []},
+        {"allow_loopback": True, "loopback_host": "localhost", "guard_errors": []},
+    ]
+
+    async def redirect(*args, **kwargs):
+        page.url = "http://localhost/"
+
+    page.goto.side_effect = redirect
+    page.screenshot.reset_mock()
+    result = await capture._capture_one(
+        context, dataclasses.replace(target, url="http://127.0.0.1/"), settings,
+        tmp_path / "cross-host.png",
+    )
+    assert result["status"] == "failed" and "private/internal" in result["error"]
+    page.screenshot.assert_not_awaited()

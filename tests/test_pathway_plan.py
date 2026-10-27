@@ -182,7 +182,7 @@ def test_verifier_call_binds_to_control_target():
     original = pathway_plan._load_pages_html
     pathway_plan._load_pages_html = lambda urls, **_policy: {url: TWO_CONTROL_HTML for url in urls}
     try:
-        urls, targets = plan_targets_from_map(pathway_map, "http://127.0.0.1:8123")
+        urls, targets = plan_targets_from_map(pathway_map, "http://127.0.0.1:8123", allow_loopback=True)
     finally:
         pathway_plan._load_pages_html = original
 
@@ -387,8 +387,8 @@ def _single_named_control_map() -> dict:
 class _FakeRoute:
     """A route.request / abort() / continue_() stand-in with the real shape."""
 
-    def __init__(self, url: str) -> None:
-        self.request = SimpleNamespace(url=url)
+    def __init__(self, url: str, resource_type: str = "document") -> None:
+        self.request = SimpleNamespace(url=url, resource_type=resource_type)
         self.aborted = False
         self.continued = False
 
@@ -538,7 +538,7 @@ def test_r3_loopback_plan_read_is_allowed(monkeypatch, _offline_test_dns):
         lambda urls, **_policy: {url: _one_control_page() for url in urls},
     )
     pathway_map = _load("named-control-manifest.md")
-    _urls, targets = plan_targets_from_map(pathway_map, "http://127.0.0.1:9")
+    _urls, targets = plan_targets_from_map(pathway_map, "http://127.0.0.1:9", allow_loopback=True)
     selectors = {target.pathway_id: target.trigger_selector for target in targets}
     assert selectors["open-settings"] == "#open-settings"
     assert selectors["open-missing"] == ""
@@ -567,7 +567,7 @@ def test_r3_redirect_requests_use_loopback_only_guard(monkeypatch):
 
     monkeypatch.setattr("capturd.shots.capture._reject_private_url", _spy)
 
-    result = pathway_plan._load_pages_html(["http://127.0.0.1:9/page"])
+    result = pathway_plan._load_pages_html(["http://127.0.0.1:9/page"], allow_loopback=True)
     assert result == {"http://127.0.0.1:9/page": "<html></html>"}
     assert fake.route_handler is not None
     assert fake.route_pattern == "**/*"
@@ -607,7 +607,7 @@ def test_r3_redirect_guard_refusal_is_not_swallowed(monkeypatch):
     fake.goto_hook = redirect
     fake.install(monkeypatch)
     with pytest.raises(RestedCaptureError) as excinfo:
-        plan_targets_from_map(pathway_map, "http://127.0.0.1:9")
+        plan_targets_from_map(pathway_map, "http://127.0.0.1:9", allow_loopback=True)
     assert str(excinfo.value) == guard_message, "the guard's own error must escape"
     fake.assert_all_closed()
 
@@ -624,7 +624,7 @@ def test_r3_redirect_guard_refusal_is_not_swallowed(monkeypatch):
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         with pytest.raises(RestedCaptureError) as excinfo:
-            plan_targets_from_map(pathway_map, "http://127.0.0.1:9")
+            plan_targets_from_map(pathway_map, "http://127.0.0.1:9", allow_loopback=True)
     assert str(excinfo.value) == guard_message
     assert [w for w in caught if issubclass(w.category, RuntimeWarning)] == [], (
         "a guard refusal must not become a reachability diagnostic"
@@ -642,7 +642,7 @@ def test_r3_final_url_is_checked_before_content(monkeypatch):
     fake.goto_hook = hijack
     fake.install(monkeypatch)
     with pytest.raises(RestedCaptureError) as excinfo:
-        pathway_plan._load_pages_html(["http://127.0.0.1:9/page"])
+        pathway_plan._load_pages_html(["http://127.0.0.1:9/page"], allow_loopback=True)
     assert "169.254.169.254" in str(excinfo.value)
     assert fake.pages[0].content_calls == 0, "content must never be read for a refused final URL"
     fake.assert_all_closed()
@@ -656,7 +656,9 @@ def test_r3_one_browser_reads_all_named_control_pages(monkeypatch):
     })
     fake.install(monkeypatch)
 
-    result = pathway_plan._load_pages_html(["http://127.0.0.1:9/a", "http://127.0.0.1:9/b"])
+    result = pathway_plan._load_pages_html(
+        ["http://127.0.0.1:9/a", "http://127.0.0.1:9/b"], allow_loopback=True,
+    )
     assert result == fake.html_by_url
     assert fake.entries == 1, "exactly one Playwright driver per plan"
     assert fake.launches == 1, "exactly one browser launch per plan"
@@ -862,7 +864,7 @@ def test_r5_batch_deadline_is_120_seconds(monkeypatch):
         return await original(awaitable, timeout=0 if timeout == 120 else timeout)
     monkeypatch.setattr(pathway_plan.asyncio, "wait_for", wait_for)
     with pytest.raises(RestedCaptureError, match="^pathway page read timed out$"):
-        pathway_plan._load_pages_html(["http://127.0.0.1:9"])
+        pathway_plan._load_pages_html(["http://127.0.0.1:9"], allow_loopback=True)
     assert seen == [120]
 
 
@@ -885,3 +887,128 @@ def test_r5_dry_run_skips_dns_checks(monkeypatch):
     monkeypatch.setattr(capture_mod.socket, "getaddrinfo", forbidden)
     _urls, targets = plan_targets_from_map(_load("named-control-manifest.md"), "http://base.test", dry_run=True)
     assert len(targets) == 2
+
+
+# W0-28-r5: subresource isolation, fail-closed errors, and safe defaults.
+def test_r6_private_subresource_aborts_warns_and_is_not_document_error():
+    context = SimpleNamespace(route=AsyncMock())
+    guard_errors = asyncio.run(capture_mod._install_navigation_guard(
+        context, allow_loopback=False, loopback_host=None,
+    ))
+    route = _FakeRoute("http://169.254.169.254/latest", "image")
+    with pytest.warns(RuntimeWarning) as caught:
+        asyncio.run(context.route.call_args.args[1](route))
+    assert route.aborted is True and route.continued is False
+    assert str(caught[0].message) == "capture subresource refused (RestedCaptureError); request aborted"
+    assert guard_errors == []
+
+
+def test_r6_document_refusal_is_fatal():
+    context = SimpleNamespace(route=AsyncMock())
+    guard_errors = asyncio.run(capture_mod._install_navigation_guard(
+        context, allow_loopback=False, loopback_host=None,
+    ))
+    handler = context.route.call_args.args[1]
+    route = _FakeRoute("http://169.254.169.254/latest")
+    asyncio.run(handler(route))
+    assert route.aborted is True and route.continued is False
+    assert len(guard_errors) == 1 and "private/internal" in str(guard_errors[0])
+    first = guard_errors[0]
+    asyncio.run(handler(_FakeRoute("http://10.0.0.5/private")))
+    assert guard_errors == [first]
+
+
+def test_r6_non_guard_subresource_exception_fails_closed(monkeypatch):
+    monkeypatch.setattr(capture_mod, "_check_navigation_url", AsyncMock(
+        side_effect=socket.gaierror("private host detail"),
+    ))
+    context = SimpleNamespace(route=AsyncMock())
+    guard_errors = asyncio.run(capture_mod._install_navigation_guard(
+        context, allow_loopback=False, loopback_host=None,
+    ))
+    route = _FakeRoute("http://missing.test/x", "image")
+    route.abort = AsyncMock()
+    route.continue_ = AsyncMock()
+    with pytest.warns(RuntimeWarning) as caught:
+        asyncio.run(context.route.call_args.args[1](route))
+    route.abort.assert_awaited_once()
+    route.continue_.assert_not_awaited()
+    message = str(caught[0].message)
+    assert message == "capture subresource refused (gaierror); request aborted"
+    assert "private host detail" not in message
+    assert guard_errors == []
+
+
+def test_r6_non_guard_document_exception_is_named_error(monkeypatch):
+    monkeypatch.setattr(capture_mod, "_check_navigation_url", AsyncMock(
+        side_effect=socket.gaierror("private host detail"),
+    ))
+    context = SimpleNamespace(route=AsyncMock())
+    guard_errors = asyncio.run(capture_mod._install_navigation_guard(
+        context, allow_loopback=False, loopback_host=None,
+    ))
+    route = _FakeRoute("http://missing.test/")
+    route.abort = AsyncMock()
+    route.continue_ = AsyncMock()
+    asyncio.run(context.route.call_args.args[1](route))
+    route.abort.assert_awaited_once()
+    route.continue_.assert_not_awaited()
+    assert len(guard_errors) == 1
+    assert str(guard_errors[0]) == "navigation URL check failed (gaierror)"
+    assert "private host detail" not in str(guard_errors[0])
+
+
+def test_r6_direct_helpers_default_refuse_loopback(monkeypatch):
+    import inspect
+
+    assert inspect.signature(plan_targets_from_map).parameters["allow_loopback"].default is False
+    assert inspect.signature(pathway_plan._load_pages_html).parameters["allow_loopback"].default is False
+    launch = AsyncMock()
+    monkeypatch.setattr(capture_mod, "_launch_browser", launch)
+    pathway_map = _load("named-control-manifest.md")
+    with pytest.raises(RestedCaptureError, match="private/internal"):
+        plan_targets_from_map(pathway_map, "http://127.0.0.1:9")
+    with pytest.raises(RestedCaptureError, match="private/internal"):
+        pathway_plan._load_pages_html(["http://127.0.0.1:9/page"])
+    launch.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_r6_legacy_asyncio_timeout_is_named_refusal(monkeypatch):
+    import inspect
+
+    class LegacyTimeoutError(Exception):
+        pass
+
+    async def expire(awaitable, *args, **kwargs):
+        if inspect.iscoroutine(awaitable):
+            awaitable.close()
+        raise LegacyTimeoutError
+
+    monkeypatch.setattr(capture_mod.asyncio, "wait_for", expire)
+    monkeypatch.setattr(capture_mod.asyncio, "TimeoutError", LegacyTimeoutError)
+    with pytest.raises(RestedCaptureError, match="^navigation URL check timed out$"):
+        await capture_mod._check_navigation_url(
+            "https://example.com", allow_loopback=False, loopback_host=None,
+        )
+
+
+def test_r6_legacy_asyncio_batch_timeouts_are_named_refusals(monkeypatch):
+    import inspect
+
+    class LegacyTimeoutError(Exception):
+        pass
+
+    async def expire(awaitable, *args, **kwargs):
+        if inspect.iscoroutine(awaitable):
+            awaitable.close()
+        raise LegacyTimeoutError
+
+    monkeypatch.setattr(pathway_plan.asyncio, "wait_for", expire)
+    monkeypatch.setattr(pathway_plan.asyncio, "TimeoutError", LegacyTimeoutError)
+    with pytest.raises(RestedCaptureError, match="^pathway page read timed out$"):
+        pathway_plan._load_pages_html(["http://127.0.0.1:9"], allow_loopback=True)
+    with pytest.raises(RestedCaptureError, match="^pathway URL checks timed out$"):
+        plan_targets_from_map(
+            _load("named-control-manifest.md"), "http://127.0.0.1:9", allow_loopback=True,
+        )
