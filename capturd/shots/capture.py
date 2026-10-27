@@ -1821,7 +1821,10 @@ class RestedCaptureManager:
             manifest = {
                 "job_id": job_id,
                 "captured_at": utc_now_iso(),
-                "settings": settings,
+                "settings": {
+                    key: value for key, value in settings.items()
+                    if key != "_navigation_cache"
+                },
                 "urls": self.get(job_id).get("urls") or [],
                 "discovery": settings.get("discovery") or {},
                 "results": results,
