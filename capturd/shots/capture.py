@@ -442,7 +442,7 @@ async def _check_navigation_url(
         _canonical_host(loopback_host),
         tuple(_canonical_host(host) for host in allow_private_hosts), allow_file_access,
     )
-    if cache is not None and key in cache and cache[key] is not None:
+    if cache is not None and key in cache:
         # Refusals are fail-closed and reusable. Successful verdicts are never
         # cached: every allowed request re-resolves to narrow DNS rebinding.
         raise cache[key]
@@ -1505,8 +1505,16 @@ async def _capture_one(
                 pass
             await _settle_page(page, settings["wait_ms"])
             trigger_fired = False
+            post_trigger_url = page.url
             if (target.trigger_selector or "").strip():
+                pre_trigger_url = page.url
                 trigger_fired = await _apply_trigger(page, target.trigger_selector, settings["wait_ms"])
+                post_trigger_url = page.url
+                if (
+                    page.url == "about:blank"
+                    or urlparse(page.url).scheme.lower() in {"data", "blob"}
+                ):
+                    post_trigger_url = pre_trigger_url
             screenshot_kwargs: dict[str, Any] = {
                 "path": str(path),
                 "type": settings["format"],
@@ -1518,7 +1526,7 @@ async def _capture_one(
             if page_errors:
                 raise page_errors[0]
             await _check_navigation_url(
-                page.url, allow_loopback=allow_loopback, loopback_host=loopback_host,
+                post_trigger_url, allow_loopback=allow_loopback, loopback_host=loopback_host,
                 allow_private_hosts=allow_private_hosts, allow_file_access=allow_file_access,
                 cache=navigation_cache,
             )
@@ -1547,7 +1555,7 @@ async def _capture_one(
             }
         except Exception as exc:
             selected_error = page_errors[0] if page_errors else exc
-            last_error = str(selected_error)
+            last_error = _redact_settings_secrets(str(selected_error), settings)
             if attempt < attempts:
                 await asyncio.sleep(0.35)
         finally:
@@ -1556,6 +1564,8 @@ async def _capture_one(
                     await page.close()
                 except Exception:
                     pass
+            if guard_errors is not None:
+                guard_errors.extend(page_errors)
 
     return {
         "url": target.url,
@@ -1696,13 +1706,39 @@ SAFE_SETTINGS_KEYS = frozenset({
     "format", "full_page", "timeout_ms", "wait_ms", "concurrency", "retries",
     "retry_timeout_ms", "jpeg_quality", "states", "states_limit", "state_wait_ms",
     "capture_count", "crawl", "local", "page_count", "pathway_flags", "discovery",
-    "allow_loopback", "loopback_host",
+    "allow_loopback", "loopback_host", "allow_private_hosts",
 })
 
 
 def _safe_settings(settings: dict[str, Any]) -> dict[str, Any]:
     """Only non-secret, JSON-safe capture settings may be shared or persisted."""
-    return {key: value for key, value in settings.items() if key in SAFE_SETTINGS_KEYS}
+    safe = {key: value for key, value in settings.items() if key in SAFE_SETTINGS_KEYS}
+    if "allow_private_hosts" in safe:
+        safe["allow_private_hosts"] = list(safe["allow_private_hosts"])
+    return safe
+
+
+def _redact_settings_secrets(text: str, settings: dict[str, Any]) -> str:
+    """Remove every non-allowlisted settings value from an outward error."""
+    values: list[str] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, str):
+            if value:
+                values.append(value)
+        elif isinstance(value, dict):
+            for item in value.values():
+                collect(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                collect(item)
+
+    for key, value in settings.items():
+        if key not in SAFE_SETTINGS_KEYS:
+            collect(value)
+    for value in sorted(set(values), key=len, reverse=True):
+        text = text.replace(value, "<redacted>")
+    return text
 
 
 def _write_json(path: Path, data: dict[str, Any]) -> None:
@@ -1728,10 +1764,20 @@ class RestedCaptureManager:
         self, payload: dict[str, Any], *, allow_map_files: bool = False,
         allow_loopback: bool = False, allow_private_hosts: tuple[str, ...] = (),
     ) -> dict[str, Any]:
-        urls, targets, settings = build_capture_plan(
-            payload, allow_map_files=allow_map_files, allow_loopback=allow_loopback,
-            allow_private_hosts=allow_private_hosts,
+        capabilities = {
+            "allow_map_files": allow_map_files,
+            "allow_loopback": allow_loopback,
+            "allow_private_hosts": allow_private_hosts,
+        }
+        map_input = any(
+            payload.get(key) is not None
+            for key in ("manifest_path", "map_path", "manifest_text", "map_text")
         )
+        live_payload = dict(payload) if map_input else None
+        plan_payload = dict(payload) if map_input else payload
+        if map_input:
+            plan_payload["dry_run"] = True
+        urls, targets, settings = build_capture_plan(plan_payload, **capabilities)
         job_id = uuid.uuid4().hex[:12]
         job_name = _slug(str(payload.get("name") or "") or _job_name(), _job_name())
         work_dir = self.root_dir / job_id
@@ -1753,7 +1799,7 @@ class RestedCaptureManager:
             "completed": 0,
             "failed": 0,
             "results": [],
-            "settings": settings,
+            "settings": _safe_settings(settings),
             "discovery": settings.get("discovery") or {},
             "work_dir": str(work_dir),
             "output_dir": "",
@@ -1765,7 +1811,10 @@ class RestedCaptureManager:
 
         thread = threading.Thread(
             target=self._run_job,
-            args=(job_id, targets, settings, work_dir, shots_dir, export_dir, export_mode),
+            args=(
+                job_id, targets, settings, work_dir, shots_dir, export_dir, export_mode,
+                live_payload, capabilities if map_input else None,
+            ),
             daemon=False,
             name=f"rested-capture-{job_id}",
         )
@@ -1777,7 +1826,9 @@ class RestedCaptureManager:
             job = self._jobs.get(job_id)
             if not job:
                 raise KeyError(job_id)
-            return dict(job)
+            result = dict(job)
+            result["settings"] = _safe_settings(result.get("settings") or {})
+            return result
 
     def zip_path(self, job_id: str) -> Path:
         job = self.get(job_id)
@@ -1811,8 +1862,20 @@ class RestedCaptureManager:
         shots_dir: Path,
         export_dir: Path | None,
         export_mode: str,
+        live_payload: dict[str, Any] | None = None,
+        capabilities: dict[str, Any] | None = None,
     ) -> None:
         try:
+            if live_payload is not None:
+                urls, targets, settings = build_capture_plan(
+                    live_payload, **(capabilities or {}),
+                )
+                self._patch(job_id, {
+                    "urls": urls,
+                    "total": len(targets),
+                    "settings": _safe_settings(settings),
+                    "discovery": settings.get("discovery") or {},
+                })
             shots_dir.mkdir(parents=True, exist_ok=True)
             self._patch(job_id, {"status": "running", "message": "Capturing"})
             results = run_capture(
@@ -1857,4 +1920,8 @@ class RestedCaptureManager:
                 },
             )
         except Exception as exc:
-            self._patch(job_id, {"ok": False, "status": "failed", "message": str(exc)})
+            self._patch(job_id, {
+                "ok": False,
+                "status": "failed",
+                "message": _redact_settings_secrets(str(exc), settings),
+            })

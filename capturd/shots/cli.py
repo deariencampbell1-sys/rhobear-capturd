@@ -113,7 +113,8 @@ def build_parser() -> argparse.ArgumentParser:
                              "launches no browser and makes no network call: trigger_selector "
                              "comes only from the selector/css column, and a named control that "
                              "would need the page to bind is reported unbound (selector=-) with "
-                             "a flag. (--site / --sitemap page discovery still reads its input.)")
+                             "a flag. --site / --sitemap combinations are refused because "
+                             "their discovery requires network access.")
 
     parser.add_argument("--viewports", default="desktop,tablet,mobile",
                         help="Any of desktop,tablet,mobile (default: all three)")
@@ -196,6 +197,13 @@ def _print_plan(urls, targets, settings) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    if args.dry_run and (args.site or args.sitemap):
+        print(
+            "error: --dry-run does not support --site or --sitemap because discovery requires network access",
+            file=sys.stderr,
+        )
+        return 2
 
     map_input = bool(args.pathway_map or args.pathway_manifest or args.map_text)
     if map_input and not (args.base_url or "").strip():

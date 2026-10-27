@@ -550,6 +550,7 @@ def test_r3_build_plan_enforces_expanded_matrix_limit(monkeypatch):
 # W0-28-r4: use parsed, existing manifests and real capture/manager contracts.
 import asyncio
 import threading
+import warnings
 import zipfile
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -1468,6 +1469,7 @@ def test_r10_secrets_never_leave_worker_surfaces(
             shots_dir / "real-capture", monkeypatch,
         )
         capture_settings.update(settings)
+        monkeypatch.setattr(capture, "_check_navigation_url", AsyncMock())
         page.goto.side_effect = RuntimeError(f"navigation exposed {secret}")
         result = asyncio.run(real_capture_one(context, target, capture_settings, path))
         progress(result)
@@ -1483,7 +1485,7 @@ def test_r10_secrets_never_leave_worker_surfaces(
     outward_states.append(json.dumps(started))
     outward_states.append(json.dumps(manager.get(job_id)))
     assert secret not in json.dumps(started)
-    assert started["settings"]["allow_private_hosts"] == ("172.17.0.1",)
+    assert started["settings"]["allow_private_hosts"] == ["172.17.0.1"]
     assert _ManualThread.instances[0].started
     with warnings.catch_warnings(record=True) as caught_warnings:
         warnings.simplefilter("always")
@@ -1492,7 +1494,7 @@ def test_r10_secrets_never_leave_worker_surfaces(
     outward_states.append(json.dumps(finished))
     assert finished["status"] == "done_with_errors"
     assert finished["results"][0]["error"] == "navigation exposed <redacted>"
-    assert finished["settings"]["allow_private_hosts"] == ("172.17.0.1",)
+    assert finished["settings"]["allow_private_hosts"] == ["172.17.0.1"]
 
     work_dir = Path(started["work_dir"])
     manifest_text = (work_dir / "manifest.json").read_text(encoding="utf-8")
