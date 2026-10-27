@@ -19,6 +19,7 @@ import threading
 import time
 import uuid
 import zipfile
+import warnings
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +43,8 @@ MAX_URLS = 1000
 MAX_SITEMAP_URLS = 1000
 MAX_CRAWL_URLS = 1000
 DEFAULT_TIMEOUT_MS = 30000
+TRIGGER_CLICK_TIMEOUT_MS = 2500
+NAV_GUARD_TIMEOUT_S = 10
 DEFAULT_WAIT_MS = 600
 DEFAULT_CONCURRENCY = 3
 DEFAULT_RETRIES = 1
@@ -396,6 +399,53 @@ def _reject_private_url(url: str, *, allow_loopback: bool = False) -> None:
             if allow_loopback and unwrapped is not None and unwrapped.is_loopback:
                 continue
             raise RestedCaptureError(f"url resolves to a private/internal IP ({ip}) — not allowed")
+
+
+def _reject_navigation_url(
+    url: str, *, allow_loopback: bool, loopback_host: str | None,
+) -> None:
+    # Preserve local-file capture; only HTTP(S) requests have DNS/IP policy.
+    if urlparse(url).scheme.lower() not in {"http", "https"}:
+        return
+    host = (urlparse(url).hostname or "").lower()
+    permitted = bool(allow_loopback and loopback_host and host == loopback_host.lower())
+    _reject_private_url(url, allow_loopback=permitted)
+
+
+async def _check_navigation_url(url: str, *, allow_loopback: bool, loopback_host: str | None) -> None:
+    try:
+        await asyncio.wait_for(asyncio.to_thread(
+            _reject_navigation_url, url,
+            allow_loopback=allow_loopback, loopback_host=loopback_host,
+        ), timeout=NAV_GUARD_TIMEOUT_S)
+    except TimeoutError:
+        raise RestedCaptureError("navigation URL check timed out") from None
+
+
+async def _install_navigation_guard(
+    context: Any, *, allow_loopback: bool, loopback_host: str | None,
+) -> list[RestedCaptureError]:
+    """Check requests before Chromium connects; retain the first refusal.
+
+    Chromium resolves again at connect time. This userspace guard cannot pin
+    its socket DNS; rebinding between check and connect remains a residual.
+    Coroutine deadlines cannot terminate an OS resolver already in a thread.
+    """
+    guard_errors: list[RestedCaptureError] = []
+
+    async def guard(route: Any) -> None:
+        try:
+            await _check_navigation_url(route.request.url, allow_loopback=allow_loopback,
+                                        loopback_host=loopback_host)
+        except RestedCaptureError as exc:
+            if not guard_errors:
+                guard_errors.append(exc)
+            await route.abort()
+            return
+        await route.continue_()
+
+    await context.route("**/*", guard)
+    return guard_errors
 
 
 def _fetch_url_bytes(url: str, timeout: int = 20, limit: int = 10 * 1024 * 1024) -> tuple[bytes, dict[str, str]]:
@@ -885,7 +935,12 @@ def build_capture_plan(payload: dict[str, Any]) -> tuple[list[str], list[Capture
     # pair free of an import cycle.
     from .pathway_plan import MAX_TARGETS, plan_targets_from_map
 
-    max_targets = int(payload.get("max_targets") or MAX_TARGETS)
+    try:
+        max_targets = int(payload.get("max_targets", MAX_TARGETS))
+    except (TypeError, ValueError):
+        raise RestedCaptureError("max_targets must be a number") from None
+    if max_targets < 1:
+        raise RestedCaptureError("max_targets must be at least 1")
 
     # The matrix is normalised and validated BEFORE any planning/navigation:
     # the expanded target ceiling below needs the real viewport and scheme
@@ -917,6 +972,8 @@ def build_capture_plan(payload: dict[str, Any]) -> tuple[list[str], list[Capture
         base_url = str(payload.get("base_url") or "").strip()
         if not base_url:
             raise RestedCaptureError("base_url is required when feeding a pathway map")
+        if any(payload.get(key) is not None for key in ("manifest_path", "map_path")) and payload.get("_allow_map_files") is not True:
+            raise RestedCaptureError("map file paths are CLI-only; pass map_text or manifest_text")
         pathway_map = load_pathway_map(
             manifest_path=payload.get("manifest_path"),
             map_path=payload.get("map_path"),
@@ -934,6 +991,7 @@ def build_capture_plan(payload: dict[str, Any]) -> tuple[list[str], list[Capture
             # D92: a dry-run plan is built with no navigation and no network
             # call — never a page read to bind a named control.
             dry_run=bool(payload.get("dry_run")),
+            allow_loopback=bool(payload.get("_allow_loopback")),
         )
         crawl_enabled = False
         local_enabled = False
@@ -1033,7 +1091,7 @@ def build_capture_plan(payload: dict[str, Any]) -> tuple[list[str], list[Capture
 
     # M-expanded-targets: the defensive post-expansion check — the refusal
     # text says "capture targets", so the ceiling is the TARGET count.
-    if len(targets) > max_targets:
+    if pathway_targets is not None and len(targets) > max_targets:
         raise RestedCaptureError(f"too many capture targets; maximum is {max_targets}")
 
     # The plan says why a pathway is flagged. Status is read by the closed
@@ -1073,6 +1131,8 @@ def build_capture_plan(payload: dict[str, Any]) -> tuple[list[str], list[Capture
                     })
 
     settings = {
+        "allow_loopback": bool(supplied_maps and payload.get("_allow_loopback")),
+        "loopback_host": urlparse(base_url).hostname if supplied_maps and payload.get("_allow_loopback") else None,
         "format": str(payload.get("format") or "png").lower(),
         "full_page": bool(payload.get("full_page", True)),
         "timeout_ms": int(payload.get("timeout_ms") or DEFAULT_TIMEOUT_MS),
@@ -1290,7 +1350,8 @@ async def _apply_trigger(page: Any, selector: str, wait_ms: int) -> bool:
     """Click the pathway's named control to reach its rested state.
 
     The selector is the planner's candidate selector (never hand-rolled).
-    A missing control or a failed click is not a capture error — we shoot the
+    A click is meaningful only when its URL or DOM fingerprint changes.
+    A no-op stays baseline evidence. A missing control or a failed click is not a capture error — we shoot the
     loaded state and report ``trigger_fired`` False; the quality gate reads
     that flag to tell a baseline from a meaningful state shot.
     """
@@ -1301,14 +1362,22 @@ async def _apply_trigger(page: Any, selector: str, wait_ms: int) -> bool:
         element = await page.query_selector(sel)
         if element is None:
             return False
-        await element.click(timeout=2500)
+        before_url = page.url
+        before = await page.evaluate(_FINGERPRINT_JS)
+        await element.click(timeout=TRIGGER_CLICK_TIMEOUT_MS)
         await _settle_page(page, wait_ms)
-        return True
-    except Exception:
+        after = await page.evaluate(_FINGERPRINT_JS)
+        return page.url != before_url or after != before
+    except Exception as exc:
+        warnings.warn(f"capture trigger failed ({type(exc).__name__}); trigger_fired=False",
+                      RuntimeWarning, stacklevel=2)
         return False
 
 
-async def _capture_one(context: Any, target: CaptureTarget, settings: dict[str, Any], path: Path) -> dict[str, Any]:
+async def _capture_one(
+    context: Any, target: CaptureTarget, settings: dict[str, Any], path: Path,
+    *, guard_errors: list[RestedCaptureError] | None = None,
+) -> dict[str, Any]:
     started = time.perf_counter()
     attempts = max(1, int(settings.get("retries", DEFAULT_RETRIES)) + 1)
     last_error = ""
@@ -1320,7 +1389,15 @@ async def _capture_one(context: Any, target: CaptureTarget, settings: dict[str, 
                 timeout_ms = max(timeout_ms, int(settings.get("retry_timeout_ms") or DEFAULT_RETRY_TIMEOUT_MS))
             page = await context.new_page()
             page.set_default_timeout(timeout_ms)
+            await _check_navigation_url(target.url, allow_loopback=bool(settings.get("allow_loopback")),
+                                        loopback_host=settings.get("loopback_host"))
+            if guard_errors:
+                raise guard_errors[0]
             await page.goto(target.url, wait_until="domcontentloaded", timeout=timeout_ms)
+            if guard_errors:
+                raise guard_errors[0]
+            await _check_navigation_url(page.url, allow_loopback=bool(settings.get("allow_loopback")),
+                                        loopback_host=settings.get("loopback_host"))
             try:
                 await page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 15000))
             except Exception:
@@ -1337,11 +1414,17 @@ async def _capture_one(context: Any, target: CaptureTarget, settings: dict[str, 
             }
             if settings["format"] == "jpeg":
                 screenshot_kwargs["quality"] = settings["jpeg_quality"]
+            if guard_errors:
+                raise guard_errors[0]
+            await _check_navigation_url(page.url, allow_loopback=bool(settings.get("allow_loopback")),
+                                        loopback_host=settings.get("loopback_host"))
             await page.screenshot(**screenshot_kwargs)
             stat = path.stat()
             extra_states: list[dict[str, Any]] = []
             if settings.get("states"):
                 extra_states = await _sweep_states(page, target, settings, path)
+            if guard_errors:
+                raise guard_errors[0]
             return {
                 "url": target.url,
                 "states": extra_states,
@@ -1359,7 +1442,7 @@ async def _capture_one(context: Any, target: CaptureTarget, settings: dict[str, 
                 "elapsed_ms": int((time.perf_counter() - started) * 1000),
             }
         except Exception as exc:
-            last_error = str(exc)
+            last_error = str(guard_errors[0] if guard_errors else exc)
             if attempt < attempts:
                 await asyncio.sleep(0.35)
         finally:
@@ -1422,6 +1505,7 @@ async def _run_capture_async(
         allow_file_access = any(urlparse(target.url).scheme == "file" for target in targets)
         browser = await _launch_browser(p, allow_file_access=allow_file_access)
         contexts: dict[tuple[str, str, int, int, str], Any] = {}
+        errors_by_key: dict[tuple[str, str, int, int, str], list[RestedCaptureError]] = {}
         context_lock = asyncio.Lock()
 
         async def context_for(target: CaptureTarget) -> Any:
@@ -1437,6 +1521,11 @@ async def _run_capture_async(
                         locale="en-US",
                         user_agent=USER_AGENT,
                     )
+                    contexts[key] = context
+                    errors_by_key[key] = await _install_navigation_guard(
+                        context, allow_loopback=bool(settings.get("allow_loopback")),
+                        loopback_host=settings.get("loopback_host"),
+                    )
                     # Signed-in capture: without cookies the batch can only ever shoot
                     # what a logged-out visitor sees, so authenticated products are
                     # impossible to screenshot.
@@ -1451,7 +1540,8 @@ async def _run_capture_async(
                 async with sem:
                     file_name = _capture_file_name(target, settings["format"])
                     context = await context_for(target)
-                    result = await _capture_one(context, target, settings, shots_dir / file_name)
+                    result = await _capture_one(context, target, settings, shots_dir / file_name,
+                                                guard_errors=errors_by_key[_target_context_key(target)])
                     progress(result)
                     return result
 

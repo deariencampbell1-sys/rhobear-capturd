@@ -87,8 +87,7 @@ _PROTOCOL_PREFIX_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:")
 
 
 def _safe_input_path(raw: str, label: str) -> str:
-    windows_absolute = re.match(r"^[a-zA-Z]:[\\/]", raw)
-    if _PROTOCOL_PREFIX_RE.match(raw) and not windows_absolute:
+    if _PROTOCOL_PREFIX_RE.match(raw):
         sys.exit(f"finish.py: --{label} {raw!r} looks like a protocol prefix "
                   f"-- rejected (ffmpeg would interpret this as a protocol, "
                   f"not a file path; use an absolute or ./-relative path)")

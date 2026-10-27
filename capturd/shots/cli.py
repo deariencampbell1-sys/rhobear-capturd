@@ -14,7 +14,10 @@ reported unbound (``selector=-``) with a flag. The quality gate (01c)
 decides whether a MAP-DRIVEN run is evidence — a legacy ``--urls`` /
 ``--sitemap`` / ``--crawl`` / ``--local`` run keeps its pre-gate exit codes
 (a baseline-only run is 0, a failed job is 1, done-with-errors is 3) — and
-its reason code reaches this caller unchanged when a gate runs.
+its reason code reaches this caller unchanged when a gate runs. Finished map
+runs refused by quality exit 4. Only CLI map inputs permit local map files and
+loopback navigation on the exact --base-url hostname; metadata remains refused.
+Remote callers pass map_text/manifest_text and default to no loopback permission.
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ from .capture import (
     build_capture_plan,
     build_quality_summary,
 )
+from .pathway_plan import MAX_TARGETS
 from .pathway_map import PathwayMapError
 from .quality import build_quality_error, is_passing, summarize_capture_quality
 
@@ -65,9 +69,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="pasted verifier JSON map text - the same content as --pathway-map, no file on disk")
 
     parser.add_argument("--base-url", metavar="URL",
-                        help="Base URL the map's pathways resolve against - required with a map input (where the built HTML lives)")
-    parser.add_argument("--max-targets", type=int, default=5000, metavar="N",
-                        help="Refuse a map naming more than N capture targets (default 5000)")
+                        help="Base URL the map's pathways resolve against - required with a map input; CLI permits loopback only on this exact host, never metadata")
+    parser.add_argument("--max-targets", type=int, default=MAX_TARGETS, metavar="N",
+                        help="Refuse a map naming more than N capture targets (default %(default)s)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print the capture plan and exit - no shots. A map plan "
                              "launches no browser and makes no network call: trigger_selector "
@@ -144,7 +148,13 @@ def _print_plan(urls, targets, settings) -> int:
     for flag in settings.get("pathway_flags") or []:
         print(f"flag: {flag['flag']} {flag['pathway_id']}: {flag['reason']}")
     # Cookie values are credentials; keep them out of shareable dry-run output.
-    safe_settings = {key: value for key, value in settings.items() if key != "cookies"}
+    plan_keys = {
+        "format", "full_page", "timeout_ms", "wait_ms", "concurrency", "retries",
+        "retry_timeout_ms", "jpeg_quality", "states", "states_limit", "state_wait_ms",
+        "capture_count", "crawl", "local", "page_count", "pathway_flags", "discovery",
+        "allow_loopback", "loopback_host",
+    }
+    safe_settings = {key: value for key, value in settings.items() if key in plan_keys}
     print(
         "plan-json: "
         + json.dumps(
@@ -196,6 +206,8 @@ def main(argv: list[str] | None = None) -> int:
             "map_text": args.map_text,
             "base_url": args.base_url,
             "max_targets": args.max_targets,
+            "_allow_map_files": True,
+            "_allow_loopback": True,
         })
 
     if args.dry_run:
@@ -245,6 +257,8 @@ def main(argv: list[str] | None = None) -> int:
     # old code, done-with-errors is 3). When a gate runs its reason code
     # reaches the caller unchanged - no re-wording downstream, honest-failure
     # at the exit code.
+    if status != "done":
+        return 3
     if map_input:
         summary = build_quality_summary(job.get("results") or [])
         quality = summarize_capture_quality(summary)

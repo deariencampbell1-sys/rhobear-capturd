@@ -39,19 +39,16 @@ host-path-shaped tokens (Windows or POSIX) redacted, errors name the
 pathway id, never a path, and a directory-shaped ``base_url`` is refused
 outright rather than joined into one.
 
-The page read for selector binding goes through the real capture path (a
-Playwright navigation to the target the user pointed at), and every such
-plan-time navigation goes through the capture path's own private-IP / host
-guard — capture's ``_reject_private_url``, the shared :mod:`capturd._net`
-predicate, reused and never re-implemented — with ONE named exception
-(H1): loopback. Planning against a local dev server is the seam's primary
-use case, so the plan-navigation guard skips loopback (and only loopback,
-IPv4, IPv6 or IPv4-mapped) via ``allow_loopback=True``; every other private,
-link-local, reserved, multicast and unspecified address still refuses the
-plan with the same error the capture path raises — whose default is
-unchanged and still refuses loopback. Every request the browser makes — the
-initial URL, redirects and subresources — is checked by a context route
-guard, and the final URL is re-checked before content is read.
+Every resolved HTTP(S) URL is checked even if no control needs a page read.
+The same request guard protects planning and capture contexts, including redirects,
+subresources and final URLs. Only the exact base hostname can use the loopback
+exception. Direct planner/reader calls retain local-tool defaults; build_capture_plan
+passes False unless the CLI supplies its internal opt-in. Metadata and other private
+ranges remain refused even on that host. Chromium resolves again at connect time:
+this userspace check cannot pin its socket DNS, so rebinding remains a residual.
+DNS checks run off-loop with a 10-second coroutine timeout; checks/read batches have
+120-second coroutine deadlines. A stuck OS resolver thread cannot be terminated by
+asyncio deadlines and may delay executor shutdown; do not claim an OS-level bound.
 
 The read is best-effort for reachability: an unreachable page means no
 selector, not a refused plan — reachability is a capture-time fact (a guard
@@ -86,6 +83,8 @@ __all__ = [
 #: The service's capture-target ceiling (capture_service.py's ``MAX_TARGETS``).
 #: The refusal text below is that service's, verbatim.
 MAX_TARGETS = 5000
+PLAN_NAV_TIMEOUT_MS = 15000
+PLAN_BATCH_TIMEOUT_S = 120
 
 _URL_RE = re.compile(r"https?://[^\s`'\"]+", re.IGNORECASE)
 
@@ -368,12 +367,6 @@ def _match_control(tokens: list[str], candidates: list[Any]) -> Any | None:
             for candidate in candidates:
                 if wanted == _norm_label(candidate.label):
                     return candidate
-    for token in tokens:
-        wanted = _norm_label(token)
-        if len(wanted) >= 4:
-            for candidate in candidates:
-                if wanted in _norm_label(candidate.label):
-                    return candidate
     return None
 
 
@@ -393,26 +386,14 @@ def _reject_running_loop() -> None:
     )
 
 
-def _load_pages_html(urls: list[str]) -> dict[str, str]:
+def _load_pages_html(
+    urls: list[str], *, allow_loopback: bool = True, loopback_host: str | None = None,
+) -> dict[str, str]:
     """Read the target pages' HTML through the real capture path — one batch.
 
-    D94: every plan-time navigation goes through the SAME private-IP / host
-    guard the capture path's network access uses — capture's
-    ``_reject_private_url`` (the shared :mod:`capturd._net` predicate, reused
-    here, never re-implemented) — with H1's ONE named exception: loopback.
-    ``allow_loopback=True`` lets a map be planned against a local dev server
-    (the seam's primary use case); every other private, link-local, reserved,
-    multicast and unspecified address raises exactly the error the capture
-    path raises and refuses the plan. The capture path's default is unchanged
-    and still refuses loopback.
-
-    M-redirect-SSRF: the guard is not only an entry check. A context ``**/*``
-    route guard checks EVERY request URL — the initial navigation, redirects
-    and subresources — with the same loopback-only policy, and after each
-    ``goto`` the final URL is checked again before any content is read. A
-    refused request is aborted, the FIRST guard error is retained, and it is
-    re-raised from the read — a guard refusal is never swallowed as
-    reachability.
+    Every HTTP(S) URL, request and final URL uses capture's exact-base-host
+    loopback policy; metadata remains refused. The FIRST refusal is retained.
+    See module documentation for DNS rebinding and OS resolver limitations.
 
     M-browser-lifecycle: ONE batch read per non-dry-run plan — one Playwright
     driver, one browser, one context, one page per URL sequential inside it,
@@ -426,11 +407,11 @@ def _load_pages_html(urls: list[str]) -> dict[str, str]:
     guard refusal is never swallowed.
     """
     _reject_running_loop()
-    from .capture import _launch_browser, _reject_private_url
+    from .capture import _launch_browser, _check_navigation_url, _install_navigation_guard
 
-    for url in urls:
-        if urlparse(url).scheme in ("http", "https"):
-            _reject_private_url(url, allow_loopback=True)
+    # Direct reader compatibility: only its first URL supplies the base host.
+    if loopback_host is None and urls:
+        loopback_host = urlparse(urls[0]).hostname
 
     async def _read_all() -> dict[str, str]:
         try:
@@ -442,17 +423,8 @@ def _load_pages_html(urls: list[str]) -> dict[str, str]:
             ) from exc
 
         html_by_url: dict[str, str] = {}
-        guard_errors: list[RestedCaptureError] = []
-
-        async def _guard_request(route: Any) -> None:
-            try:
-                _reject_private_url(route.request.url, allow_loopback=True)
-            except RestedCaptureError as exc:
-                if not guard_errors:
-                    guard_errors.append(exc)
-                await route.abort()
-                return
-            await route.continue_()
+        for url in urls:
+            await _check_navigation_url(url, allow_loopback=allow_loopback, loopback_host=loopback_host)
 
         async with async_playwright() as p:
             # allow_file_access is false: `file:` bases are refused at
@@ -461,15 +433,17 @@ def _load_pages_html(urls: list[str]) -> dict[str, str]:
             context = await browser.new_context()
             try:
                 # Before any page exists: every request, redirects included.
-                await context.route("**/*", _guard_request)
+                guard_errors = await _install_navigation_guard(
+                    context, allow_loopback=allow_loopback, loopback_host=loopback_host,
+                )
                 for url in urls:
                     page = await context.new_page()
                     try:
                         try:
-                            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                            await page.goto(url, wait_until="domcontentloaded", timeout=PLAN_NAV_TIMEOUT_MS)
                             if guard_errors:
                                 raise guard_errors[0]
-                            _reject_private_url(page.url, allow_loopback=True)
+                            await _check_navigation_url(page.url, allow_loopback=allow_loopback, loopback_host=loopback_host)
                             html_by_url[url] = await page.content()
                         except RestedCaptureError:
                             raise
@@ -494,7 +468,13 @@ def _load_pages_html(urls: list[str]) -> dict[str, str]:
                 await browser.close()
         return html_by_url
 
-    return asyncio.run(_read_all())
+    async def _bounded() -> dict[str, str]:
+        try:
+            return await asyncio.wait_for(_read_all(), timeout=PLAN_BATCH_TIMEOUT_S)
+        except TimeoutError:
+            raise RestedCaptureError("pathway page read timed out") from None
+
+    return asyncio.run(_bounded())
 
 
 def _plan_page(html: str) -> list[Any]:
@@ -532,6 +512,7 @@ def plan_targets_from_map(
     viewport_count: int = 1,
     scheme_count: int = 1,
     dry_run: bool = False,
+    allow_loopback: bool = True,
 ) -> tuple[list[str], list[CaptureTarget]]:
     """Expand a parsed map into unique URLs and one target per capturable
     pathway.
@@ -587,13 +568,27 @@ def plan_targets_from_map(
     plans_by_url: dict[str, list[Any]] = {}
 
     if not dry_run:
+        from .capture import _check_navigation_url
+
+        async def _check_all() -> None:
+            for url in urls:
+                await _check_navigation_url(url, allow_loopback=allow_loopback,
+                                            loopback_host=urlparse(base).hostname)
+
+        async def _bounded_checks() -> None:
+            try:
+                await asyncio.wait_for(_check_all(), timeout=PLAN_BATCH_TIMEOUT_S)
+            except TimeoutError:
+                raise RestedCaptureError("pathway URL checks timed out") from None
+
+        asyncio.run(_bounded_checks())
         # M-browser-lifecycle: ONE batch read for the whole plan — the unique
         # URLs that actually have named-control tokens.
         needs_page = {url for url, _pathway, tokens in resolved if tokens}
         read_urls = [url for url in urls if url in needs_page]
         if read_urls:
             try:
-                html_by_url.update(_load_pages_html(read_urls))
+                html_by_url.update(_load_pages_html(read_urls, allow_loopback=allow_loopback, loopback_host=urlparse(base).hostname))
             except RestedCaptureError:
                 # D94: a guard refusal is a security fact and refuses the
                 # plan — it is never the reachability best-effort below.
