@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-import sys
+import warnings
 from unittest.mock import AsyncMock
 
 import pytest
@@ -21,30 +21,18 @@ async def test_apply_trigger_rejects_empty_selector_without_page_access(selector
 
 
 @pytest.mark.asyncio
-async def test_apply_trigger_returns_false_when_element_is_missing():
+async def test_apply_trigger_returns_false_when_element_is_missing(monkeypatch):
     page = AsyncMock()
     page.query_selector.return_value = None
-    internal_exceptions = []
-
-    def trace(frame, event, arg):
-        if (
-            event == "exception"
-            and frame.f_code is capture._apply_trigger.__code__
-            and arg[0] is not StopIteration
-        ):
-            internal_exceptions.append(arg[0])
-        return trace
-
-    previous_trace = sys.gettrace()
-    sys.settrace(trace)
-    try:
+    settle = AsyncMock()
+    monkeypatch.setattr(capture, "_settle_page", settle)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         result = await _apply_trigger(page, "#missing", 123)
-    finally:
-        sys.settrace(previous_trace)
-
     assert result is False
-    assert internal_exceptions == [], "a missing element is not a click failure"
+    assert caught == [], "a missing element is not a click failure"
     page.query_selector.assert_awaited_once_with("#missing")
+    settle.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -52,13 +40,15 @@ async def test_apply_trigger_clicks_then_settles_and_returns_true(monkeypatch):
     page = AsyncMock()
     element = AsyncMock()
     page.query_selector.return_value = element
+    page.url = "https://example.com/"
+    page.evaluate.side_effect = ["before", "after"]
     settle = AsyncMock()
     monkeypatch.setattr("capturd.shots.capture._settle_page", settle)
 
     assert await _apply_trigger(page, "  #open  ", 123) is True
 
     page.query_selector.assert_awaited_once_with("#open")
-    element.click.assert_awaited_once_with(timeout=2500)
+    element.click.assert_awaited_once_with(timeout=capture.TRIGGER_CLICK_TIMEOUT_MS)
     settle.assert_awaited_once_with(page, 123)
 
 
@@ -68,10 +58,13 @@ async def test_apply_trigger_returns_false_when_click_fails(monkeypatch):
     element = AsyncMock()
     element.click.side_effect = TimeoutError("click timed out")
     page.query_selector.return_value = element
+    page.url = "https://example.com/"
+    page.evaluate.side_effect = ["before", "after"]
     settle = AsyncMock()
     monkeypatch.setattr("capturd.shots.capture._settle_page", settle)
 
-    assert await _apply_trigger(page, "#open", 123) is False
+    with pytest.warns(RuntimeWarning, match=r"^capture trigger failed \(TimeoutError\); trigger_fired=False$"):
+        assert await _apply_trigger(page, "#open", 123) is False
 
     settle.assert_not_awaited()
 
@@ -81,7 +74,8 @@ async def test_apply_trigger_returns_false_when_query_fails():
     page = AsyncMock()
     page.query_selector.side_effect = RuntimeError("bad selector")
 
-    assert await _apply_trigger(page, "#invalid", 123) is False
+    with pytest.warns(RuntimeWarning, match=r"^capture trigger failed \(RuntimeError\); trigger_fired=False$"):
+        assert await _apply_trigger(page, "#invalid", 123) is False
 
 
 @pytest.mark.asyncio
@@ -93,7 +87,8 @@ async def test_apply_trigger_returns_false_when_settle_fails(monkeypatch):
         AsyncMock(side_effect=RuntimeError("page closed")),
     )
 
-    assert await _apply_trigger(page, "#open", 123) is False
+    with pytest.warns(RuntimeWarning, match=r"^capture trigger failed \(RuntimeError\); trigger_fired=False$"):
+        assert await _apply_trigger(page, "#open", 123) is False
 
 
 def test_dry_run_plan_json_omits_cookie_credentials(capsys):
@@ -113,3 +108,50 @@ def test_dry_run_plan_json_omits_cookie_credentials(capsys):
     ))
     assert "cookies" not in plan["settings"]
     assert secret not in output
+
+
+@pytest.mark.asyncio
+async def test_r5_no_op_click_is_not_meaningful_state(monkeypatch):
+    page = AsyncMock()
+    page.url = "https://example.com/"
+    page.evaluate.side_effect = ["same", "same"]
+    settle = AsyncMock()
+    monkeypatch.setattr(capture, "_settle_page", settle)
+    assert await _apply_trigger(page, "#load-state", 123) is False
+    page.query_selector.return_value.click.assert_awaited_once()
+    settle.assert_awaited_once_with(page, 123)
+
+
+@pytest.mark.asyncio
+async def test_r5_url_change_is_meaningful_state(monkeypatch):
+    page = AsyncMock()
+    page.url = "https://example.com/"
+    page.evaluate.side_effect = ["same", "same"]
+    async def navigate(**kwargs):
+        page.url = "https://example.com/settings"
+    page.query_selector.return_value.click.side_effect = navigate
+    monkeypatch.setattr(capture, "_settle_page", AsyncMock())
+    assert await _apply_trigger(page, "#load-state", 123) is True
+
+
+@pytest.mark.asyncio
+async def test_r5_trigger_failure_warns_with_class_only():
+    page = AsyncMock()
+    page.url = "https://example.com/"
+    page.evaluate.return_value = "same"
+    page.query_selector.return_value.click.side_effect = TimeoutError("private selector detail")
+    with pytest.warns(RuntimeWarning) as caught:
+        assert await _apply_trigger(page, "#load-state", 123) is False
+    assert str(caught[0].message) == "capture trigger failed (TimeoutError); trigger_fired=False"
+    assert "private selector detail" not in str(caught[0].message)
+
+
+def test_r5_plan_json_uses_secret_safe_allowlist(capsys):
+    _, targets, settings = capture.build_capture_plan({"urls": ["example.com"]})
+    settings.update({key: "test-only-canary" for key in ("cookies", "headers", "auth", "authorization")})
+    cli._print_plan(["https://example.com/"], targets, settings)
+    out = capsys.readouterr().out
+    assert "test-only-canary" not in out
+    plan = json.loads(next(line[11:] for line in out.splitlines() if line.startswith("plan-json: ")))
+    assert not {"cookies", "headers", "auth", "authorization"} & plan["settings"].keys()
+    assert plan["settings"]["format"] == "png"

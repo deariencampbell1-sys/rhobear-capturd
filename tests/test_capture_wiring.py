@@ -26,11 +26,31 @@ FIXTURES = Path(__file__).parent / "fixtures" / "capture-foundations"
 WIRING = Path(__file__).parent / "fixtures" / "capture-wiring"
 TWO_CONTROL_HTML = (WIRING / "two-control-page.html").read_text(encoding="utf-8")
 
+@pytest.fixture(autouse=True)
+def _offline_test_dns(monkeypatch):
+    # Only reserved test hosts and literal addresses; never a real DNS lookup.
+    import ipaddress
+    import socket
+
+    def resolve(host, port=None, *args, **kwargs):
+        aliases = {"base.test": "93.184.216.34", "example.com": "93.184.216.34",
+                   "localhost": "127.0.0.1"}
+        try:
+            address = ipaddress.ip_address(aliases.get(host, host))
+        except ValueError:
+            raise socket.gaierror("unconfigured test host") from None
+        family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
+        sockaddr = (str(address), port or 0, 0, 0) if address.version == 6 else (str(address), port or 0)
+        return [(family, socket.SOCK_STREAM, 6, "", sockaddr)]
+
+    monkeypatch.setattr("capturd.shots.capture.socket.getaddrinfo", resolve)
+
+
 
 def _stub_loader(monkeypatch, html: str = TWO_CONTROL_HTML) -> None:
     monkeypatch.setattr(
         "capturd.shots.pathway_plan._load_pages_html",
-        lambda urls: {url: html for url in urls},
+        lambda urls, **_policy: {url: html for url in urls},
     )
 
 
@@ -47,7 +67,7 @@ def test_map_plan_matches_url_plan_shape(monkeypatch):
         "schemes": ["light"],
     })
     map_plan = build_capture_plan({
-        "manifest_path": str(FIXTURES / "single-pathway-manifest.md"),
+        "manifest_text": (FIXTURES / "single-pathway-manifest.md").read_text(encoding="utf-8"),
         "base_url": "http://base.test",
         "viewports": ["desktop"],
         "schemes": ["light"],
@@ -60,9 +80,10 @@ def test_map_plan_matches_url_plan_shape(monkeypatch):
     # the dict shape of the plan: same settings keys, no branching downstream
     assert set(url_settings) == set(map_settings)
     # same CaptureTarget fields — both plans hold CaptureTargets
-    assert [f.name for f in dataclasses.fields(CaptureTarget)] == [
-        f.name for f in dataclasses.fields(type(map_targets[0]))
-    ]
+    assert set(dataclasses.asdict(map_targets[0])) == {
+        "index", "url", "viewport_id", "width", "height", "scheme", "pathway_id",
+        "pathway_status", "pathway_trigger", "trigger_selector",
+    }
     assert all(isinstance(target, CaptureTarget) for target in map_targets)
     assert url_targets and map_targets
     # and the per-target state key downstream reads is present in both
@@ -114,7 +135,7 @@ def test_exactly_one_input_is_enforced():
 def test_unwired_pathway_is_planned_and_flagged(monkeypatch):
     _stub_loader(monkeypatch, "<html><body></body></html>")
     _urls, targets, settings = build_capture_plan({
-        "manifest_path": str(WIRING / "named-control-manifest.md"),
+        "manifest_text": (WIRING / "named-control-manifest.md").read_text(encoding="utf-8"),
         "base_url": "http://base.test",
         "viewports": ["desktop"],
         "schemes": ["light"],
@@ -176,7 +197,7 @@ def test_quality_reason_code_reaches_the_caller_unchanged(monkeypatch, capsys, r
     ])
     captured = capsys.readouterr()
     output = captured.out + captured.err
-    assert exit_code != 0, "a failing run must exit non-zero"
+    assert exit_code == cli.EXIT_QUALITY_FAIL == 4
     # the reason code reaches the caller unchanged — no re-wording downstream
     assert f"quality: {reason_code}" in output
 
@@ -290,7 +311,7 @@ def _forbid_page_reads(monkeypatch) -> list[str]:
     something navigated."""
     calls: list[str] = []
 
-    def _record(urls) -> dict[str, str]:
+    def _record(urls, **_policy) -> dict[str, str]:
         calls.extend(urls)
         raise AssertionError(f"a page read happened for {urls}")
 
@@ -485,7 +506,7 @@ def test_map_driven_baseline_only_run_still_exits_four(monkeypatch, capsys):
 def test_r3_build_plan_enforces_expanded_matrix_limit(monkeypatch):
     calls: list[list[str]] = []
 
-    def _record(urls) -> dict[str, str]:
+    def _record(urls, **_policy) -> dict[str, str]:
         calls.append(list(urls))
         return {url: "<html><body></body></html>" for url in urls}
 
@@ -524,3 +545,245 @@ def test_r3_build_plan_enforces_expanded_matrix_limit(monkeypatch):
         })
     assert str(excinfo.value) == "too many capture targets; maximum is 6"
     assert len(calls) == before, "the refusal must happen before any navigation"
+
+
+# W0-28-r4: use parsed, existing manifests and real capture/manager contracts.
+import asyncio
+import threading
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
+from capturd.shots import capture, pathway_plan
+from capturd.shots.quality import is_passing, summarize_capture_quality
+
+
+def _control_less_map():
+    result = load_pathway_map(manifest_path=FIXTURES / "single-pathway-manifest.md")
+    pathway = dict(result["pathways"][0])
+    pathway.update(trigger="", selector="", css="", location="", handler="",
+                   downstreamCall="", downstream_call="", declaredIntent="http://169.254.169.254/latest")
+    return {**result, "pathways": [pathway]}
+
+
+def test_r5_control_less_private_map_is_refused_before_capture(monkeypatch):
+    reader = Mock()
+    monkeypatch.setattr(pathway_plan, "_load_pages_html", reader)
+    with pytest.raises(RestedCaptureError, match="private/internal"):
+        pathway_plan.plan_targets_from_map(_control_less_map(), "https://example.com")
+    reader.assert_not_called()
+
+
+def test_r5_loopback_is_cli_opt_in_not_payload_default(monkeypatch):
+    _stub_loader(monkeypatch)
+    payload = {"manifest_text": (WIRING / "named-control-manifest.md").read_text(),
+               "base_url": "http://127.0.0.1:9", "viewports": ["desktop"], "schemes": ["light"]}
+    with pytest.raises(RestedCaptureError, match="private/internal"):
+        build_capture_plan(payload)
+    _, targets, settings = build_capture_plan({**payload, "_allow_loopback": True})
+    assert targets and settings["allow_loopback"] is True
+    assert settings["loopback_host"] == "127.0.0.1"
+    captured = []
+    original = cli.build_capture_plan
+    def record(payload):
+        captured.append(payload)
+        return original(payload)
+    monkeypatch.setattr(cli, "build_capture_plan", record)
+    assert cli.main(["--pathway-manifest", str(WIRING / "named-control-manifest.md"),
+                     "--base-url", "http://127.0.0.1:9", "--dry-run"]) == 0
+    assert captured[0]["_allow_loopback"] is True
+    assert captured[0]["_allow_map_files"] is True
+
+
+@pytest.mark.parametrize("key", ["map_path", "manifest_path"])
+def test_r5_map_files_are_cli_only(monkeypatch, key):
+    loader = Mock()
+    monkeypatch.setattr(capture, "load_pathway_map", loader)
+    with pytest.raises(RestedCaptureError) as exc:
+        build_capture_plan({key: str(WIRING / "named-control-manifest.md"), "base_url": "http://base.test"})
+    assert str(exc.value) == "map file paths are CLI-only; pass map_text or manifest_text"
+    loader.assert_not_called()
+
+
+@pytest.mark.parametrize("value, message", [("many", "max_targets must be a number"),
+                                              (0, "max_targets must be at least 1"),
+                                              (-1, "max_targets must be at least 1")])
+def test_r5_max_targets_has_named_validation(value, message):
+    with pytest.raises(RestedCaptureError) as exc:
+        build_capture_plan({"manifest_text": (WIRING / "named-control-manifest.md").read_text(),
+                            "base_url": "http://base.test", "max_targets": value})
+    assert str(exc.value) == message
+
+
+def test_r5_legacy_expansion_does_not_use_map_ceiling():
+    urls, targets, settings = build_capture_plan({"urls": [f"https://example.com/{i}" for i in range(834)]})
+    assert len(urls) == 834
+    assert len(targets) == settings["capture_count"] == 5004
+
+
+def test_r5_zero_input_cli_contract(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main([])
+    assert exc.value.code == 2
+    assert "one of the arguments" in capsys.readouterr().err
+    with pytest.raises(PathwayMapError, match="a pathway map is required"):
+        build_capture_plan({})
+    for payload in ({"urls": []}, {"sitemap_url": ""}):
+        with pytest.raises(RestedCaptureError) as exc:
+            build_capture_plan(payload)
+        assert str(exc.value) == "add at least one URL"
+
+
+def test_r5_cli_max_targets_uses_shared_default():
+    assert cli.build_parser().parse_args(["--urls", "example.com"]).max_targets == pathway_plan.MAX_TARGETS == 5000
+    assert capture.TRIGGER_CLICK_TIMEOUT_MS == 2500
+
+
+@pytest.mark.parametrize("status, expected", [("failed", 1), ("done_with_errors", 3)])
+def test_r5_map_failure_precedes_quality(monkeypatch, capsys, status, expected):
+    monkeypatch.setattr(cli, "RestedCaptureManager", lambda: _StubManager([], status))
+    assert cli.main(["--pathway-manifest", str(WIRING / "named-control-manifest.md"),
+                     "--base-url", "http://base.test"]) == expected
+    out = capsys.readouterr()
+    assert "quality:" not in out.out + out.err
+
+
+def _capture_stack(tmp_path, monkeypatch, *, url="https://example.com/", trigger="", states=False):
+    # Mock browser I/O only. Drive the real _capture_one AND _sweep_states.
+    _, targets, settings = build_capture_plan({"urls": [url], "states": states, "retries": 0,
+                                              "viewports": ["desktop"], "schemes": ["light"]})
+    target = dataclasses.replace(targets[0], trigger_selector=trigger)
+    page = AsyncMock()
+    page.url = url
+    page.set_default_timeout = Mock()
+    async def screenshot(**kwargs):
+        Path(kwargs["path"]).write_bytes(b"nonempty-test-screenshot")
+    page.screenshot.side_effect = screenshot
+    monkeypatch.setattr(capture, "_settle_page", AsyncMock())
+    monkeypatch.setattr(capture, "_dismiss_overlays", AsyncMock())
+    # Controls/labels originate in the real planner over the existing HTML fixture.
+    controls = pathway_plan._plan_page(TWO_CONTROL_HTML)
+    fingerprint = ["baseline"]
+    element = SimpleNamespace(count=AsyncMock(return_value=1), is_visible=AsyncMock(return_value=True))
+    async def click(**kwargs):
+        fingerprint[0] = "opened"
+    element.click = AsyncMock(side_effect=click)
+    page.locator = Mock(return_value=SimpleNamespace(first=element))
+    async def evaluate(script):
+        if script == capture._MAP_CONTROLS_JS:
+            return [{"id": "0", "label": controls[0].label, "tag": "button"}]
+        assert script == capture._FINGERPRINT_JS
+        return fingerprint[0]
+    async def escape(key):
+        fingerprint[0] = "baseline"
+    page.keyboard.press.side_effect = escape
+    page.evaluate.side_effect = evaluate
+    page.query_selector.return_value = element
+    context = SimpleNamespace(new_page=AsyncMock(return_value=page))
+    return context, target, settings, tmp_path / "real-result.png", page
+
+
+@pytest.mark.asyncio
+async def test_r5_capture_refuses_private_target_before_goto(tmp_path, monkeypatch):
+    context, target, settings, path, page = _capture_stack(tmp_path, monkeypatch, url="http://169.254.169.254/latest")
+    result = await capture._capture_one(context, target, settings, path)
+    assert result["status"] == "failed" and "private/internal" in result["error"]
+    page.goto.assert_not_awaited()
+    page.screenshot.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_r5_capture_one_returns_real_swept_states(tmp_path, monkeypatch):
+    context, target, settings, path, page = _capture_stack(tmp_path, monkeypatch, states=True)
+    result = await capture._capture_one(context, target, settings, path)
+    assert result["status"] == "ok" and result["trigger_fired"] is False
+    assert len(result["states"]) == 1
+    state = result["states"][0]
+    assert state["status"] == "ok" and state["state"] == "open"
+    assert state["bytes"] == (path.parent / state["file"]).stat().st_size > 0
+    captures = build_quality_summary([result])["results"][0]["manifest"]["captures"]
+    assert captures == [{"kind": "baseline", "success": True}, {"kind": "state", "success": True}]
+    assert is_passing(build_quality_summary([result])) is True
+
+
+@pytest.mark.asyncio
+async def test_r5_capture_one_propagates_real_trigger(tmp_path, monkeypatch):
+    context, target, settings, path, page = _capture_stack(tmp_path, monkeypatch, trigger="#load-state")
+    result = await capture._capture_one(context, target, settings, path)
+    assert result["status"] == "ok" and result["trigger_fired"] is True
+    assert is_passing(build_quality_summary([result])) is True
+
+
+def test_r5_real_manager_get_preserves_results_for_quality_gate(tmp_path, monkeypatch, capsys):
+    context, target, settings, path, page = _capture_stack(tmp_path, monkeypatch, states=True)
+    result = asyncio.run(capture._capture_one(context, target, settings, path))
+    manager = capture.RestedCaptureManager(tmp_path / "jobs")
+    # Start the real job without a background worker; start/get allocate real shape.
+    monkeypatch.setattr(capture.threading, "Thread", lambda **kwargs: SimpleNamespace(start=lambda: None))
+    job = manager.start({"urls": ["https://example.com"], "viewports": ["desktop"], "schemes": ["light"]})
+    job_id = job["job_id"]
+    assert manager.get(job_id)["results"] == []
+    assert is_passing(build_quality_summary(manager.get(job_id)["results"])) is False
+    manager._record_result(job_id, result)
+    manager._patch(job_id, {"status": "done"})
+    job = manager.get(job_id)
+    assert job["results"][0] is result
+    assert job["completed"] == 1
+    assert is_passing(build_quality_summary(job["results"])) is True
+    monkeypatch.setattr(manager, "start", lambda payload: manager.get(job_id))
+    monkeypatch.setattr(cli, "RestedCaptureManager", lambda: manager)
+    assert cli.main(["--pathway-manifest", str(WIRING / "named-control-manifest.md"),
+                     "--base-url", "http://base.test"]) == 0
+
+
+@pytest.mark.asyncio
+async def test_r5_capture_final_url_refused_before_screenshot(tmp_path, monkeypatch):
+    context, target, settings, path, page = _capture_stack(tmp_path, monkeypatch)
+    async def redirect(*args, **kwargs):
+        page.url = "http://169.254.169.254/latest"
+    page.goto.side_effect = redirect
+    result = await capture._capture_one(context, target, settings, path)
+    assert result["status"] == "failed" and "private/internal" in result["error"]
+    page.screenshot.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_r5_capture_preserves_first_route_error(tmp_path, monkeypatch):
+    context, target, settings, path, page = _capture_stack(tmp_path, monkeypatch)
+    errors = []
+    async def aborted(*args, **kwargs):
+        errors.append(RestedCaptureError("first navigation guard refusal"))
+        raise TimeoutError("browser navigation aborted")
+    page.goto.side_effect = aborted
+    result = await capture._capture_one(context, target, settings, path, guard_errors=errors)
+    assert result["status"] == "failed"
+    assert result["error"] == "first navigation guard refusal"
+    page.screenshot.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_r5_real_capture_context_installs_guard_before_page(tmp_path, monkeypatch):
+    context, target, settings, path, page = _capture_stack(tmp_path, monkeypatch, states=True)
+    events = []
+    async def route(pattern, handler):
+        events.append("route")
+        assert pattern == "**/*"
+    async def new_page():
+        events.append("page")
+        return page
+    context.route = AsyncMock(side_effect=route)
+    context.new_page.side_effect = new_page
+    context.close = AsyncMock()
+    browser = SimpleNamespace(new_context=AsyncMock(return_value=context), close=AsyncMock())
+    class Entry:
+        async def __aenter__(self):
+            return object()
+        async def __aexit__(self, *args):
+            return False
+    monkeypatch.setattr("playwright.async_api.async_playwright", Entry)
+    monkeypatch.setattr(capture, "_launch_browser", AsyncMock(return_value=browser))
+    progress = Mock()
+    results = await capture._run_capture_async([target], settings, tmp_path, progress)
+    assert events == ["route", "page"]
+    assert results[0]["status"] == "ok" and len(results[0]["states"]) == 1
+    progress.assert_called_once_with(results[0])
+    context.close.assert_awaited_once()
+    browser.close.assert_awaited_once()
