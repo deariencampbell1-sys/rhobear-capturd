@@ -1072,3 +1072,11 @@ def test_r7_plan_reader_reuses_navigation_cache(monkeypatch):
     plan_targets_from_map(_single_named_control_map(), "https://example.com")
     assert resolver.call_count == 0
     assert isinstance(checked[0]["navigation_cache"], dict)
+
+
+def test_r8_dry_run_selector_requires_explicit_field():
+    for trigger in ("open panel.Settings now", "run v1.Click next"):
+        assert pathway_plan._explicit_selector({"trigger": trigger}) == ""
+        assert pathway_plan._explicit_selector({
+            "trigger": trigger, "selector": "#settings-button",
+        }) == "#settings-button"

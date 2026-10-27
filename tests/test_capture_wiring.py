@@ -101,14 +101,14 @@ def test_exactly_one_input_is_enforced():
     with pytest.raises(RestedCaptureError) as zero:
         build_capture_plan({"viewports": ["desktop"], "schemes": ["light"]})
 
-    with pytest.raises(PathwayMapError) as two_url_map:
+    with pytest.raises(RestedCaptureError) as two_url_map:
         build_capture_plan({
             "url": "example.com",
             "map_text": "{}",
             "base_url": "http://base.test",
         })
 
-    with pytest.raises(PathwayMapError) as two_maps:
+    with pytest.raises(RestedCaptureError) as two_maps:
         build_capture_plan({
             "manifest_text": "# x",
             "map_text": "{}",
@@ -120,11 +120,11 @@ def test_exactly_one_input_is_enforced():
 
     refusal_type = type(loader_refusal.value)
     assert type(zero.value) is RestedCaptureError
-    assert type(two_url_map.value) is refusal_type
-    assert type(two_maps.value) is refusal_type
+    assert type(two_url_map.value) is RestedCaptureError
+    assert type(two_maps.value) is RestedCaptureError
     assert str(zero.value) == "add at least one URL"
-    assert "not both" in str(two_url_map.value)
-    assert "not both" in str(two_maps.value)
+    assert str(two_url_map.value) == "provide exactly one capture source — got map_text, url"
+    assert str(two_maps.value) == "provide exactly one capture source — got manifest_text, map_text"
 
 
 # ---------------------------------------------------------------------------
@@ -550,6 +550,7 @@ def test_r3_build_plan_enforces_expanded_matrix_limit(monkeypatch):
 # W0-28-r4: use parsed, existing manifests and real capture/manager contracts.
 import asyncio
 import threading
+import zipfile
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from capturd.shots import capture, pathway_plan
@@ -922,6 +923,7 @@ async def test_r6_document_refusal_does_not_poison_sibling_page(tmp_path, monkey
 async def test_r6_legacy_loopback_host_is_derived_per_target(tmp_path, monkeypatch):
     context, target, settings, path, page = _capture_stack(tmp_path, monkeypatch)
     installed = []
+    navigation_cache = {}
     real_install = capture._install_navigation_guard
 
     async def spy(page_arg, **kwargs):
@@ -940,11 +942,12 @@ async def test_r6_legacy_loopback_host_is_derived_per_target(tmp_path, monkeypat
         )
         assert result["status"] == "ok"
     assert settings["loopback_host"] is None
+    assert "_navigation_cache" not in settings
     assert len(installed) == 2
     assert [item["loopback_host"] for item in installed] == ["127.0.0.1", "localhost"]
     assert all(item["allow_loopback"] is True for item in installed)
     assert all(item["allow_private_hosts"] == () for item in installed)
-    assert all(item["navigation_cache"] is settings["_navigation_cache"] for item in installed)
+    assert all(item["navigation_cache"] is navigation_cache for item in installed)
     assert installed[0]["guard_errors"] == installed[1]["guard_errors"] == []
     assert installed[0]["guard_errors"] is not installed[1]["guard_errors"]
 
@@ -956,6 +959,7 @@ async def test_r6_legacy_loopback_host_is_derived_per_target(tmp_path, monkeypat
     result = await capture._capture_one(
         context, dataclasses.replace(target, url="http://127.0.0.1/"), settings,
         tmp_path / "cross-host.png",
+        navigation_cache=navigation_cache,
     )
     assert result["status"] == "failed" and "private/internal" in result["error"]
     page.screenshot.assert_not_awaited()
@@ -1190,3 +1194,152 @@ def test_r7_ipv4_mapped_private_host_opt_in():
         capture._reject_private_url(
             "http://[::ffff:169.254.169.254]/", allow_private_peer=True,
         )
+
+
+@pytest.mark.asyncio
+async def test_r8_remote_url_plan_and_manager_refuse_loopback(tmp_path, monkeypatch, capsys):
+    _, _, settings = build_capture_plan({"urls": ["http://127.0.0.1:9/admin"]})
+    assert settings["allow_loopback"] is False
+
+    manager = capture.RestedCaptureManager(tmp_path / "jobs")
+    monkeypatch.setattr(
+        capture.threading, "Thread", lambda **kwargs: SimpleNamespace(start=lambda: None),
+    )
+    job = manager.start({"urls": ["http://127.0.0.1:9/admin"]})
+    assert manager.get(job["job_id"])["settings"]["allow_loopback"] is False
+
+    context, target, settings, path, page = _capture_stack(
+        tmp_path, monkeypatch, url="http://127.0.0.1:9/admin",
+    )
+    result = await capture._capture_one(context, target, settings, path)
+    assert result["status"] == "failed"
+    assert result["error"] == "url resolves to a private/internal IP (127.0.0.1) — not allowed"
+    page.goto.assert_not_awaited()
+    page.screenshot.assert_not_awaited()
+
+    original = cli.build_capture_plan
+    seen = []
+    def spy(payload, **kwargs):
+        seen.append(kwargs)
+        return original(payload, **kwargs)
+    monkeypatch.setattr(cli, "build_capture_plan", spy)
+    assert cli.main(["--urls", "http://127.0.0.1:9/admin", "--dry-run"]) == 0
+    assert seen[-1]["allow_loopback"] is True
+    assert seen[-1]["allow_map_files"] is False
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("url", [
+    "ws://127.0.0.1:9/socket",
+    "wss://127.0.0.1:9/socket",
+    "ftp://example.com/file",
+    "file:///tmp/index.html",
+    "gopher://example.com/1",
+])
+def test_r8_non_http_schemes_fail_closed(url):
+    context = SimpleNamespace(route=AsyncMock())
+    errors = asyncio.run(capture._install_navigation_guard(
+        context, allow_loopback=False, loopback_host=None,
+    ))
+    route = SimpleNamespace(
+        request=SimpleNamespace(url=url, resource_type="document"),
+        abort=AsyncMock(), continue_=AsyncMock(),
+    )
+    asyncio.run(context.route.call_args.args[1](route))
+    route.abort.assert_awaited_once()
+    route.continue_.assert_not_awaited()
+    assert len(errors) == 1 and isinstance(errors[0], RestedCaptureError)
+
+
+def test_r8_local_file_requires_explicit_capture_access():
+    capture._reject_navigation_url(
+        "file:///tmp/index.html", allow_loopback=False, loopback_host=None,
+        allow_file_access=True,
+    )
+    with pytest.raises(RestedCaptureError, match="^navigation URL scheme is not allowed$"):
+        capture._reject_navigation_url(
+            "gopher://example.com/1", allow_loopback=False, loopback_host=None,
+            allow_file_access=True,
+        )
+
+
+def test_r8_two_source_refusals_keep_rested_capture_error_contract():
+    payloads = [
+        ({"url": "example.com", "map_text": "{}", "base_url": "http://base.test"},
+         "provide exactly one capture source — got map_text, url"),
+        ({"manifest_text": "# x", "map_text": "{}", "base_url": "http://base.test"},
+         "provide exactly one capture source — got manifest_text, map_text"),
+    ]
+    for payload, message in payloads:
+        with pytest.raises(RestedCaptureError) as exc:
+            build_capture_plan(payload)
+        assert str(exc.value) == message
+    manager = capture.RestedCaptureManager()
+    with pytest.raises(RestedCaptureError) as exc:
+        manager.start(payloads[0][0])
+    assert str(exc.value) == payloads[0][1]
+    with pytest.raises(PathwayMapError):
+        load_pathway_map(manifest_path="a.md", map_path="b.json")
+
+
+def test_r8_manifest_omits_credentials_and_live_navigation_cache(tmp_path, monkeypatch):
+    context, target, settings, _path, _page = _capture_stack(tmp_path, monkeypatch)
+    secret = "r8-secret-canary-never-serialize"
+    settings.update({
+        "cookies": [{"name": "session", "value": secret, "domain": "example.com"}],
+        "headers": {"Authorization": secret},
+        "auth": {"token": secret},
+        "authorization": secret,
+    })
+    context.add_cookies = AsyncMock()
+    context.close = AsyncMock()
+    browser = SimpleNamespace(
+        new_context=AsyncMock(return_value=context), close=AsyncMock(),
+    )
+
+    class Entry:
+        async def __aenter__(self):
+            return object()
+        async def __aexit__(self, *args):
+            return False
+
+    monkeypatch.setattr("playwright.async_api.async_playwright", Entry)
+    monkeypatch.setattr(capture, "_launch_browser", AsyncMock(return_value=browser))
+
+    caches = []
+    real_check = capture._check_navigation_url
+    async def check_spy(*args, **kwargs):
+        caches.append(kwargs["cache"])
+        return await real_check(*args, **kwargs)
+    monkeypatch.setattr(capture, "_check_navigation_url", check_spy)
+
+    manager = capture.RestedCaptureManager(tmp_path / "jobs")
+    job_id = "r8-manifest"
+    work_dir = tmp_path / "work"
+    shots_dir = work_dir / "shots"
+    manager._jobs[job_id] = {
+        "job_id": job_id, "name": "r8-manifest", "status": "queued",
+        "message": "Queued", "urls": [target.url], "total": 1,
+        "completed": 0, "failed": 0, "results": [], "settings": settings,
+        "work_dir": str(work_dir), "output_dir": "", "zip_path": "",
+    }
+    manager._run_job(
+        job_id, [target], settings, work_dir, shots_dir, None, "zip",
+    )
+
+    manifest_path = work_dir / "manifest.json"
+    raw = manifest_path.read_text(encoding="utf-8")
+    manifest = json.loads(raw)
+    assert secret not in raw
+    assert not {"cookies", "headers", "auth", "authorization"} & manifest["settings"].keys()
+    assert manifest["settings"] == capture._safe_settings(settings)
+    assert "_navigation_cache" not in manifest["settings"]
+    assert "_navigation_cache" not in settings
+    json.dumps(manager.get(job_id)["settings"])
+    assert caches and caches[0], "the real capture must exercise its live navigation cache"
+
+    zip_path = Path(manager.get(job_id)["zip_path"])
+    with zipfile.ZipFile(zip_path) as archive:
+        zipped_manifest = archive.read("manifest.json").decode("utf-8")
+    assert secret not in zipped_manifest
+    assert "_navigation_cache" not in json.loads(zipped_manifest)["settings"]
