@@ -91,6 +91,8 @@ _OPEN_SOCKET_JS = """(url) => new Promise((resolve) => {
 })"""
 
 
+@pytest.mark.browser
+@pytest.mark.network
 def test_r11_websocket_guard_blocks_private_host_and_connects_permitted_host():
     async_api = pytest.importorskip("playwright.async_api")
     page_server = ThreadingHTTPServer(("127.0.0.1", 0), _Page)
@@ -216,6 +218,8 @@ def test_r13_fake_context_permitted_websocket_connects_without_closing():
     ws_route.close.assert_not_awaited()
 
 
+@pytest.mark.browser
+@pytest.mark.network
 def test_r13_real_capture_blocks_popup_egress_and_service_workers(tmp_path, monkeypatch):
     async_api = pytest.importorskip("playwright.async_api")
     hits = []
@@ -278,3 +282,16 @@ def test_r13_real_capture_blocks_popup_egress_and_service_workers(tmp_path, monk
     finally:
         page_server.shutdown()
         page_server.server_close()
+
+
+def test_r14_missing_chromium_is_named_required_security_failure():
+    fake = SimpleNamespace(
+        chromium=SimpleNamespace(launch=AsyncMock(side_effect=RuntimeError("binary missing")))
+    )
+    from _pytest.outcomes import Failed
+    with pytest.raises(Failed) as failure:
+        asyncio.run(_launch_required_chromium(fake))
+    message = str(failure.value)
+    assert "REQUIRED SECURITY ACCEPTANCE" in message
+    assert "Chromium" in message
+    assert "playwright install chromium" in message

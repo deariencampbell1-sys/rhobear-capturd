@@ -535,6 +535,7 @@ def test_r3_build_plan_enforces_expanded_matrix_limit(monkeypatch):
 import asyncio
 import threading
 import warnings
+import warnings
 import zipfile
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -1798,3 +1799,147 @@ def test_r13_swept_state_error_secrets_are_redacted_on_every_surface(tmp_path, m
         assert secret not in serialized_job
         assert secret not in manifest_text
         assert all(secret.encode() not in body for body in zipped.values())
+
+
+def test_r14_bracketed_ipv6_normalizes_and_requires_explicit_allow():
+    assert cli._normalize_private_hosts(["[::1]", "[fd00::1]"]) == ("::1", "fd00::1")
+    capture._reject_navigation_url(
+        "http://[::1]:9/x", allow_loopback=False, loopback_host=None,
+        allow_private_hosts=("::1",),
+    )
+    with pytest.raises(RestedCaptureError, match="private/internal"):
+        capture._reject_navigation_url(
+            "http://[::1]:9/x", allow_loopback=False, loopback_host=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_r14_combined_benign_post_goto_and_trigger_uses_requested_policy(
+    tmp_path, monkeypatch,
+):
+    context, target, settings, path, page = _capture_stack(
+        tmp_path, monkeypatch, trigger="#open-settings",
+    )
+
+    async def navigate(*args, **kwargs):
+        page.url = "about:blank"
+
+    page.goto.side_effect = navigate
+    result = await capture._capture_one(context, target, settings, path)
+    assert result["status"] == "ok"
+    assert result["trigger_fired"] is True
+    page.screenshot.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_r14_saturated_resolver_preserves_document_bound_and_limits_executor(
+    monkeypatch,
+):
+    executor = capture._NAV_RESOLVER_EXECUTOR
+    workers = capture.NAV_RESOLVER_WORKERS
+    assert executor._max_workers == workers
+    assert capture.NAV_GUARD_SUBRESOURCE_TIMEOUT_S < capture.NAV_GUARD_TIMEOUT_S
+
+    release = threading.Event()
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    def slow_resolve(url, **kwargs):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        try:
+            assert release.wait(5), "test resolver release timed out"
+        finally:
+            with lock:
+                active -= 1
+
+    def default_executor_flood(*args, **kwargs):
+        raise AssertionError("navigation DNS used the shared default executor")
+
+    monkeypatch.setattr(capture, "_reject_navigation_url", slow_resolve)
+    monkeypatch.setattr(capture.asyncio, "to_thread", default_executor_flood)
+    kwargs = dict(allow_loopback=False, loopback_host=None, allow_private_hosts=())
+    subresources = [
+        asyncio.create_task(capture._check_navigation_url(
+            f"https://example.com/asset-{index}.png", resource_type="subresource", **kwargs,
+        ))
+        for index in range(workers * 3)
+    ]
+    document = None
+    try:
+        while active < workers:
+            await asyncio.sleep(0.001)
+        document = asyncio.create_task(capture._check_navigation_url(
+            "https://example.com/document", **kwargs,
+        ))
+        await asyncio.sleep(0.05)
+        assert not document.done()
+        assert max_active == workers
+        release.set()
+        await asyncio.wait_for(document, timeout=1.0)
+        await asyncio.gather(*subresources)
+    finally:
+        release.set()
+        await asyncio.gather(*subresources, return_exceptions=True)
+        if document is not None:
+            await asyncio.gather(document, return_exceptions=True)
+    assert max_active == workers
+
+
+def test_r14_start_warns_once_for_uncapable_private_targets(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        capture.threading, "Thread", lambda **kwargs: SimpleNamespace(start=lambda: None),
+    )
+    manager = capture.RestedCaptureManager(tmp_path / "jobs")
+    payload = {
+        "urls": ["http://127.0.0.1:9/a", "http://[fd00::1]/b"],
+        "viewports": ["desktop"], "schemes": ["light"],
+    }
+    with pytest.warns(RuntimeWarning, match="without an explicit allow capability") as caught:
+        manager.start(payload)
+    assert len(caught) == 1
+    with warnings.catch_warnings(record=True) as allowed:
+        warnings.simplefilter("always")
+        manager.start(payload, allow_loopback=True, allow_private_hosts=["fd00::1"])
+    assert allowed == []
+
+
+def test_r14_userinfo_never_reaches_plan_manifest_or_zip(
+    tmp_path, monkeypatch, capsys,
+):
+    payload = {
+        "urls": ["https://user:pass@example.com/private"],
+        "viewports": ["desktop"], "schemes": ["light"], "retries": 0,
+    }
+    urls, targets, settings = build_capture_plan(payload)
+    cli._print_plan(urls, targets, settings)
+    plan_output = capsys.readouterr().out
+    assert "user:pass" not in plan_output
+    assert "https://example.com/private" in plan_output
+
+    def successful_capture(worker_targets, worker_settings, shots_dir, progress):
+        target = worker_targets[0]
+        result = {
+            "url": target.url, "state_id": target.state_id, "status": "ok",
+            "file": "", "bytes": 0, "states": [{"url": target.url, "status": "ok"}],
+        }
+        progress(result)
+        return [result]
+
+    monkeypatch.setattr(capture, "run_capture", successful_capture)
+    _ManualThread.instances = []
+    monkeypatch.setattr(capture.threading, "Thread", _ManualThread)
+    manager = capture.RestedCaptureManager(tmp_path / "jobs")
+    started = manager.start(payload)
+    _ManualThread.instances[0].run()
+    finished = manager.get(started["job_id"])
+    manifest_text = (Path(started["work_dir"]) / "manifest.json").read_text(encoding="utf-8")
+    with zipfile.ZipFile(finished["zip_path"]) as archive:
+        zipped = {name: archive.read(name) for name in archive.namelist()}
+    assert "user:pass" not in json.dumps(finished)
+    assert "user:pass" not in manifest_text
+    assert all(b"user:pass" not in body for body in zipped.values())
+    assert "https://example.com/private" in manifest_text
