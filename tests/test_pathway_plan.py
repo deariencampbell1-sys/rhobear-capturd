@@ -432,8 +432,9 @@ class _FakeBrowser:
         self._fake = fake
         self.closed = False
 
-    async def new_context(self) -> _FakeContext:
+    async def new_context(self, **kwargs) -> _FakeContext:
         self._fake.contexts_created += 1
+        self._fake.context_options = kwargs
         return _FakeContext(self._fake)
 
     async def close(self) -> None:
@@ -454,6 +455,7 @@ class _FakePlaywrightStack:
         self.entries = 0
         self.launches = 0
         self.contexts_created = 0
+        self.context_options = {}
         self.contexts_closed = 0
         self.browsers_closed = 0
         self.pages_created = 0

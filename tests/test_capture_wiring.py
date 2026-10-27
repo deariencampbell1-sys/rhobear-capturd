@@ -773,13 +773,22 @@ async def test_r6_capture_installs_guard_per_page_before_navigation(tmp_path, mo
     context, target, settings, path, page = _capture_stack(tmp_path, monkeypatch, states=True)
     events = []
     async def route(pattern, handler):
-        events.append("route")
+        events.append("page-route")
         assert pattern == "**/*"
+    async def route_web_socket(pattern, handler):
+        events.append("page-ws")
+    async def context_route(pattern, handler):
+        events.append("context-route")
+        assert pattern == "**/*"
+    async def context_route_web_socket(pattern, handler):
+        events.append("context-ws")
     async def new_page():
         events.append("page")
         return page
     page.route = AsyncMock(side_effect=route)
-    context.route = AsyncMock()
+    page.route_web_socket = AsyncMock(side_effect=route_web_socket)
+    context.route = AsyncMock(side_effect=context_route)
+    context.route_web_socket = AsyncMock(side_effect=context_route_web_socket)
     context.new_page.side_effect = new_page
     context.close = AsyncMock()
     browser = SimpleNamespace(new_context=AsyncMock(return_value=context), close=AsyncMock())
@@ -792,8 +801,12 @@ async def test_r6_capture_installs_guard_per_page_before_navigation(tmp_path, mo
     monkeypatch.setattr(capture, "_launch_browser", AsyncMock(return_value=browser))
     progress = Mock()
     results = await capture._run_capture_async([target], settings, tmp_path, progress)
-    assert events == ["page", "route"]
-    context.route.assert_not_called()
+    assert events == ["context-route", "context-ws", "page", "page-route", "page-ws"]
+    context.route.assert_awaited_once()
+    context.route_web_socket.assert_awaited_once()
+    assert browser.new_context.await_args.kwargs["service_workers"] == "block"
+    sibling = dataclasses.replace(target, url="http://localhost:8241/index.html")
+    assert capture._target_context_key(target) != capture._target_context_key(sibling)
     assert results[0]["status"] == "ok" and len(results[0]["states"]) == 1
     progress.assert_called_once_with(results[0])
     context.close.assert_awaited_once()
@@ -889,6 +902,7 @@ async def test_r6_document_refusal_does_not_poison_sibling_page(tmp_path, monkey
 
     class Context:
         route = AsyncMock()
+        route_web_socket = AsyncMock()
 
         async def new_page(self):
             return pages.pop(0)
@@ -924,7 +938,7 @@ async def test_r6_document_refusal_does_not_poison_sibling_page(tmp_path, monkey
     assert good["status"] == "ok"
     assert (tmp_path / good["file"]).stat().st_size > 0
     assert not (tmp_path / capture._capture_file_name(targets[0], settings["format"])).exists()
-    context.route.assert_not_called()
+    assert context.route.await_count <= 1
 
 
 @pytest.mark.asyncio
@@ -1348,6 +1362,8 @@ def test_r8_manifest_omits_credentials_and_live_navigation_cache(tmp_path, monke
         "authorization": secret,
     })
     context.add_cookies = AsyncMock()
+    context.route = AsyncMock()
+    context.route_web_socket = AsyncMock()
     context.close = AsyncMock()
     browser = SimpleNamespace(
         new_context=AsyncMock(return_value=context), close=AsyncMock(),
@@ -1667,3 +1683,117 @@ async def test_r10_post_trigger_benign_url_uses_pre_trigger_policy(
     assert result["status"] == "ok"
     assert result["trigger_fired"] is True
     page.screenshot.assert_awaited_once()
+
+
+
+@pytest.mark.asyncio
+async def test_r13_allowed_checks_reresolve_but_refusals_stay_cached(monkeypatch):
+    resolver = Mock(wraps=capture._reject_navigation_url)
+    monkeypatch.setattr(capture, "_reject_navigation_url", resolver)
+    cache = {}
+    kwargs = dict(allow_loopback=False, loopback_host=None, allow_private_hosts=())
+
+    async def exercise():
+        # One document plus forty same-origin subresources: every allowed check
+        # performs a fresh resolution; no successful verdict enters the cache.
+        await capture._check_navigation_url("https://example.com/", cache=cache, **kwargs)
+        for index in range(40):
+            await capture._check_navigation_url(
+                f"https://example.com/asset-{index}.png", cache=cache, **kwargs)
+        assert resolver.call_count == 41
+        assert cache == {}
+        for _ in range(2):
+            with pytest.raises(RestedCaptureError, match="private/internal"):
+                await capture._check_navigation_url(
+                    "http://169.254.169.254/latest", cache=cache, **kwargs)
+
+    await exercise()
+    assert resolver.call_count == 42
+    assert len(cache) == 1
+    assert all(key[1] == "169.254.169.254" for key in cache)
+
+
+@pytest.mark.parametrize(
+    "benign_url",
+    ["about:blank", "data:text/html,<p>opened</p>", "blob:https://example.com/state"],
+)
+@pytest.mark.asyncio
+async def test_r13_immediate_benign_final_url_uses_requested_policy(
+    tmp_path, monkeypatch, benign_url,
+):
+    context, target, settings, path, page = _capture_stack(tmp_path, monkeypatch)
+
+    async def navigate(*args, **kwargs):
+        page.url = benign_url
+
+    page.goto.side_effect = navigate
+    result = await capture._capture_one(context, target, settings, path)
+    assert result["status"] == "ok"
+    page.screenshot.assert_awaited_once()
+
+
+def test_r13_swept_state_error_secrets_are_redacted_on_every_surface(tmp_path, monkeypatch):
+    secrets = {
+        "cookie": "r13-cookie-canary-91a",
+        "header": "r13-header-canary-72b",
+        "auth": "r13-auth-canary-63c",
+        "authorization": "r13-authorization-canary-54d",
+    }
+    real_builder = capture.build_capture_plan
+
+    def secret_builder(payload, **capabilities):
+        urls, targets, settings = real_builder(payload, **capabilities)
+        settings.update({
+            "cookies": [{"name": "session", "value": secrets["cookie"], "domain": "example.com"}],
+            "headers": {"X-Credential": secrets["header"]},
+            "auth": {"token": secrets["auth"]},
+            "authorization": secrets["authorization"],
+        })
+        return urls, targets, settings
+
+    monkeypatch.setattr(capture, "build_capture_plan", secret_builder)
+    _ManualThread.instances = []
+    monkeypatch.setattr(capture.threading, "Thread", _ManualThread)
+    failing_state = {
+        "url": "https://example.com/", "state_id": "open-settings",
+        "viewport": "desktop", "scheme": "light", "width": 1440, "height": 1000,
+        "status": "failed", "file": "", "bytes": 0, "state": "open",
+        "control": "Settings", "control_tag": "button",
+        "error": "sweep failed at https://example.com/: " + " ".join(secrets.values()),
+    }
+    monkeypatch.setattr(capture, "_sweep_states", AsyncMock(return_value=[failing_state]))
+
+    def failing_sweep_capture(targets, worker_settings, shots_dir, progress):
+        context, target, settings, path, _page = _capture_stack(
+            shots_dir / "real-capture", monkeypatch, states=True)
+        settings.update(worker_settings)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(capture, "_check_navigation_url", AsyncMock())
+        result = asyncio.run(capture._capture_one(context, target, settings, path))
+        progress(result)
+        return [result]
+
+    monkeypatch.setattr(capture, "run_capture", failing_sweep_capture)
+    manager = capture.RestedCaptureManager(tmp_path / "jobs")
+    started = manager.start({
+        "urls": ["https://example.com"], "viewports": ["desktop"],
+        "schemes": ["light"], "states": True, "retries": 0,
+    })
+    job_id = started["job_id"]
+    _ManualThread.instances[0].run()
+    finished = manager.get(job_id)
+    state = finished["results"][0]["states"][0]
+    assert state == {
+        **failing_state,
+        "error": "sweep failed at https://example.com/: <redacted> <redacted> <redacted> <redacted>",
+    }
+    assert state["url"] == "https://example.com/"
+    serialized_job = json.dumps(finished)
+    manifest_text = (Path(started["work_dir"]) / "manifest.json").read_text(encoding="utf-8")
+    assert "https://example.com/" in manifest_text
+    with zipfile.ZipFile(finished["zip_path"]) as archive:
+        zipped = {name: archive.read(name) for name in archive.namelist()}
+    for secret in secrets.values():
+        assert secret not in serialized_job
+        assert secret not in manifest_text
+        assert all(secret.encode() not in body for body in zipped.values())

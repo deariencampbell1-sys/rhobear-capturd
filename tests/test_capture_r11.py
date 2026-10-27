@@ -11,7 +11,7 @@ import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -96,7 +96,7 @@ def test_r11_websocket_guard_blocks_private_host_and_connects_permitted_host():
     page_server = ThreadingHTTPServer(("127.0.0.1", 0), _Page)
     threading.Thread(target=page_server.serve_forever, daemon=True).start()
     allowed = _RecordingWebSocketServer("127.0.0.1")   # the exact loopback opt-in
-    refused = _RecordingWebSocketServer("127.0.0.2")   # another loopback address
+    refused = _RecordingWebSocketServer("127.0.0.1")   # second port; localhost mismatches the exact host
 
     async def run():
         async with async_api.async_playwright() as p:
@@ -108,7 +108,7 @@ def test_r11_websocket_guard_blocks_private_host_and_connects_permitted_host():
                 page = await context.new_page()
                 await page.goto(f"http://127.0.0.1:{page_server.server_address[1]}/")
                 blocked = await page.evaluate(
-                    _OPEN_SOCKET_JS, f"ws://127.0.0.2:{refused.port}/socket")
+                    _OPEN_SOCKET_JS, f"ws://localhost:{refused.port}/socket")
                 permitted = await page.evaluate(
                     _OPEN_SOCKET_JS, f"ws://127.0.0.1:{allowed.port}/socket")
                 return blocked, permitted
@@ -120,6 +120,7 @@ def test_r11_websocket_guard_blocks_private_host_and_connects_permitted_host():
             blocked, permitted = asyncio.run(run())
     finally:
         page_server.shutdown()
+        page_server.server_close()
         allowed.close()
         refused.close()
     # the refused server never saw a handshake: the guard closed the socket
@@ -184,3 +185,84 @@ def test_r11_other_secret_keys_are_redacted_by_every_leaf():
     outward = capture._redact_settings_secrets(
         "operator hunter2-long Bearer abc.def.ghi", settings)
     assert outward == "<redacted> <redacted> <redacted>"
+
+
+
+def test_r13_fake_context_refused_websocket_closes_without_connecting():
+    context = SimpleNamespace(route=AsyncMock(), route_web_socket=AsyncMock())
+    asyncio.run(capture._install_navigation_guard(
+        context, allow_loopback=False, loopback_host=None))
+    ws_guard = context.route_web_socket.call_args.args[1]
+    ws_route = SimpleNamespace(
+        url="ws://127.0.0.1:9/socket", close=AsyncMock(), connect_to_server=Mock(),
+    )
+    with pytest.warns(RuntimeWarning, match="capture websocket refused"):
+        asyncio.run(ws_guard(ws_route))
+    ws_route.close.assert_awaited_once_with(
+        code=capture.WS_REFUSED_CLOSE_CODE, reason="capture refused")
+    ws_route.connect_to_server.assert_not_called()
+
+
+def test_r13_fake_context_permitted_websocket_connects_without_closing():
+    context = SimpleNamespace(route=AsyncMock(), route_web_socket=AsyncMock())
+    asyncio.run(capture._install_navigation_guard(
+        context, allow_loopback=True, loopback_host="127.0.0.1"))
+    ws_guard = context.route_web_socket.call_args.args[1]
+    ws_route = SimpleNamespace(
+        url="ws://127.0.0.1:9/socket", close=AsyncMock(), connect_to_server=Mock(),
+    )
+    asyncio.run(ws_guard(ws_route))
+    ws_route.connect_to_server.assert_called_once_with()
+    ws_route.close.assert_not_awaited()
+
+
+def test_r13_real_capture_blocks_popup_egress_and_service_workers(tmp_path):
+    async_api = pytest.importorskip("playwright.async_api")
+    hits = []
+
+    class PopupPage(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 — http.server API
+            hits.append(self.path)
+            port = self.server.server_address[1]
+            if self.path == "/sw.js":
+                body = b"self.addEventListener('fetch', () => {});"
+                content_type = "text/javascript"
+            elif self.path == "/":
+                body = f"""<!doctype html><title>context egress</title><script>
+                  window.open('http://localhost:{port}/refused-popup', '_blank');
+                  window.open('http://127.0.0.1:{port}/permitted-popup', '_blank');
+                  navigator.serviceWorker.register('/sw.js').then(
+                    () => fetch('/sw-attempt?result=registered'),
+                    () => fetch('/sw-attempt?result=blocked'));
+                </script>""".encode()
+                content_type = "text/html"
+            else:
+                body = b"<!doctype html><title>popup</title>"
+                content_type = "text/html"
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    page_server = ThreadingHTTPServer(("127.0.0.1", 0), PopupPage)
+    threading.Thread(target=page_server.serve_forever, daemon=True).start()
+    port = page_server.server_address[1]
+    try:
+        _urls, targets, settings = capture.build_capture_plan({
+            "urls": [f"http://127.0.0.1:{port}/"], "viewports": ["desktop"],
+            "schemes": ["light"], "retries": 0,
+        }, allow_loopback=True)
+        results = asyncio.run(capture._run_capture_async(
+            targets, settings, tmp_path, lambda _result: None))
+        assert results[0]["status"] == "ok"
+        assert not any(path.startswith("/refused-popup") for path in hits)
+        assert sum(path.startswith("/permitted-popup") for path in hits) == 1
+        assert not any(path.startswith("/sw.js") for path in hits)
+        assert any(path.startswith("/sw-attempt?result=blocked") for path in hits)
+    finally:
+        page_server.shutdown()
+        page_server.server_close()
