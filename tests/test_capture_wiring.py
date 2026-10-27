@@ -779,7 +779,7 @@ async def test_r5_capture_preserves_first_route_error(tmp_path, monkeypatch):
     assert result["error"] == "first navigation guard refusal"
     assert len(attempt_errors[0]) == 1
     assert str(attempt_errors[0][0]) == "first navigation guard refusal"
-    assert supplied == []
+    assert supplied == attempt_errors[0]
     page.screenshot.assert_not_awaited()
 
 
@@ -1412,3 +1412,269 @@ def test_r8_manifest_omits_credentials_and_live_navigation_cache(tmp_path, monke
         zipped_manifest = archive.read("manifest.json").decode("utf-8")
     assert secret not in zipped_manifest
     assert "_navigation_cache" not in json.loads(zipped_manifest)["settings"]
+
+
+# ---------------------------------------------------------------------------
+# W0-28-r10 — secret boundaries, deferred map networking, and benign triggers
+# ---------------------------------------------------------------------------
+
+
+class _ManualThread:
+    """A real Thread call record whose target runs only when the test asks."""
+
+    instances = []
+
+    def __init__(self, **kwargs):
+        self.target = kwargs["target"]
+        self.args = kwargs.get("args", ())
+        self.kwargs = kwargs.get("kwargs", {})
+        self.started = False
+        type(self).instances.append(self)
+
+    def start(self):
+        self.started = True
+
+    def run(self):
+        return self.target(*self.args, **self.kwargs)
+
+
+def test_r10_secrets_never_leave_worker_surfaces(
+    tmp_path, monkeypatch, capsys, caplog,
+):
+    secret = "r10-unique-secret-7f3c9a"
+    real_builder = capture.build_capture_plan
+
+    def secret_builder(payload, **capabilities):
+        urls, targets, settings = real_builder(payload, **capabilities)
+        settings.update({
+            "cookies": [{"name": "session", "value": secret, "domain": "example.com"}],
+            "headers": {"X-Credential": secret},
+            "auth": {"nested": {"token": secret}},
+            "authorization": secret,
+        })
+        return urls, targets, settings
+
+    monkeypatch.setattr(capture, "build_capture_plan", secret_builder)
+    monkeypatch.setattr(cli, "build_capture_plan", secret_builder)
+    _ManualThread.instances = []
+    monkeypatch.setattr(capture.threading, "Thread", _ManualThread)
+    manager = capture.RestedCaptureManager(tmp_path / "jobs")
+    outward_states = []
+    real_capture_one = capture._capture_one
+
+    def failing_capture(targets, settings, shots_dir, progress):
+        outward_states.append(json.dumps(manager.get(manager.get(job_id)["job_id"])))
+        context, target, capture_settings, path, page = _capture_stack(
+            shots_dir / "real-capture", monkeypatch,
+        )
+        capture_settings.update(settings)
+        page.goto.side_effect = RuntimeError(f"navigation exposed {secret}")
+        result = asyncio.run(real_capture_one(context, target, capture_settings, path))
+        progress(result)
+        return [result]
+
+    monkeypatch.setattr(capture, "run_capture", failing_capture)
+    payload = {
+        "urls": ["https://example.com"], "viewports": ["desktop"],
+        "schemes": ["light"], "retries": 0,
+    }
+    started = manager.start(payload, allow_private_hosts=("172.17.0.1",))
+    job_id = started["job_id"]
+    outward_states.append(json.dumps(started))
+    outward_states.append(json.dumps(manager.get(job_id)))
+    assert secret not in json.dumps(started)
+    assert started["settings"]["allow_private_hosts"] == ("172.17.0.1",)
+    assert _ManualThread.instances[0].started
+    with warnings.catch_warnings(record=True) as caught_warnings:
+        warnings.simplefilter("always")
+        _ManualThread.instances[0].run()
+    finished = manager.get(job_id)
+    outward_states.append(json.dumps(finished))
+    assert finished["status"] == "done_with_errors"
+    assert finished["results"][0]["error"] == "navigation exposed <redacted>"
+    assert finished["settings"]["allow_private_hosts"] == ("172.17.0.1",)
+
+    work_dir = Path(started["work_dir"])
+    manifest_text = (work_dir / "manifest.json").read_text(encoding="utf-8")
+    outward_states.append(manifest_text)
+    with zipfile.ZipFile(finished["zip_path"]) as archive:
+        for member in archive.namelist():
+            assert secret.encode() not in archive.read(member)
+    diagnostics = caplog.text + "\n" + "\n".join(
+        str(item.message) for item in caught_warnings
+    )
+    outward_states.append(diagnostics)
+    assert all(secret not in surface for surface in outward_states)
+    assert all("allow_private_hosts" in state for state in outward_states[:3])
+
+    direct_code = cli._print_plan(*secret_builder(payload))
+    direct_output = capsys.readouterr().out + capsys.readouterr().err
+    assert direct_code == 0
+    assert secret not in direct_output
+    assert "allow_private_hosts" in direct_output
+
+    dry_code = cli.main([
+        "--urls", "example.com", "--dry-run",
+        "--cookie", f"session={secret};example.com",
+        "--allow-private-host", "172.17.0.1",
+    ])
+    dry_captured = capsys.readouterr()
+    dry_output = dry_captured.out + dry_captured.err
+    assert dry_code == 0
+    assert secret not in dry_output
+    assert "allow_private_hosts" in dry_output
+
+    def exploding_capture(_targets, _settings, _shots_dir, _progress):
+        raise RuntimeError(f"worker failed with {secret}")
+
+    monkeypatch.setattr(capture, "run_capture", exploding_capture)
+    failed_start = manager.start(payload)
+    failed_id = failed_start["job_id"]
+    _ManualThread.instances[-1].run()
+    failed = manager.get(failed_id)
+    assert failed["status"] == "failed"
+    assert failed["message"] == "worker failed with <redacted>"
+    assert secret not in json.dumps(failed)
+
+
+def test_r10_manager_defers_map_page_reads_and_completes(tmp_path, monkeypatch):
+    reads = []
+    captured = []
+    html = '<html><body><button id="open-settings">Settings</button></body></html>'
+
+    def read_pages(urls, **_policy):
+        reads.extend(urls)
+        return {url: html for url in urls}
+
+    def fake_capture(targets, settings, _shots_dir, progress):
+        captured.extend(targets)
+        assert settings["allow_loopback"] is False
+        results = []
+        for target in targets:
+            result = {
+                "url": target.url, "file": f"{target.index}.png", "status": "ok",
+                "states": [], "trigger_fired": bool(target.trigger_selector),
+            }
+            progress(result)
+            results.append(result)
+        return results
+
+    monkeypatch.setattr(pathway_plan, "_load_pages_html", read_pages)
+    monkeypatch.setattr(capture, "run_capture", fake_capture)
+    _ManualThread.instances = []
+    monkeypatch.setattr(capture.threading, "Thread", _ManualThread)
+    manager = capture.RestedCaptureManager(tmp_path / "jobs")
+    started = manager.start({
+        "manifest_text": (WIRING / "named-control-manifest.md").read_text(encoding="utf-8"),
+        "base_url": "http://base.test", "viewports": ["desktop"], "schemes": ["light"],
+    })
+    assert started["status"] == "queued"
+    assert reads == []
+    _ManualThread.instances[0].run()
+    finished = manager.get(started["job_id"])
+    assert reads == ["http://base.test/settings", "http://base.test/"]
+    assert finished["status"] == "done"
+    assert finished["urls"] == ["http://base.test/settings", "http://base.test/"]
+    assert finished["total"] == len(captured) == 2
+    assert {target.pathway_id for target in captured} == {"open-settings", "open-missing"}
+    selectors = {target.pathway_id: target.trigger_selector for target in captured}
+    assert selectors["open-settings"] == "#open-settings"
+
+
+@pytest.mark.parametrize(
+    ("payload", "error_type", "message"),
+    [
+        (
+            {"map_text": "{", "base_url": "http://base.test"},
+            PathwayMapError, "",
+        ),
+        (
+            {"url": "example.com", "map_text": "{}", "base_url": "http://base.test"},
+            RestedCaptureError, "provide exactly one capture source — got map_text, url",
+        ),
+        (
+            {
+                "manifest_text": (WIRING / "named-control-manifest.md").read_text(encoding="utf-8"),
+                "base_url": "http://base.test", "viewports": ["bogus"],
+            },
+            RestedCaptureError, "unknown viewport: bogus",
+        ),
+    ],
+)
+def test_r10_manager_map_input_refusals_stay_synchronous(
+    monkeypatch, payload, error_type, message,
+):
+    thread = Mock()
+    monkeypatch.setattr(capture.threading, "Thread", thread)
+    manager = capture.RestedCaptureManager()
+    with pytest.raises(error_type) as exc:
+        manager.start(payload)
+    if message:
+        assert str(exc.value) == message
+    thread.assert_not_called()
+
+
+def test_r10_manager_map_network_refusal_becomes_job_failure(tmp_path, monkeypatch):
+    reads = []
+
+    def refuse_pages(urls, **_policy):
+        reads.extend(urls)
+        raise RestedCaptureError("r10 guard refusal")
+
+    monkeypatch.setattr(pathway_plan, "_load_pages_html", refuse_pages)
+    _ManualThread.instances = []
+    monkeypatch.setattr(capture.threading, "Thread", _ManualThread)
+    manager = capture.RestedCaptureManager(tmp_path / "jobs")
+    started = manager.start({
+        "manifest_text": (WIRING / "named-control-manifest.md").read_text(encoding="utf-8"),
+        "base_url": "http://base.test", "viewports": ["desktop"], "schemes": ["light"],
+    })
+    assert started["status"] == "queued"
+    assert reads == []
+    _ManualThread.instances[0].run()
+    failed = manager.get(started["job_id"])
+    assert reads == ["http://base.test/settings", "http://base.test/"]
+    assert failed["status"] == "failed"
+    assert failed["message"] == "r10 guard refusal"
+
+
+@pytest.mark.parametrize("option", ["--site", "--sitemap"])
+def test_r10_dry_run_refuses_network_discovery(monkeypatch, capsys, option):
+    result = (["https://example.com/"], {}) if option == "--site" else ["https://example.com/"]
+    discovery = Mock(return_value=result)
+    monkeypatch.setattr(
+        capture, "discover_site_urls" if option == "--site" else "expand_sitemap", discovery,
+    )
+    code = cli.main([option, "https://example.com", "--dry-run"])
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.err == (
+        "error: --dry-run does not support --site or --sitemap because discovery "
+        "requires network access\n"
+    )
+    discovery.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "benign_url",
+    ["about:blank", "data:text/html,<p>opened</p>", "blob:https://example.com/state"],
+)
+@pytest.mark.asyncio
+async def test_r10_post_trigger_benign_url_uses_pre_trigger_policy(
+    tmp_path, monkeypatch, benign_url,
+):
+    context, target, settings, path, page = _capture_stack(
+        tmp_path, monkeypatch, trigger="#open-settings",
+    )
+    element = page.query_selector.return_value
+    original_click = element.click.side_effect
+
+    async def click_and_navigate(**kwargs):
+        await original_click(**kwargs)
+        page.url = benign_url
+
+    element.click.side_effect = click_and_navigate
+    result = await capture._capture_one(context, target, settings, path)
+    assert result["status"] == "ok"
+    assert result["trigger_fired"] is True
+    page.screenshot.assert_awaited_once()
