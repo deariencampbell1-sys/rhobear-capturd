@@ -21,15 +21,14 @@ modules already do:
 
 Where the map names a control means, in priority order: the pathway's
 ``selector``/``css`` column (the explicit control reference), a quoted name or
-selector-shaped token in its ``trigger``, and the call the pathway names
+selector-shaped token in its ``trigger`` for live planner binding, and the call the pathway names
 (``downstreamCall``'s route path — a verifier finding names the control by the
 call it makes). The named control is matched against the page's planner
 candidates by exact selector, then exact target, then label.
 
 In dry-run there is no page read at all: the plan is built without launching
 a browser and without any network call. A target's ``trigger_selector`` then
-comes only from what the map itself names (the ``selector``/``css`` column, or
-a selector-shaped token in its ``trigger``), and a named control that would
+comes only from the explicit ``selector``/``css`` column, and a named control that would
 need the page to bind is reported unbound (``selector=-``) with a flag saying
 so (:func:`named_control_needs_the_page`).
 
@@ -324,17 +323,14 @@ def _named_control_tokens(pathway: dict[str, Any]) -> list[str]:
 def _explicit_selector(pathway: dict[str, Any]) -> str:
     """The selector the map itself names — never read from a page.
 
-    D92: exactly two sources, in priority order — the pathway's
-    ``selector``/``css`` column (the explicit control reference) and a
-    selector-shaped token in its ``trigger``. Anything else (a quoted label,
-    a bare word, the call the pathway names) names a control that would need
-    the page to bind, and yields no explicit selector.
+    D92: only the explicit ``selector``/``css`` column qualifies. Trigger
+    prose, quoted labels, bare words, and downstream calls require live
+    planner binding and yield no explicit dry-run selector.
     """
     explicit = str(pathway.get("selector") or pathway.get("css") or "").strip().strip("`").strip()
     if explicit:
         return explicit
-    match = _SELECTORISH_RE.search(str(pathway.get("trigger") or ""))
-    return match.group(1) if match else ""
+    return ""
 
 
 def named_control_needs_the_page(pathway: dict[str, Any]) -> bool:

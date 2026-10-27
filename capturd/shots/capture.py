@@ -45,6 +45,7 @@ MAX_CRAWL_URLS = 1000
 DEFAULT_TIMEOUT_MS = 30000
 TRIGGER_CLICK_TIMEOUT_MS = 2500
 TRIGGER_STATE_TIMEOUT_MS = 2500
+TRIGGER_STATE_POLL_LIMIT = 5
 NAV_GUARD_TIMEOUT_S = 10
 DEFAULT_WAIT_MS = 600
 DEFAULT_CONCURRENCY = 3
@@ -404,15 +405,6 @@ def _reject_private_url(
                     or (allow_private_peer and private_lan)
                 ):
                     continue
-                if (
-                    unwrapped.is_link_local
-                    or unwrapped.is_reserved
-                    or unwrapped.is_multicast
-                    or unwrapped.is_unspecified
-                ):
-                    raise RestedCaptureError(
-                        f"url resolves to a private/internal IP ({ip}) — not allowed"
-                    )
             raise RestedCaptureError(f"url resolves to a private/internal IP ({ip}) — not allowed")
 
 
@@ -422,11 +414,13 @@ def _canonical_host(host: str | None) -> str:
 
 def _reject_navigation_url(
     url: str, *, allow_loopback: bool, loopback_host: str | None,
-    allow_private_hosts: tuple[str, ...] = (),
+    allow_private_hosts: tuple[str, ...] = (), allow_file_access: bool = False,
 ) -> None:
-    # Preserve local-file capture; only HTTP(S) requests have DNS/IP policy.
-    if urlparse(url).scheme.lower() not in {"http", "https"}:
+    scheme = urlparse(url).scheme.lower()
+    if scheme == "file" and allow_file_access:
         return
+    if scheme not in {"http", "https", "ws", "wss"}:
+        raise RestedCaptureError("navigation URL scheme is not allowed")
     host = _canonical_host(urlparse(url).hostname)
     permitted = bool(
         allow_loopback and loopback_host and host == _canonical_host(loopback_host)
@@ -440,14 +434,14 @@ def _reject_navigation_url(
 
 async def _check_navigation_url(
     url: str, *, allow_loopback: bool, loopback_host: str | None,
-    allow_private_hosts: tuple[str, ...] = (),
+    allow_private_hosts: tuple[str, ...] = (), allow_file_access: bool = False,
     cache: dict[tuple[Any, ...], RestedCaptureError | None] | None = None,
 ) -> None:
     parsed = urlparse(url)
     key = (
         parsed.scheme.lower(), _canonical_host(parsed.hostname), allow_loopback,
         _canonical_host(loopback_host),
-        tuple(_canonical_host(host) for host in allow_private_hosts),
+        tuple(_canonical_host(host) for host in allow_private_hosts), allow_file_access,
     )
     if cache is not None and key in cache:
         cached = cache[key]
@@ -459,6 +453,8 @@ async def _check_navigation_url(
     }
     if allow_private_hosts:
         resolver_kwargs["allow_private_hosts"] = allow_private_hosts
+    if allow_file_access:
+        resolver_kwargs["allow_file_access"] = True
     try:
         await asyncio.wait_for(asyncio.to_thread(
             _reject_navigation_url, url, **resolver_kwargs,
@@ -475,7 +471,7 @@ async def _check_navigation_url(
 
 async def _install_navigation_guard(
     context: Any, *, allow_loopback: bool, loopback_host: str | None,
-    allow_private_hosts: tuple[str, ...] = (),
+    allow_private_hosts: tuple[str, ...] = (), allow_file_access: bool = False,
     navigation_cache: dict[tuple[Any, ...], RestedCaptureError | None] | None = None,
     guard_errors: list[RestedCaptureError] | None = None,
 ) -> list[RestedCaptureError]:
@@ -493,7 +489,7 @@ async def _install_navigation_guard(
             await _check_navigation_url(
                 route.request.url, allow_loopback=allow_loopback,
                 loopback_host=loopback_host, allow_private_hosts=allow_private_hosts,
-                cache=navigation_cache,
+                allow_file_access=allow_file_access, cache=navigation_cache,
             )
         except Exception as exc:
             original_class = type(exc).__name__
@@ -984,7 +980,6 @@ def build_capture_plan(
         ("map_text", payload.get("map_text")),
     ]
     supplied_maps = [name for name, value in map_inputs if value is not None]
-    url_keys = ("url", "urls", "sitemap_url", "crawl_url", "local_path", "crawl", "local")
     url_supplied = bool(
         payload.get("url")
         or payload.get("urls")
@@ -994,15 +989,12 @@ def build_capture_plan(
         or payload.get("crawl")
         or payload.get("local")
     )
-    # Declared-but-empty is a URL error, not a missing-source error: a caller
-    # who asked for URL capture with nothing in it hears the URL complaint.
-    url_declared = any(payload.get(key) is not None for key in url_keys)
     source_names = (["url"] if url_supplied else []) + supplied_maps
     if not source_names:
         raise RestedCaptureError("add at least one URL")
     if len(source_names) > 1:
-        raise PathwayMapError(
-            "provide a manifest or a map, not both — got " + ", ".join(sorted(source_names))
+        raise RestedCaptureError(
+            "provide exactly one capture source — got " + ", ".join(sorted(source_names))
         )
 
     # Imported here (not at module top) to keep the capture/pathway module
@@ -1212,12 +1204,11 @@ def build_capture_plan(
                     })
 
     settings = {
-        "allow_loopback": allow_loopback if supplied_maps else True,
+        "allow_loopback": allow_loopback,
         "loopback_host": (
             urlparse(base_url).hostname if supplied_maps and allow_loopback else None
         ),
         "allow_private_hosts": allow_private_hosts,
-        "_navigation_cache": {},
         "format": str(payload.get("format") or "png").lower(),
         "full_page": bool(payload.get("full_page", True)),
         "timeout_ms": int(payload.get("timeout_ms") or DEFAULT_TIMEOUT_MS),
@@ -1455,7 +1446,9 @@ async def _apply_trigger(page: Any, selector: str, wait_ms: int) -> bool:
         if page.url != before_url or after != before:
             return True
         deadline = time.monotonic() + TRIGGER_STATE_TIMEOUT_MS / 1000
-        while time.monotonic() < deadline:
+        for _ in range(TRIGGER_STATE_POLL_LIMIT):
+            if time.monotonic() >= deadline:
+                break
             await page.wait_for_timeout(100)
             after = await page.evaluate(_FINGERPRINT_JS)
             if page.url != before_url or after != before:
@@ -1470,14 +1463,14 @@ async def _apply_trigger(page: Any, selector: str, wait_ms: int) -> bool:
 async def _capture_one(
     context: Any, target: CaptureTarget, settings: dict[str, Any], path: Path,
     *, guard_errors: list[RestedCaptureError] | None = None,
+    navigation_cache: dict[tuple[Any, ...], RestedCaptureError | None] | None = None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     attempts = max(1, int(settings.get("retries", DEFAULT_RETRIES)) + 1)
     last_error = ""
-    navigation_cache = settings.get("_navigation_cache")
     if navigation_cache is None:
         navigation_cache = {}
-        settings["_navigation_cache"] = navigation_cache
+    allow_file_access = bool(settings.get("local"))
     allow_private_hosts = tuple(settings.get("allow_private_hosts") or ())
     for attempt in range(1, attempts + 1):
         page = None
@@ -1493,13 +1486,14 @@ async def _capture_one(
             page = await context.new_page()
             await _install_navigation_guard(
                 page, allow_loopback=allow_loopback, loopback_host=loopback_host,
-                allow_private_hosts=allow_private_hosts,
+                allow_private_hosts=allow_private_hosts, allow_file_access=allow_file_access,
                 navigation_cache=navigation_cache, guard_errors=page_errors,
             )
             page.set_default_timeout(timeout_ms)
             await _check_navigation_url(
                 target.url, allow_loopback=allow_loopback, loopback_host=loopback_host,
-                allow_private_hosts=allow_private_hosts, cache=navigation_cache,
+                allow_private_hosts=allow_private_hosts, allow_file_access=allow_file_access,
+                cache=navigation_cache,
             )
             if page_errors:
                 raise page_errors[0]
@@ -1508,7 +1502,8 @@ async def _capture_one(
                 raise page_errors[0]
             await _check_navigation_url(
                 page.url, allow_loopback=allow_loopback, loopback_host=loopback_host,
-                allow_private_hosts=allow_private_hosts, cache=navigation_cache,
+                allow_private_hosts=allow_private_hosts, allow_file_access=allow_file_access,
+                cache=navigation_cache,
             )
             try:
                 await page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 15000))
@@ -1530,7 +1525,8 @@ async def _capture_one(
                 raise page_errors[0]
             await _check_navigation_url(
                 page.url, allow_loopback=allow_loopback, loopback_host=loopback_host,
-                allow_private_hosts=allow_private_hosts, cache=navigation_cache,
+                allow_private_hosts=allow_private_hosts, allow_file_access=allow_file_access,
+                cache=navigation_cache,
             )
             await page.screenshot(**screenshot_kwargs)
             stat = path.stat()
@@ -1618,6 +1614,7 @@ async def _run_capture_async(
         ) from exc
 
     sem = asyncio.Semaphore(settings["concurrency"])
+    navigation_cache: dict[tuple[Any, ...], RestedCaptureError | None] = {}
     results: list[dict[str, Any]] = []
 
     async with async_playwright() as p:
@@ -1653,7 +1650,10 @@ async def _run_capture_async(
                 async with sem:
                     file_name = _capture_file_name(target, settings["format"])
                     context = await context_for(target)
-                    result = await _capture_one(context, target, settings, shots_dir / file_name)
+                    result = await _capture_one(
+                        context, target, settings, shots_dir / file_name,
+                        navigation_cache=navigation_cache,
+                    )
                     progress(result)
                     return result
 
@@ -1700,6 +1700,19 @@ def build_quality_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
                 captures.append({"kind": "state", "success": state.get("status") == "ok"})
         entries.append({"file": result.get("file") or "", "manifest": {"captures": captures}})
     return {"results": entries}
+
+
+SAFE_SETTINGS_KEYS = frozenset({
+    "format", "full_page", "timeout_ms", "wait_ms", "concurrency", "retries",
+    "retry_timeout_ms", "jpeg_quality", "states", "states_limit", "state_wait_ms",
+    "capture_count", "crawl", "local", "page_count", "pathway_flags", "discovery",
+    "allow_loopback", "loopback_host",
+})
+
+
+def _safe_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    """Only non-secret, JSON-safe capture settings may be shared or persisted."""
+    return {key: value for key, value in settings.items() if key in SAFE_SETTINGS_KEYS}
 
 
 def _write_json(path: Path, data: dict[str, Any]) -> None:
@@ -1821,10 +1834,7 @@ class RestedCaptureManager:
             manifest = {
                 "job_id": job_id,
                 "captured_at": utc_now_iso(),
-                "settings": {
-                    key: value for key, value in settings.items()
-                    if key != "_navigation_cache"
-                },
+                "settings": _safe_settings(settings),
                 "urls": self.get(job_id).get("urls") or [],
                 "discovery": settings.get("discovery") or {},
                 "results": results,

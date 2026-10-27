@@ -95,6 +95,25 @@ capturd serve
 Legacy CLI (`sunsponge-capture ...`) still works as an alias for `capturd shots ...` so existing
 scripts don't break.
 
+Map-driven stills accept `--pathway-map JSON` (verifier JSON), `--pathway-manifest MD`
+(markdown), or `--map-text TEXT` (pasted verifier JSON). All require `--base-url URL`.
+Use `--max-targets N` to bound the expanded capture matrix and `--dry-run` to print a plan
+without browser or network activity. Repeat `--allow-private-host HOST` for an exact-host
+RFC1918/ULA/loopback opt-in; metadata and other prohibited addresses remain refused.
+Legacy direct URL capture keeps its exact-target loopback exception, but sitemap/crawl
+discovery remains loopback-refused.
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | Capture completed successfully. |
+| 1 | The job failed before capture. |
+| 2 | Usage, input, or plan refusal. |
+| 3 | Capture completed with one or more failed shots. |
+| 4 | A completed map-driven run was refused by the quality gate. |
+
+The quality gate and exit 4 apply only to map-driven runs. Legacy URL, sitemap, crawl, and
+local runs retain their existing 0/1/2/3 behavior.
+
 ### As a library
 
 ```python

@@ -8,8 +8,8 @@ or a pathway map (verifier JSON or the markdown manifest) resolved against a
 ``--base-url``. The map path is the new wiring: a pathway map goes in and a
 real capture plan comes out — ``--dry-run`` prints that plan with no browser
 and no network call: a ``trigger_selector`` comes only from what the map
-itself names (the ``selector``/``css`` column or a selector-shaped token in
-its ``trigger``), and a named control that would need the page to bind is
+itself names (the ``selector``/``css`` column), and a named control that
+would need the page to bind is
 reported unbound (``selector=-``) with a flag. The quality gate (01c)
 decides whether a MAP-DRIVEN run is evidence — a legacy ``--urls`` /
 ``--sitemap`` / ``--crawl`` / ``--local`` run keeps its pre-gate exit codes
@@ -18,7 +18,8 @@ its reason code reaches this caller unchanged when a gate runs. Finished map
 runs refused by quality exit 4. Only CLI map inputs permit local map files and
 loopback navigation on the exact --base-url hostname. Legacy URL/sitemap/crawl/local
 capture permits loopback only on each target's exact host. Explicitly allowed private
-hosts are a separate exact-host opt-in; metadata always remains refused. Remote callers
+hosts are a separate exact-host opt-in; metadata always remains refused. Sitemap/crawl
+discovery remains loopback-refused. Remote callers
 pass map_text/manifest_text and default to no loopback permission.
 """
 
@@ -34,6 +35,7 @@ from dataclasses import asdict
 from .capture import (
     RestedCaptureError,
     RestedCaptureManager,
+    _safe_settings,
     build_capture_plan,
     build_quality_summary,
 )
@@ -109,8 +111,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true",
                         help="Print the capture plan and exit - no shots. A map plan "
                              "launches no browser and makes no network call: trigger_selector "
-                             "comes only from what the map itself names (selector/css column, "
-                             "or a selector-shaped token in trigger), and a named control that "
+                             "comes only from the selector/css column, and a named control that "
                              "would need the page to bind is reported unbound (selector=-) with "
                              "a flag. (--site / --sitemap page discovery still reads its input.)")
 
@@ -182,13 +183,7 @@ def _print_plan(urls, targets, settings) -> int:
     for flag in settings.get("pathway_flags") or []:
         print(f"flag: {flag['flag']} {flag['pathway_id']}: {flag['reason']}")
     # Cookie values are credentials; keep them out of shareable dry-run output.
-    plan_keys = {
-        "format", "full_page", "timeout_ms", "wait_ms", "concurrency", "retries",
-        "retry_timeout_ms", "jpeg_quality", "states", "states_limit", "state_wait_ms",
-        "capture_count", "crawl", "local", "page_count", "pathway_flags", "discovery",
-        "allow_loopback", "loopback_host",
-    }
-    safe_settings = {key: value for key, value in settings.items() if key in plan_keys}
+    safe_settings = _safe_settings(settings)
     print(
         "plan-json: "
         + json.dumps(
@@ -249,7 +244,7 @@ def main(argv: list[str] | None = None) -> int:
 
     capabilities = {
         "allow_map_files": map_input,
-        "allow_loopback": map_input,
+        "allow_loopback": True,
         "allow_private_hosts": allow_private_hosts,
     }
     if args.dry_run:

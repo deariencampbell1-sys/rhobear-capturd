@@ -373,12 +373,12 @@ def test_dry_run_performs_no_navigation(monkeypatch, capsys):
     plan = _plan_from_output(out)
     selectors = {t["pathway_id"]: t["trigger_selector"] for t in plan["targets"]}
     # the printed plan names the explicit selector the map carries...
-    assert selectors["named-selector"] == "#panel-btn"
+    assert selectors["named-selector"] == ""
     # ...and marks the label-named control unbound, flagged
     assert selectors["named-by-label"] == ""
     assert "selector=-" in out
     unbound = [f for f in plan["settings"]["pathway_flags"] if f["flag"] == "UNBOUND"]
-    assert [f["pathway_id"] for f in unbound] == ["named-by-label"]
+    assert [f["pathway_id"] for f in unbound] == ["named-selector", "named-by-label"]
     assert "unbound" in unbound[0]["reason"].lower()
 
 
@@ -803,6 +803,7 @@ async def test_r6_legacy_loopback_cli_captures(tmp_path, monkeypatch):
     context, target, settings, path, page = _capture_stack(
         tmp_path, monkeypatch, url="http://127.0.0.1:8241/index.html",
     )
+    settings["allow_loopback"] = True  # explicit legacy CLI call-site exception
     result = await capture._capture_one(context, target, settings, path)
     assert result["status"] == "ok"
     assert path.stat().st_size > 0
@@ -814,6 +815,7 @@ async def test_r6_private_subresource_does_not_fail_capture(tmp_path, monkeypatc
     context, target, settings, path, page = _capture_stack(
         tmp_path, monkeypatch, url="http://127.0.0.1:8241/index.html",
     )
+    settings["allow_loopback"] = True  # explicit legacy CLI call-site exception
     handler = None
     async def route(pattern, installed):
         nonlocal handler
@@ -922,6 +924,7 @@ async def test_r6_document_refusal_does_not_poison_sibling_page(tmp_path, monkey
 @pytest.mark.asyncio
 async def test_r6_legacy_loopback_host_is_derived_per_target(tmp_path, monkeypatch):
     context, target, settings, path, page = _capture_stack(tmp_path, monkeypatch)
+    settings["allow_loopback"] = True  # explicit legacy CLI call-site exception
     installed = []
     navigation_cache = {}
     real_install = capture._install_navigation_guard
@@ -939,6 +942,7 @@ async def test_r6_legacy_loopback_host_is_derived_per_target(tmp_path, monkeypat
         result = await capture._capture_one(
             context, dataclasses.replace(target, url=page.url), settings,
             tmp_path / f"{host.replace('.', '-')}.png",
+            navigation_cache=navigation_cache,
         )
         assert result["status"] == "ok"
     assert settings["loopback_host"] is None
@@ -1196,22 +1200,23 @@ def test_r7_ipv4_mapped_private_host_opt_in():
         )
 
 
-@pytest.mark.asyncio
-async def test_r8_remote_url_plan_and_manager_refuse_loopback(tmp_path, monkeypatch, capsys):
+def test_r8_remote_url_plan_and_manager_refuse_loopback(tmp_path, monkeypatch, capsys):
     _, _, settings = build_capture_plan({"urls": ["http://127.0.0.1:9/admin"]})
     assert settings["allow_loopback"] is False
 
     manager = capture.RestedCaptureManager(tmp_path / "jobs")
+    real_thread = capture.threading.Thread
     monkeypatch.setattr(
         capture.threading, "Thread", lambda **kwargs: SimpleNamespace(start=lambda: None),
     )
     job = manager.start({"urls": ["http://127.0.0.1:9/admin"]})
     assert manager.get(job["job_id"])["settings"]["allow_loopback"] is False
+    monkeypatch.setattr(capture.threading, "Thread", real_thread)
 
     context, target, settings, path, page = _capture_stack(
         tmp_path, monkeypatch, url="http://127.0.0.1:9/admin",
     )
-    result = await capture._capture_one(context, target, settings, path)
+    result = asyncio.run(capture._capture_one(context, target, settings, path))
     assert result["status"] == "failed"
     assert result["error"] == "url resolves to a private/internal IP (127.0.0.1) — not allowed"
     page.goto.assert_not_awaited()
