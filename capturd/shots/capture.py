@@ -418,12 +418,13 @@ async def _check_navigation_url(url: str, *, allow_loopback: bool, loopback_host
             _reject_navigation_url, url,
             allow_loopback=allow_loopback, loopback_host=loopback_host,
         ), timeout=NAV_GUARD_TIMEOUT_S)
-    except TimeoutError:
+    except (asyncio.TimeoutError, TimeoutError):
         raise RestedCaptureError("navigation URL check timed out") from None
 
 
 async def _install_navigation_guard(
     context: Any, *, allow_loopback: bool, loopback_host: str | None,
+    guard_errors: list[RestedCaptureError] | None = None,
 ) -> list[RestedCaptureError]:
     """Check requests before Chromium connects; retain the first refusal.
 
@@ -431,16 +432,28 @@ async def _install_navigation_guard(
     its socket DNS; rebinding between check and connect remains a residual.
     Coroutine deadlines cannot terminate an OS resolver already in a thread.
     """
-    guard_errors: list[RestedCaptureError] = []
+    if guard_errors is None:
+        guard_errors = []
 
     async def guard(route: Any) -> None:
         try:
             await _check_navigation_url(route.request.url, allow_loopback=allow_loopback,
                                         loopback_host=loopback_host)
-        except RestedCaptureError as exc:
-            if not guard_errors:
-                guard_errors.append(exc)
+        except Exception as exc:
+            original_class = type(exc).__name__
+            if not isinstance(exc, RestedCaptureError):
+                exc = RestedCaptureError(f"navigation URL check failed ({original_class})")
             await route.abort()
+            resource_type = getattr(route.request, "resource_type", "document")
+            if resource_type == "document":
+                if not guard_errors:
+                    guard_errors.append(exc)
+                return
+            warnings.warn(
+                f"capture subresource refused ({original_class}); request aborted",
+                RuntimeWarning,
+                stacklevel=2,
+            )
             return
         await route.continue_()
 
@@ -1131,8 +1144,14 @@ def build_capture_plan(payload: dict[str, Any]) -> tuple[list[str], list[Capture
                     })
 
     settings = {
-        "allow_loopback": bool(supplied_maps and payload.get("_allow_loopback")),
-        "loopback_host": urlparse(base_url).hostname if supplied_maps and payload.get("_allow_loopback") else None,
+        "allow_loopback": (
+            bool(payload.get("_allow_loopback")) if supplied_maps else True
+        ),
+        "loopback_host": (
+            urlparse(base_url).hostname
+            if supplied_maps and payload.get("_allow_loopback")
+            else None
+        ),
         "format": str(payload.get("format") or "png").lower(),
         "full_page": bool(payload.get("full_page", True)),
         "timeout_ms": int(payload.get("timeout_ms") or DEFAULT_TIMEOUT_MS),
@@ -1383,21 +1402,33 @@ async def _capture_one(
     last_error = ""
     for attempt in range(1, attempts + 1):
         page = None
+        allow_loopback = bool(settings.get("allow_loopback"))
+        loopback_host = settings.get("loopback_host")
+        if allow_loopback and loopback_host is None:
+            loopback_host = urlparse(target.url).hostname
+        page_errors = guard_errors if guard_errors is not None else []
+        page_errors.clear()
         try:
             timeout_ms = int(settings["timeout_ms"])
             if attempt > 1:
                 timeout_ms = max(timeout_ms, int(settings.get("retry_timeout_ms") or DEFAULT_RETRY_TIMEOUT_MS))
             page = await context.new_page()
+            await _install_navigation_guard(
+                page, allow_loopback=allow_loopback, loopback_host=loopback_host,
+                guard_errors=page_errors,
+            )
             page.set_default_timeout(timeout_ms)
-            await _check_navigation_url(target.url, allow_loopback=bool(settings.get("allow_loopback")),
-                                        loopback_host=settings.get("loopback_host"))
-            if guard_errors:
-                raise guard_errors[0]
+            await _check_navigation_url(
+                target.url, allow_loopback=allow_loopback, loopback_host=loopback_host,
+            )
+            if page_errors:
+                raise page_errors[0]
             await page.goto(target.url, wait_until="domcontentloaded", timeout=timeout_ms)
-            if guard_errors:
-                raise guard_errors[0]
-            await _check_navigation_url(page.url, allow_loopback=bool(settings.get("allow_loopback")),
-                                        loopback_host=settings.get("loopback_host"))
+            if page_errors:
+                raise page_errors[0]
+            await _check_navigation_url(
+                page.url, allow_loopback=allow_loopback, loopback_host=loopback_host,
+            )
             try:
                 await page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 15000))
             except Exception:
@@ -1414,17 +1445,18 @@ async def _capture_one(
             }
             if settings["format"] == "jpeg":
                 screenshot_kwargs["quality"] = settings["jpeg_quality"]
-            if guard_errors:
-                raise guard_errors[0]
-            await _check_navigation_url(page.url, allow_loopback=bool(settings.get("allow_loopback")),
-                                        loopback_host=settings.get("loopback_host"))
+            if page_errors:
+                raise page_errors[0]
+            await _check_navigation_url(
+                page.url, allow_loopback=allow_loopback, loopback_host=loopback_host,
+            )
             await page.screenshot(**screenshot_kwargs)
             stat = path.stat()
             extra_states: list[dict[str, Any]] = []
             if settings.get("states"):
                 extra_states = await _sweep_states(page, target, settings, path)
-            if guard_errors:
-                raise guard_errors[0]
+            if page_errors:
+                raise page_errors[0]
             return {
                 "url": target.url,
                 "states": extra_states,
@@ -1442,7 +1474,7 @@ async def _capture_one(
                 "elapsed_ms": int((time.perf_counter() - started) * 1000),
             }
         except Exception as exc:
-            last_error = str(guard_errors[0] if guard_errors else exc)
+            last_error = str(page_errors[0] if page_errors else exc)
             if attempt < attempts:
                 await asyncio.sleep(0.35)
         finally:
@@ -1505,7 +1537,6 @@ async def _run_capture_async(
         allow_file_access = any(urlparse(target.url).scheme == "file" for target in targets)
         browser = await _launch_browser(p, allow_file_access=allow_file_access)
         contexts: dict[tuple[str, str, int, int, str], Any] = {}
-        errors_by_key: dict[tuple[str, str, int, int, str], list[RestedCaptureError]] = {}
         context_lock = asyncio.Lock()
 
         async def context_for(target: CaptureTarget) -> Any:
@@ -1521,11 +1552,6 @@ async def _run_capture_async(
                         locale="en-US",
                         user_agent=USER_AGENT,
                     )
-                    contexts[key] = context
-                    errors_by_key[key] = await _install_navigation_guard(
-                        context, allow_loopback=bool(settings.get("allow_loopback")),
-                        loopback_host=settings.get("loopback_host"),
-                    )
                     # Signed-in capture: without cookies the batch can only ever shoot
                     # what a logged-out visitor sees, so authenticated products are
                     # impossible to screenshot.
@@ -1540,8 +1566,7 @@ async def _run_capture_async(
                 async with sem:
                     file_name = _capture_file_name(target, settings["format"])
                     context = await context_for(target)
-                    result = await _capture_one(context, target, settings, shots_dir / file_name,
-                                                guard_errors=errors_by_key[_target_context_key(target)])
+                    result = await _capture_one(context, target, settings, shots_dir / file_name)
                     progress(result)
                     return result
 

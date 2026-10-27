@@ -387,7 +387,7 @@ def _reject_running_loop() -> None:
 
 
 def _load_pages_html(
-    urls: list[str], *, allow_loopback: bool = True, loopback_host: str | None = None,
+    urls: list[str], *, allow_loopback: bool = False, loopback_host: str | None = None,
 ) -> dict[str, str]:
     """Read the target pages' HTML through the real capture path — one batch.
 
@@ -437,6 +437,7 @@ def _load_pages_html(
                     context, allow_loopback=allow_loopback, loopback_host=loopback_host,
                 )
                 for url in urls:
+                    guard_errors.clear()
                     page = await context.new_page()
                     try:
                         try:
@@ -471,7 +472,7 @@ def _load_pages_html(
     async def _bounded() -> dict[str, str]:
         try:
             return await asyncio.wait_for(_read_all(), timeout=PLAN_BATCH_TIMEOUT_S)
-        except TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):
             raise RestedCaptureError("pathway page read timed out") from None
 
     return asyncio.run(_bounded())
@@ -512,7 +513,7 @@ def plan_targets_from_map(
     viewport_count: int = 1,
     scheme_count: int = 1,
     dry_run: bool = False,
-    allow_loopback: bool = True,
+    allow_loopback: bool = False,
 ) -> tuple[list[str], list[CaptureTarget]]:
     """Expand a parsed map into unique URLs and one target per capturable
     pathway.
@@ -578,7 +579,7 @@ def plan_targets_from_map(
         async def _bounded_checks() -> None:
             try:
                 await asyncio.wait_for(_check_all(), timeout=PLAN_BATCH_TIMEOUT_S)
-            except TimeoutError:
+            except (asyncio.TimeoutError, TimeoutError):
                 raise RestedCaptureError("pathway URL checks timed out") from None
 
         asyncio.run(_bounded_checks())
