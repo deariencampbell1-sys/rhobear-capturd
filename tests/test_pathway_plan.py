@@ -796,7 +796,7 @@ def test_r3_expanded_matrix_limit_fails_before_navigation(monkeypatch):
 
 
 # W0-28-r4 exact base-host policy, off-loop resolver and bounded batch seams.
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 
 def test_r5_substring_label_never_binds():
@@ -1012,3 +1012,62 @@ def test_r6_legacy_asyncio_batch_timeouts_are_named_refusals(monkeypatch):
         plan_targets_from_map(
             _load("named-control-manifest.md"), "http://127.0.0.1:9", allow_loopback=True,
         )
+
+
+# W0-28-r7: same-head reachability, binding, redaction, and cache contracts.
+def test_r7_page_read_reachability_failure_warns_and_preserves_sibling(monkeypatch):
+    urls = ["https://example.com/a", "https://example.com/b"]
+    fake = _FakePlaywrightStack(html_by_url={urls[1]: "<html>sibling</html>"})
+    async def fail_first(page):
+        if page.url == urls[0]:
+            raise RuntimeError("raw /home/dev/secret detail")
+    fake.goto_hook = fail_first
+    fake.install(monkeypatch)
+    with pytest.warns(RuntimeWarning) as caught:
+        result = pathway_plan._load_pages_html(urls)
+    assert result == {urls[0]: "", urls[1]: "<html>sibling</html>"}
+    assert len(caught) == 1
+    assert str(caught[0].message) == (
+        "pathway page read failed (RuntimeError); affected controls stay unbound"
+    )
+    assert "/home/dev" not in str(caught[0].message)
+    fake.assert_all_closed()
+
+
+def test_r7_longest_exact_label_wins():
+    candidates = pathway_plan._plan_page(
+        '<button id="load">Load</button><button id="load-state">Load State</button>'
+    )
+    match = pathway_plan._match_control(["Load", "State", "button"], candidates)
+    assert match.selector == "#load-state"
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("file:/home/dev/x", "file:<path>"),
+    ("(/home/dev/x)", "(<path>)"),
+    (":/home/dev/x", ":<path>"),
+])
+def test_r7_posix_path_redaction_covers_prefixed_paths(text, expected):
+    assert pathway_plan._redact_host_paths(text) == expected
+
+
+def test_r7_plan_reader_reuses_navigation_cache(monkeypatch):
+    url = "https://example.com/page"
+    fake = _FakePlaywrightStack(html_by_url={url: "<html>ok</html>"})
+    fake.install(monkeypatch)
+    resolver = Mock(wraps=capture_mod._reject_navigation_url)
+    monkeypatch.setattr(capture_mod, "_reject_navigation_url", resolver)
+    cache = {}
+    result = pathway_plan._load_pages_html([url], navigation_cache=cache)
+    assert result == {url: "<html>ok</html>"}
+    assert resolver.call_count == 1
+
+    resolver.reset_mock()
+    checked = []
+    def reader(urls, **kwargs):
+        checked.append(kwargs)
+        return {item: "<html></html>" for item in urls}
+    monkeypatch.setattr(pathway_plan, "_load_pages_html", reader)
+    plan_targets_from_map(_single_named_control_map(), "https://example.com")
+    assert resolver.call_count == 0
+    assert isinstance(checked[0]["navigation_cache"], dict)
