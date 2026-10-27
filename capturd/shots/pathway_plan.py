@@ -107,14 +107,14 @@ _VIEW_FROM_FILE: dict[str, str] = {
 _ABS_URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 _SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:")
 _WINDOWS_PATH_RE = re.compile(r"^[a-zA-Z]:[\\/]|^\\\\")
-_HOST_PATH_TOKEN_RE = re.compile(r"[a-zA-Z]:[\\/][^\s\"'`]*|\\\\[^\s\"'`]*")
+_HOST_PATH_TOKEN_RE = re.compile(r"(?<!\w)[a-zA-Z]:[\\/][^\s\"'`]*|\\\\[^\s\"'`]*")
 # D94: POSIX host paths redact too. A token is a host path when it is an
 # absolute path of two or more segments that is rooted at a well-known host
 # root, or is file-shaped (a dot extension, optional :line[:col]). Depth
 # alone is never enough — a route path (/settings, /api/v1/state) is not a
 # host path and stays readable. The lookbehind keeps URLs (http://x/y) from
 # being read as paths.
-_POSIX_PATH_TOKEN_RE = re.compile(r"(?<![\w:./\\])/[^\s\"'`]+")
+_POSIX_PATH_TOKEN_RE = re.compile(r"(?<![\w./\\])/[^\s\"'`)\]]+")
 _POSIX_HOST_ROOTS = frozenset({
     "home", "users", "user", "root", "tmp", "var", "opt", "mnt", "media",
     "srv", "etc", "usr", "data", "work", "dev", "private", "applications",
@@ -126,6 +126,8 @@ _POSIX_FILE_SUFFIX_RE = re.compile(r"\.\w{1,12}(?::\d+(?::\d+)?)?$")
 
 def _posix_path_repl(match: re.Match[str]) -> str:
     token = match.group(0)
+    if token.startswith("//"):
+        return token
     segments = [seg for seg in token.strip("/").split("/") if seg]
     if len(segments) < 2:
         return token   # a single-segment path is a route, not a host path
@@ -361,12 +363,20 @@ def _match_control(tokens: list[str], candidates: list[Any]) -> Any | None:
         for candidate in candidates:
             if candidate.target and token == candidate.target:
                 return candidate
-    for token in tokens:
-        wanted = _norm_label(token)
-        if len(wanted) >= 3:
-            for candidate in candidates:
+    label_matches: list[tuple[int, int, Any]] = []
+    for token_index in range(len(tokens)):
+        for end in range(token_index + 1, len(tokens) + 1):
+            wanted = _norm_label(" ".join(tokens[token_index:end]))
+            if len(wanted) < 3:
+                continue
+            for candidate_index, candidate in enumerate(candidates):
                 if wanted == _norm_label(candidate.label):
-                    return candidate
+                    label_matches.append((token_index, candidate_index, candidate))
+    if label_matches:
+        return max(
+            label_matches,
+            key=lambda item: (len(_norm_label(item[2].label)), -item[0], -item[1]),
+        )[2]
     return None
 
 
@@ -388,6 +398,8 @@ def _reject_running_loop() -> None:
 
 def _load_pages_html(
     urls: list[str], *, allow_loopback: bool = False, loopback_host: str | None = None,
+    allow_private_hosts: tuple[str, ...] = (),
+    navigation_cache: dict[tuple[Any, ...], RestedCaptureError | None] | None = None,
 ) -> dict[str, str]:
     """Read the target pages' HTML through the real capture path — one batch.
 
@@ -412,6 +424,8 @@ def _load_pages_html(
     # Direct reader compatibility: only its first URL supplies the base host.
     if loopback_host is None and urls:
         loopback_host = urlparse(urls[0]).hostname
+    if navigation_cache is None:
+        navigation_cache = {}
 
     async def _read_all() -> dict[str, str]:
         try:
@@ -424,7 +438,10 @@ def _load_pages_html(
 
         html_by_url: dict[str, str] = {}
         for url in urls:
-            await _check_navigation_url(url, allow_loopback=allow_loopback, loopback_host=loopback_host)
+            await _check_navigation_url(
+                url, allow_loopback=allow_loopback, loopback_host=loopback_host,
+                allow_private_hosts=allow_private_hosts, cache=navigation_cache,
+            )
 
         async with async_playwright() as p:
             # allow_file_access is false: `file:` bases are refused at
@@ -435,6 +452,7 @@ def _load_pages_html(
                 # Before any page exists: every request, redirects included.
                 guard_errors = await _install_navigation_guard(
                     context, allow_loopback=allow_loopback, loopback_host=loopback_host,
+                    allow_private_hosts=allow_private_hosts, navigation_cache=navigation_cache,
                 )
                 for url in urls:
                     guard_errors.clear()
@@ -444,7 +462,10 @@ def _load_pages_html(
                             await page.goto(url, wait_until="domcontentloaded", timeout=PLAN_NAV_TIMEOUT_MS)
                             if guard_errors:
                                 raise guard_errors[0]
-                            await _check_navigation_url(page.url, allow_loopback=allow_loopback, loopback_host=loopback_host)
+                            await _check_navigation_url(
+                                page.url, allow_loopback=allow_loopback, loopback_host=loopback_host,
+                                allow_private_hosts=allow_private_hosts, cache=navigation_cache,
+                            )
                             html_by_url[url] = await page.content()
                         except RestedCaptureError:
                             raise
@@ -514,6 +535,7 @@ def plan_targets_from_map(
     scheme_count: int = 1,
     dry_run: bool = False,
     allow_loopback: bool = False,
+    allow_private_hosts: tuple[str, ...] = (),
 ) -> tuple[list[str], list[CaptureTarget]]:
     """Expand a parsed map into unique URLs and one target per capturable
     pathway.
@@ -567,14 +589,28 @@ def plan_targets_from_map(
 
     html_by_url: dict[str, str] = {}
     plans_by_url: dict[str, list[Any]] = {}
+    navigation_cache: dict[tuple[Any, ...], RestedCaptureError | None] = {}
 
     if not dry_run:
-        from .capture import _check_navigation_url
+        from .capture import _check_navigation_url, _unwrapped_address, is_private_ip
+
+        # Reader entry checks own these URLs; preflight only the others. A
+        # private literal is still checked here so a reader seam cannot bypass
+        # the plan's security invariant; the shared cache prevents a re-resolve.
+        needs_page = {url for url, _pathway, tokens in resolved if tokens}
+        read_urls = [url for url in urls if url in needs_page]
 
         async def _check_all() -> None:
             for url in urls:
-                await _check_navigation_url(url, allow_loopback=allow_loopback,
-                                            loopback_host=urlparse(base).hostname)
+                host = urlparse(url).hostname or ""
+                private_literal = _unwrapped_address(host) is not None and is_private_ip(host)
+                if url in read_urls and not private_literal:
+                    continue
+                await _check_navigation_url(
+                    url, allow_loopback=allow_loopback,
+                    loopback_host=urlparse(base).hostname,
+                    allow_private_hosts=allow_private_hosts, cache=navigation_cache,
+                )
 
         async def _bounded_checks() -> None:
             try:
@@ -585,11 +621,14 @@ def plan_targets_from_map(
         asyncio.run(_bounded_checks())
         # M-browser-lifecycle: ONE batch read for the whole plan — the unique
         # URLs that actually have named-control tokens.
-        needs_page = {url for url, _pathway, tokens in resolved if tokens}
-        read_urls = [url for url in urls if url in needs_page]
         if read_urls:
             try:
-                html_by_url.update(_load_pages_html(read_urls, allow_loopback=allow_loopback, loopback_host=urlparse(base).hostname))
+                html_by_url.update(_load_pages_html(
+                    read_urls, allow_loopback=allow_loopback,
+                    loopback_host=urlparse(base).hostname,
+                    allow_private_hosts=allow_private_hosts,
+                    navigation_cache=navigation_cache,
+                ))
             except RestedCaptureError:
                 # D94: a guard refusal is a security fact and refuses the
                 # plan — it is never the reachability best-effort below.

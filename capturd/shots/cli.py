@@ -16,13 +16,16 @@ decides whether a MAP-DRIVEN run is evidence — a legacy ``--urls`` /
 (a baseline-only run is 0, a failed job is 1, done-with-errors is 3) — and
 its reason code reaches this caller unchanged when a gate runs. Finished map
 runs refused by quality exit 4. Only CLI map inputs permit local map files and
-loopback navigation on the exact --base-url hostname; metadata remains refused.
-Remote callers pass map_text/manifest_text and default to no loopback permission.
+loopback navigation on the exact --base-url hostname. Legacy URL/sitemap/crawl/local
+capture permits loopback only on each target's exact host. Explicitly allowed private
+hosts are a separate exact-host opt-in; metadata always remains refused. Remote callers
+pass map_text/manifest_text and default to no loopback permission.
 """
 
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import sys
 import time
@@ -45,6 +48,35 @@ EXIT_QUALITY_FAIL = 4
 
 def _split(value: str | None) -> list[str]:
     return [item.strip() for item in (value or "").replace("\n", ",").split(",") if item.strip()]
+
+
+def _normalize_private_hosts(values: list[str]) -> tuple[str, ...]:
+    message = "allow-private-host must be a bare host or bracketed IPv6 literal"
+    hosts: list[str] = []
+    for value in values:
+        host = value.strip().lower()
+        if host.startswith("[") and host.endswith("]"):
+            literal = host[1:-1]
+            try:
+                if ipaddress.ip_address(literal).version != 6:
+                    raise ValueError
+            except ValueError:
+                raise RestedCaptureError(message) from None
+            host = literal
+        elif any(char in host for char in "[]"):
+            raise RestedCaptureError(message)
+        if (
+            not host
+            or any(char.isspace() for char in host)
+            or any(char in host for char in ":/?#@*")
+        ):
+            raise RestedCaptureError(message)
+        host = host.rstrip(".")
+        if not host:
+            raise RestedCaptureError(message)
+        if host not in hosts:
+            hosts.append(host)
+    return tuple(hosts)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -70,6 +102,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--base-url", metavar="URL",
                         help="Base URL the map's pathways resolve against - required with a map input; CLI permits loopback only on this exact host, never metadata")
+    parser.add_argument("--allow-private-host", metavar="HOST", action="append", default=[],
+                        help="Repeatable exact-host RFC1918/ULA/loopback opt-in; never permits metadata")
     parser.add_argument("--max-targets", type=int, default=MAX_TARGETS, metavar="N",
                         help="Refuse a map naming more than N capture targets (default %(default)s)")
     parser.add_argument("--dry-run", action="store_true",
@@ -172,6 +206,11 @@ def main(argv: list[str] | None = None) -> int:
     if map_input and not (args.base_url or "").strip():
         print("error: base_url is required with a pathway map - point Captur'd at the built HTML with --base-url", file=sys.stderr)
         return 2
+    try:
+        allow_private_hosts = _normalize_private_hosts(args.allow_private_host)
+    except RestedCaptureError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
     payload = {
         "urls": _split(args.urls) if args.urls else [],
@@ -206,13 +245,16 @@ def main(argv: list[str] | None = None) -> int:
             "map_text": args.map_text,
             "base_url": args.base_url,
             "max_targets": args.max_targets,
-            "_allow_map_files": True,
-            "_allow_loopback": True,
         })
 
+    capabilities = {
+        "allow_map_files": map_input,
+        "allow_loopback": map_input,
+        "allow_private_hosts": allow_private_hosts,
+    }
     if args.dry_run:
         try:
-            urls, targets, settings = build_capture_plan(payload)
+            urls, targets, settings = build_capture_plan(payload, **capabilities)
         except (RestedCaptureError, PathwayMapError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
@@ -220,7 +262,7 @@ def main(argv: list[str] | None = None) -> int:
 
     manager = RestedCaptureManager()
     try:
-        job = manager.start(payload)
+        job = manager.start(payload, **capabilities)
     except (RestedCaptureError, PathwayMapError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

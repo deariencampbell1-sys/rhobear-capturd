@@ -584,7 +584,8 @@ def test_r3_redirect_requests_use_loopback_only_guard(monkeypatch):
 
     checked_urls = [url for url, _flag in checked]
     assert "http://169.254.169.254/latest/meta-data" in checked_urls
-    assert "http://127.0.0.1:9/assets/app.js" in checked_urls
+    # The same-host subresource reuses the entry check's cached allow verdict.
+    assert "http://127.0.0.1:9/assets/app.js" not in checked_urls
     assert all(flag is True for url, flag in checked if url.startswith("http://127.0.0.1:9/"))
     assert ("http://169.254.169.254/latest/meta-data", False) in checked
     assert all(flag is False for url, flag in checked if "169.254.169.254" in url)

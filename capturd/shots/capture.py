@@ -44,6 +44,7 @@ MAX_SITEMAP_URLS = 1000
 MAX_CRAWL_URLS = 1000
 DEFAULT_TIMEOUT_MS = 30000
 TRIGGER_CLICK_TIMEOUT_MS = 2500
+TRIGGER_STATE_TIMEOUT_MS = 2500
 NAV_GUARD_TIMEOUT_S = 10
 DEFAULT_WAIT_MS = 600
 DEFAULT_CONCURRENCY = 3
@@ -368,23 +369,10 @@ def _unwrapped_address(ip: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address
     return mapped if mapped is not None else addr
 
 
-def _reject_private_url(url: str, *, allow_loopback: bool = False) -> None:
-    """Raise RestedCaptureError if *url* resolves to a private/internal IP address.
-
-    Uses the shared canonical guard in :mod:`capturd._net` (stdlib
-    ``ipaddress``-based: fails closed on unparseable input and unwraps
-    IPv6-mapped IPv4) so this fetch surface can't drift from the service and
-    MCP ones — the hand-rolled copy here used to miss IPv6-mapped IPv4 cloud
-    metadata addresses like ``::ffff:169.254.169.254``.
-
-    ``allow_loopback`` is the ONE named exception to the private-range
-    refusal (H1): a plan-time page read against a local dev server is the
-    seam's primary use case, so the pathway page reader opts in and loopback
-    — and only loopback, IPv4 or IPv6 or IPv4-mapped — is skipped. Every
-    other caller (the fetch surface, sitemaps, the service and MCP paths)
-    keeps the default and refuses loopback like any other private address.
-    Every other refusal and error string is unchanged.
-    """
+def _reject_private_url(
+    url: str, *, allow_loopback: bool = False, allow_private_peer: bool = False,
+) -> None:
+    """Refuse private/internal peers, with narrow explicit local exceptions."""
     host = urlparse(url).hostname
     if not host:
         raise RestedCaptureError("could not parse host from url")
@@ -396,34 +384,99 @@ def _reject_private_url(url: str, *, allow_loopback: bool = False) -> None:
         ip = sockaddr[0]
         if is_private_ip(ip):
             unwrapped = _unwrapped_address(ip)
-            if allow_loopback and unwrapped is not None and unwrapped.is_loopback:
-                continue
+            if unwrapped is not None:
+                private_lan = (
+                    unwrapped.is_loopback
+                    or (
+                        unwrapped.version == 4
+                        and any(
+                            unwrapped in ipaddress.ip_network(network)
+                            for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+                        )
+                    )
+                    or (
+                        unwrapped.version == 6
+                        and unwrapped in ipaddress.ip_network("fc00::/7")
+                    )
+                )
+                if (
+                    (allow_loopback and unwrapped.is_loopback)
+                    or (allow_private_peer and private_lan)
+                ):
+                    continue
+                if (
+                    unwrapped.is_link_local
+                    or unwrapped.is_reserved
+                    or unwrapped.is_multicast
+                    or unwrapped.is_unspecified
+                ):
+                    raise RestedCaptureError(
+                        f"url resolves to a private/internal IP ({ip}) — not allowed"
+                    )
             raise RestedCaptureError(f"url resolves to a private/internal IP ({ip}) — not allowed")
+
+
+def _canonical_host(host: str | None) -> str:
+    return (host or "").strip().lower().rstrip(".")
 
 
 def _reject_navigation_url(
     url: str, *, allow_loopback: bool, loopback_host: str | None,
+    allow_private_hosts: tuple[str, ...] = (),
 ) -> None:
     # Preserve local-file capture; only HTTP(S) requests have DNS/IP policy.
     if urlparse(url).scheme.lower() not in {"http", "https"}:
         return
-    host = (urlparse(url).hostname or "").lower()
-    permitted = bool(allow_loopback and loopback_host and host == loopback_host.lower())
-    _reject_private_url(url, allow_loopback=permitted)
+    host = _canonical_host(urlparse(url).hostname)
+    permitted = bool(
+        allow_loopback and loopback_host and host == _canonical_host(loopback_host)
+    )
+    private_permitted = host in {
+        _canonical_host(allowed) for allowed in allow_private_hosts
+    }
+    private_kwargs = {"allow_private_peer": True} if private_permitted else {}
+    _reject_private_url(url, allow_loopback=permitted, **private_kwargs)
 
 
-async def _check_navigation_url(url: str, *, allow_loopback: bool, loopback_host: str | None) -> None:
+async def _check_navigation_url(
+    url: str, *, allow_loopback: bool, loopback_host: str | None,
+    allow_private_hosts: tuple[str, ...] = (),
+    cache: dict[tuple[Any, ...], RestedCaptureError | None] | None = None,
+) -> None:
+    parsed = urlparse(url)
+    key = (
+        parsed.scheme.lower(), _canonical_host(parsed.hostname), allow_loopback,
+        _canonical_host(loopback_host),
+        tuple(_canonical_host(host) for host in allow_private_hosts),
+    )
+    if cache is not None and key in cache:
+        cached = cache[key]
+        if cached is not None:
+            raise cached
+        return
+    resolver_kwargs = {
+        "allow_loopback": allow_loopback, "loopback_host": loopback_host,
+    }
+    if allow_private_hosts:
+        resolver_kwargs["allow_private_hosts"] = allow_private_hosts
     try:
         await asyncio.wait_for(asyncio.to_thread(
-            _reject_navigation_url, url,
-            allow_loopback=allow_loopback, loopback_host=loopback_host,
+            _reject_navigation_url, url, **resolver_kwargs,
         ), timeout=NAV_GUARD_TIMEOUT_S)
+    except RestedCaptureError as exc:
+        if cache is not None:
+            cache[key] = exc
+        raise
     except (asyncio.TimeoutError, TimeoutError):
         raise RestedCaptureError("navigation URL check timed out") from None
+    if cache is not None:
+        cache[key] = None
 
 
 async def _install_navigation_guard(
     context: Any, *, allow_loopback: bool, loopback_host: str | None,
+    allow_private_hosts: tuple[str, ...] = (),
+    navigation_cache: dict[tuple[Any, ...], RestedCaptureError | None] | None = None,
     guard_errors: list[RestedCaptureError] | None = None,
 ) -> list[RestedCaptureError]:
     """Check requests before Chromium connects; retain the first refusal.
@@ -437,8 +490,11 @@ async def _install_navigation_guard(
 
     async def guard(route: Any) -> None:
         try:
-            await _check_navigation_url(route.request.url, allow_loopback=allow_loopback,
-                                        loopback_host=loopback_host)
+            await _check_navigation_url(
+                route.request.url, allow_loopback=allow_loopback,
+                loopback_host=loopback_host, allow_private_hosts=allow_private_hosts,
+                cache=navigation_cache,
+            )
         except Exception as exc:
             original_class = type(exc).__name__
             if not isinstance(exc, RestedCaptureError):
@@ -908,10 +964,19 @@ def discover_site_urls(
     }
 
 
-def build_capture_plan(payload: dict[str, Any]) -> tuple[list[str], list[CaptureTarget], dict[str, Any]]:
+def build_capture_plan(
+    payload: dict[str, Any], *, allow_map_files: bool = False,
+    allow_loopback: bool = False, allow_private_hosts: tuple[str, ...] = (),
+) -> tuple[list[str], list[CaptureTarget], dict[str, Any]]:
+    if type(allow_map_files) is not bool:
+        raise RestedCaptureError("allow_map_files must be a bool from the call site")
+    if type(allow_loopback) is not bool:
+        raise RestedCaptureError("allow_loopback must be a bool from the call site")
+    if any(key in payload for key in ("_allow_map_files", "_allow_loopback", "_allow_private_hosts")):
+        raise RestedCaptureError("_allow_* capabilities are call-site arguments, not payload keys")
+    allow_private_hosts = tuple(_canonical_host(host) for host in allow_private_hosts)
+
     # The input seam: exactly one of the plain URL family or one map input.
-    # Zero or two sources is the same named refusal load_pathway_map makes —
-    # PathwayMapError, never a raw ValueError.
     map_inputs = [
         ("manifest_path", payload.get("manifest_path")),
         ("map_path", payload.get("map_path")),
@@ -934,11 +999,7 @@ def build_capture_plan(payload: dict[str, Any]) -> tuple[list[str], list[Capture
     url_declared = any(payload.get(key) is not None for key in url_keys)
     source_names = (["url"] if url_supplied else []) + supplied_maps
     if not source_names:
-        if url_declared:
-            raise RestedCaptureError("add at least one URL")
-        raise PathwayMapError(
-            "a pathway map is required — paste the manifest markdown (or pass a file)"
-        )
+        raise RestedCaptureError("add at least one URL")
     if len(source_names) > 1:
         raise PathwayMapError(
             "provide a manifest or a map, not both — got " + ", ".join(sorted(source_names))
@@ -948,44 +1009,49 @@ def build_capture_plan(payload: dict[str, Any]) -> tuple[list[str], list[Capture
     # pair free of an import cycle.
     from .pathway_plan import MAX_TARGETS, plan_targets_from_map
 
-    try:
-        max_targets = int(payload.get("max_targets", MAX_TARGETS))
-    except (TypeError, ValueError):
-        raise RestedCaptureError("max_targets must be a number") from None
-    if max_targets < 1:
-        raise RestedCaptureError("max_targets must be at least 1")
+    max_targets = MAX_TARGETS
+    if supplied_maps:
+        try:
+            max_targets = int(payload.get("max_targets", MAX_TARGETS))
+        except (TypeError, ValueError):
+            raise RestedCaptureError("max_targets must be a number") from None
+        if max_targets < 1:
+            raise RestedCaptureError("max_targets must be at least 1")
 
-    # The matrix is normalised and validated BEFORE any planning/navigation:
-    # the expanded target ceiling below needs the real viewport and scheme
-    # counts up front, and every current validation message is retained.
-    viewport_ids = payload.get("viewports") or list(DEFAULT_VIEWPORTS)
-    if not isinstance(viewport_ids, list):
-        raise RestedCaptureError("viewports must be a list")
-    viewport_ids = [str(v).strip().lower() for v in viewport_ids if str(v).strip()]
-    if not viewport_ids:
-        raise RestedCaptureError("choose at least one viewport")
-    for viewport_id in viewport_ids:
-        if not DEFAULT_VIEWPORTS.get(viewport_id):
-            raise RestedCaptureError(f"unknown viewport: {viewport_id}")
+    def capture_matrix() -> tuple[list[str], list[str]]:
+        viewport_ids = payload.get("viewports") or list(DEFAULT_VIEWPORTS)
+        if not isinstance(viewport_ids, list):
+            raise RestedCaptureError("viewports must be a list")
+        viewport_ids = [str(v).strip().lower() for v in viewport_ids if str(v).strip()]
+        if not viewport_ids:
+            raise RestedCaptureError("choose at least one viewport")
+        for viewport_id in viewport_ids:
+            if not DEFAULT_VIEWPORTS.get(viewport_id):
+                raise RestedCaptureError(f"unknown viewport: {viewport_id}")
 
-    schemes = payload.get("schemes") or list(DEFAULT_SCHEMES)
-    if isinstance(schemes, str):
-        schemes = [schemes]
-    if not isinstance(schemes, list):
-        raise RestedCaptureError("schemes must be a list")
-    schemes = [str(s).strip().lower() for s in schemes if str(s).strip()]
-    if not schemes:
-        raise RestedCaptureError("choose at least one color scheme")
-    for scheme in schemes:
-        if scheme not in {"light", "dark", "no-preference"}:
-            raise RestedCaptureError(f"unknown color scheme: {scheme}")
+        schemes = payload.get("schemes") or list(DEFAULT_SCHEMES)
+        if isinstance(schemes, str):
+            schemes = [schemes]
+        if not isinstance(schemes, list):
+            raise RestedCaptureError("schemes must be a list")
+        schemes = [str(s).strip().lower() for s in schemes if str(s).strip()]
+        if not schemes:
+            raise RestedCaptureError("choose at least one color scheme")
+        for scheme in schemes:
+            if scheme not in {"light", "dark", "no-preference"}:
+                raise RestedCaptureError(f"unknown color scheme: {scheme}")
+        return viewport_ids, schemes
+
+    # Map mode validates before planning; legacy validates after discovery.
+    if supplied_maps:
+        viewport_ids, schemes = capture_matrix()
 
     pathway_targets: list[CaptureTarget] | None = None
     if supplied_maps:
         base_url = str(payload.get("base_url") or "").strip()
         if not base_url:
             raise RestedCaptureError("base_url is required when feeding a pathway map")
-        if any(payload.get(key) is not None for key in ("manifest_path", "map_path")) and payload.get("_allow_map_files") is not True:
+        if any(payload.get(key) is not None for key in ("manifest_path", "map_path")) and not allow_map_files:
             raise RestedCaptureError("map file paths are CLI-only; pass map_text or manifest_text")
         pathway_map = load_pathway_map(
             manifest_path=payload.get("manifest_path"),
@@ -1004,7 +1070,8 @@ def build_capture_plan(payload: dict[str, Any]) -> tuple[list[str], list[Capture
             # D92: a dry-run plan is built with no navigation and no network
             # call — never a page read to bind a named control.
             dry_run=bool(payload.get("dry_run")),
-            allow_loopback=bool(payload.get("_allow_loopback")),
+            allow_loopback=allow_loopback,
+            allow_private_hosts=allow_private_hosts,
         )
         crawl_enabled = False
         local_enabled = False
@@ -1059,6 +1126,7 @@ def build_capture_plan(payload: dict[str, Any]) -> tuple[list[str], list[Capture
             raise RestedCaptureError("add at least one URL")
         if len(urls) > MAX_URLS:
             raise RestedCaptureError(f"too many URLs; maximum is {MAX_URLS}")
+        viewport_ids, schemes = capture_matrix()
 
     targets: list[CaptureTarget] = []
     if pathway_targets is not None:
@@ -1144,14 +1212,12 @@ def build_capture_plan(payload: dict[str, Any]) -> tuple[list[str], list[Capture
                     })
 
     settings = {
-        "allow_loopback": (
-            bool(payload.get("_allow_loopback")) if supplied_maps else True
-        ),
+        "allow_loopback": allow_loopback if supplied_maps else True,
         "loopback_host": (
-            urlparse(base_url).hostname
-            if supplied_maps and payload.get("_allow_loopback")
-            else None
+            urlparse(base_url).hostname if supplied_maps and allow_loopback else None
         ),
+        "allow_private_hosts": allow_private_hosts,
+        "_navigation_cache": {},
         "format": str(payload.get("format") or "png").lower(),
         "full_page": bool(payload.get("full_page", True)),
         "timeout_ms": int(payload.get("timeout_ms") or DEFAULT_TIMEOUT_MS),
@@ -1386,7 +1452,15 @@ async def _apply_trigger(page: Any, selector: str, wait_ms: int) -> bool:
         await element.click(timeout=TRIGGER_CLICK_TIMEOUT_MS)
         await _settle_page(page, wait_ms)
         after = await page.evaluate(_FINGERPRINT_JS)
-        return page.url != before_url or after != before
+        if page.url != before_url or after != before:
+            return True
+        deadline = time.monotonic() + TRIGGER_STATE_TIMEOUT_MS / 1000
+        while time.monotonic() < deadline:
+            await page.wait_for_timeout(100)
+            after = await page.evaluate(_FINGERPRINT_JS)
+            if page.url != before_url or after != before:
+                return True
+        return False
     except Exception as exc:
         warnings.warn(f"capture trigger failed ({type(exc).__name__}); trigger_fired=False",
                       RuntimeWarning, stacklevel=2)
@@ -1400,14 +1474,18 @@ async def _capture_one(
     started = time.perf_counter()
     attempts = max(1, int(settings.get("retries", DEFAULT_RETRIES)) + 1)
     last_error = ""
+    navigation_cache = settings.get("_navigation_cache")
+    if navigation_cache is None:
+        navigation_cache = {}
+        settings["_navigation_cache"] = navigation_cache
+    allow_private_hosts = tuple(settings.get("allow_private_hosts") or ())
     for attempt in range(1, attempts + 1):
         page = None
         allow_loopback = bool(settings.get("allow_loopback"))
         loopback_host = settings.get("loopback_host")
         if allow_loopback and loopback_host is None:
             loopback_host = urlparse(target.url).hostname
-        page_errors = guard_errors if guard_errors is not None else []
-        page_errors.clear()
+        page_errors: list[RestedCaptureError] = []
         try:
             timeout_ms = int(settings["timeout_ms"])
             if attempt > 1:
@@ -1415,11 +1493,13 @@ async def _capture_one(
             page = await context.new_page()
             await _install_navigation_guard(
                 page, allow_loopback=allow_loopback, loopback_host=loopback_host,
-                guard_errors=page_errors,
+                allow_private_hosts=allow_private_hosts,
+                navigation_cache=navigation_cache, guard_errors=page_errors,
             )
             page.set_default_timeout(timeout_ms)
             await _check_navigation_url(
                 target.url, allow_loopback=allow_loopback, loopback_host=loopback_host,
+                allow_private_hosts=allow_private_hosts, cache=navigation_cache,
             )
             if page_errors:
                 raise page_errors[0]
@@ -1428,6 +1508,7 @@ async def _capture_one(
                 raise page_errors[0]
             await _check_navigation_url(
                 page.url, allow_loopback=allow_loopback, loopback_host=loopback_host,
+                allow_private_hosts=allow_private_hosts, cache=navigation_cache,
             )
             try:
                 await page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 15000))
@@ -1449,6 +1530,7 @@ async def _capture_one(
                 raise page_errors[0]
             await _check_navigation_url(
                 page.url, allow_loopback=allow_loopback, loopback_host=loopback_host,
+                allow_private_hosts=allow_private_hosts, cache=navigation_cache,
             )
             await page.screenshot(**screenshot_kwargs)
             stat = path.stat()
@@ -1474,7 +1556,12 @@ async def _capture_one(
                 "elapsed_ms": int((time.perf_counter() - started) * 1000),
             }
         except Exception as exc:
-            last_error = str(page_errors[0] if page_errors else exc)
+            selected_error = (
+                page_errors[0] if page_errors
+                else guard_errors[0] if guard_errors
+                else exc
+            )
+            last_error = str(selected_error)
             if attempt < attempts:
                 await asyncio.sleep(0.35)
         finally:
@@ -1634,8 +1721,14 @@ class RestedCaptureManager:
         self._lock = threading.Lock()
         self._jobs: dict[str, dict[str, Any]] = {}
 
-    def start(self, payload: dict[str, Any]) -> dict[str, Any]:
-        urls, targets, settings = build_capture_plan(payload)
+    def start(
+        self, payload: dict[str, Any], *, allow_map_files: bool = False,
+        allow_loopback: bool = False, allow_private_hosts: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        urls, targets, settings = build_capture_plan(
+            payload, allow_map_files=allow_map_files, allow_loopback=allow_loopback,
+            allow_private_hosts=allow_private_hosts,
+        )
         job_id = uuid.uuid4().hex[:12]
         job_name = _slug(str(payload.get("name") or "") or _job_name(), _job_name())
         work_dir = self.root_dir / job_id

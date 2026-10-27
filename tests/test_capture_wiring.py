@@ -1174,6 +1174,7 @@ async def test_r7_navigation_checks_cache_by_host_and_policy(monkeypatch):
     with pytest.raises(RestedCaptureError, match="cached refusal"):
         await capture._check_navigation_url("https://example.com/b", cache=cache, **kwargs)
     assert resolver.call_count == 2
+    resolver.side_effect = None
     await capture._check_navigation_url(
         "https://example.com/c", cache=cache,
         allow_loopback=True, loopback_host="example.com", allow_private_hosts=(),
