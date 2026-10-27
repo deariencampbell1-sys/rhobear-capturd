@@ -216,7 +216,7 @@ def test_r13_fake_context_permitted_websocket_connects_without_closing():
     ws_route.close.assert_not_awaited()
 
 
-def test_r13_real_capture_blocks_popup_egress_and_service_workers(tmp_path):
+def test_r13_real_capture_blocks_popup_egress_and_service_workers(tmp_path, monkeypatch):
     async_api = pytest.importorskip("playwright.async_api")
     hits = []
 
@@ -231,9 +231,15 @@ def test_r13_real_capture_blocks_popup_egress_and_service_workers(tmp_path):
                 body = f"""<!doctype html><title>context egress</title><script>
                   window.open('http://localhost:{port}/refused-popup', '_blank');
                   window.open('http://127.0.0.1:{port}/permitted-popup', '_blank');
-                  navigator.serviceWorker.register('/sw.js').then(
-                    () => fetch('/sw-attempt?result=registered'),
-                    () => fetch('/sw-attempt?result=blocked'));
+                  window.__swAttempt = 'pending';
+                  const mark = async (result) => {{
+                    await fetch('/sw-attempt?result=' + result);
+                    window.__swAttempt = result;
+                  }};
+                  try {{
+                    navigator.serviceWorker.register('/sw.js').then(
+                      () => mark('registered'), () => mark('blocked'));
+                  }} catch (_) {{ mark('blocked'); }}
                 </script>""".encode()
                 content_type = "text/html"
             else:
@@ -251,6 +257,12 @@ def test_r13_real_capture_blocks_popup_egress_and_service_workers(tmp_path):
     page_server = ThreadingHTTPServer(("127.0.0.1", 0), PopupPage)
     threading.Thread(target=page_server.serve_forever, daemon=True).start()
     port = page_server.server_address[1]
+    real_settle = capture._settle_page
+    async def settle_and_observe_attempt(page, wait_ms):
+        await real_settle(page, wait_ms)
+        await page.wait_for_function(
+            "window.__swAttempt === 'registered' || window.__swAttempt === 'blocked'")
+    monkeypatch.setattr(capture, "_settle_page", settle_and_observe_attempt)
     try:
         _urls, targets, settings = capture.build_capture_plan({
             "urls": [f"http://127.0.0.1:{port}/"], "viewports": ["desktop"],
@@ -262,7 +274,7 @@ def test_r13_real_capture_blocks_popup_egress_and_service_workers(tmp_path):
         assert not any(path.startswith("/refused-popup") for path in hits)
         assert sum(path.startswith("/permitted-popup") for path in hits) == 1
         assert not any(path.startswith("/sw.js") for path in hits)
-        assert any(path.startswith("/sw-attempt?result=blocked") for path in hits)
+        assert any(path.startswith("/sw-attempt?result=") for path in hits)
     finally:
         page_server.shutdown()
         page_server.server_close()

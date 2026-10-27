@@ -373,6 +373,11 @@ def _unwrapped_address(ip: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address
     return mapped if mapped is not None else addr
 
 
+def _getaddrinfo(host: str, port: int | None = None, *args, **kwargs):
+    """Capture-local DNS seam; tests patch this wrapper, never socket globally."""
+    return socket.getaddrinfo(host, port, *args, **kwargs)
+
+
 def _reject_private_url(
     url: str, *, allow_loopback: bool = False, allow_private_peer: bool = False,
 ) -> None:
@@ -381,7 +386,7 @@ def _reject_private_url(
     if not host:
         raise RestedCaptureError("could not parse host from url")
     try:
-        addrinfo = socket.getaddrinfo(host, None)
+        addrinfo = _getaddrinfo(host, None)
     except socket.gaierror as exc:
         raise RestedCaptureError(f"hostname not found: {exc}") from exc
     for family, _type, _proto, _canon, sockaddr in addrinfo:
@@ -449,6 +454,10 @@ async def _check_navigation_url(
     if cache is not None and key in cache:
         # Refusals are fail-closed and reusable. Successful verdicts are never
         # cached: every allowed request re-resolves to narrow DNS rebinding.
+        # Measured cost: one document plus 40 same-origin subresources performs
+        # 41 resolver calls. Very large pages can queue many asyncio.to_thread
+        # jobs and contend for the bounded default executor, delaying other
+        # users and approaching the 10-second guard timeout under slow DNS.
         raise cache[key]
     resolver_kwargs = {
         "allow_loopback": allow_loopback, "loopback_host": loopback_host,
@@ -1299,11 +1308,14 @@ async def _settle_page(page: Any, wait_ms: int) -> None:
     await page.wait_for_timeout(wait_ms)
 
 
-def _target_context_key(target: CaptureTarget) -> tuple[str, str, int, int, str]:
+def _target_context_key(target: CaptureTarget) -> tuple[str, str, str, int, int, str]:
     parsed = urlparse(target.url)
     if parsed.scheme == "file":
-        return ("local-file", target.viewport_id, target.width, target.height, target.scheme)
-    return (_site_host_key(parsed.hostname), target.viewport_id, target.width, target.height, target.scheme)
+        return ("local-file", "", target.viewport_id, target.width, target.height, target.scheme)
+    return (
+        _site_host_key(parsed.hostname), _canonical_host(parsed.hostname),
+        target.viewport_id, target.width, target.height, target.scheme,
+    )
 
 
 # ── deterministic state sweep ────────────────────────────────────────────────
@@ -1530,8 +1542,14 @@ async def _capture_one(
             await page.goto(target.url, wait_until="domcontentloaded", timeout=timeout_ms)
             if page_errors:
                 raise page_errors[0]
+            post_goto_url = page.url
+            if (
+                page.url == "about:blank"
+                or urlparse(page.url).scheme.lower() in {"data", "blob"}
+            ):
+                post_goto_url = target.url
             await _check_navigation_url(
-                page.url, allow_loopback=allow_loopback, loopback_host=loopback_host,
+                post_goto_url, allow_loopback=allow_loopback, loopback_host=loopback_host,
                 allow_private_hosts=allow_private_hosts, allow_file_access=allow_file_access,
                 cache=navigation_cache,
             )
@@ -1541,7 +1559,7 @@ async def _capture_one(
                 pass
             await _settle_page(page, settings["wait_ms"])
             trigger_fired = False
-            post_trigger_url = page.url
+            post_trigger_url = post_goto_url
             if (target.trigger_selector or "").strip():
                 pre_trigger_url = page.url
                 trigger_fired = await _apply_trigger(page, target.trigger_selector, settings["wait_ms"])
@@ -1570,7 +1588,13 @@ async def _capture_one(
             stat = path.stat()
             extra_states: list[dict[str, Any]] = []
             if settings.get("states"):
-                extra_states = await _sweep_states(page, target, settings, path)
+                for state in await _sweep_states(page, target, settings, path):
+                    if isinstance(state, dict) and isinstance(state.get("error"), str):
+                        state = {
+                            **state,
+                            "error": _redact_settings_secrets(state["error"], settings),
+                        }
+                    extra_states.append(state)
             if page_errors:
                 raise page_errors[0]
             return {
@@ -1656,7 +1680,7 @@ async def _run_capture_async(
     async with async_playwright() as p:
         allow_file_access = any(urlparse(target.url).scheme == "file" for target in targets)
         browser = await _launch_browser(p, allow_file_access=allow_file_access)
-        contexts: dict[tuple[str, str, int, int, str], Any] = {}
+        contexts: dict[tuple[str, str, str, int, int, str], Any] = {}
         context_lock = asyncio.Lock()
 
         async def context_for(target: CaptureTarget) -> Any:
@@ -1671,6 +1695,16 @@ async def _run_capture_async(
                         device_scale_factor=1,
                         locale="en-US",
                         user_agent=USER_AGENT,
+                        service_workers="block",
+                    )
+                    allow_loopback = bool(settings.get("allow_loopback"))
+                    loopback_host = settings.get("loopback_host")
+                    if allow_loopback and loopback_host is None:
+                        loopback_host = urlparse(target.url).hostname
+                    await _install_navigation_guard(
+                        context, allow_loopback=allow_loopback, loopback_host=loopback_host,
+                        allow_private_hosts=tuple(settings.get("allow_private_hosts") or ()),
+                        allow_file_access=allow_file_access, navigation_cache=navigation_cache,
                     )
                     # Signed-in capture: without cookies the batch can only ever shoot
                     # what a logged-out visitor sees, so authenticated products are

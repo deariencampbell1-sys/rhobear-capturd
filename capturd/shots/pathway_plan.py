@@ -445,7 +445,7 @@ def _load_pages_html(
             browser = await _launch_browser(p, allow_file_access=False)
             context = None
             try:
-                context = await browser.new_context()
+                context = await browser.new_context(service_workers="block")
                 # Before any page exists: every request, redirects included.
                 guard_errors = await _install_navigation_guard(
                     context, allow_loopback=allow_loopback, loopback_host=loopback_host,

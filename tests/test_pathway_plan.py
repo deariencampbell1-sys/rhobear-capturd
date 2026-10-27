@@ -505,7 +505,7 @@ def test_r3_loopback_plan_read_is_allowed(monkeypatch, _offline_test_dns):
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0)),
         ]
 
-    monkeypatch.setattr("capturd.shots.capture.socket.getaddrinfo", _mixed_loopback)
+    monkeypatch.setattr("capturd.shots.capture._getaddrinfo", _mixed_loopback)
     capture_mod._reject_private_url("http://mixed.test/", allow_loopback=True)
 
     def _mixed_private(host, port=None):
@@ -514,12 +514,12 @@ def test_r3_loopback_plan_read_is_allowed(monkeypatch, _offline_test_dns):
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.1", 0)),
         ]
 
-    monkeypatch.setattr("capturd.shots.capture.socket.getaddrinfo", _mixed_private)
+    monkeypatch.setattr("capturd.shots.capture._getaddrinfo", _mixed_private)
     with pytest.raises(RestedCaptureError):
         capture_mod._reject_private_url("http://mixed.test/", allow_loopback=True)
 
     # End mixed-answer scenarios before the real entry URL check.
-    monkeypatch.setattr("capturd.shots.capture.socket.getaddrinfo", _offline_test_dns)
+    monkeypatch.setattr("capturd.shots.capture._getaddrinfo", _offline_test_dns)
     # and a plan against a loopback base binds normally from a stubbed batch read
     monkeypatch.setattr(
         "capturd.shots.pathway_plan._load_pages_html",
@@ -652,6 +652,7 @@ def test_r3_one_browser_reads_all_named_control_pages(monkeypatch):
     assert fake.entries == 1, "exactly one Playwright driver per plan"
     assert fake.launches == 1, "exactly one browser launch per plan"
     assert fake.contexts_created == 1, "exactly one context per plan"
+    assert fake.context_options == {"service_workers": "block"}
     assert fake.pages_created == 2, "one page per URL, sequential in the context"
     for page in fake.pages:
         assert len(page.goto_calls) == 1
@@ -873,7 +874,7 @@ def test_r5_dns_timeout_aborts_instead_of_continuing(monkeypatch):
 def test_r5_dry_run_skips_dns_checks(monkeypatch):
     def forbidden(*args, **kwargs):
         raise AssertionError("dry-run resolved DNS")
-    monkeypatch.setattr(capture_mod.socket, "getaddrinfo", forbidden)
+    monkeypatch.setattr(capture_mod, "_getaddrinfo", forbidden)
     _urls, targets = plan_targets_from_map(_load("named-control-manifest.md"), "http://base.test", dry_run=True)
     assert len(targets) == 2
 
@@ -1074,7 +1075,7 @@ def test_r9_browser_closes_when_context_creation_fails(monkeypatch):
     fake = _FakePlaywrightStack()
     fake.install(monkeypatch)
 
-    async def fail_new_context(self):
+    async def fail_new_context(self, **kwargs):
         self._fake.contexts_created += 1
         raise RuntimeError("context creation failed")
 

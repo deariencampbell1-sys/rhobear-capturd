@@ -25,5 +25,5 @@ def _offline_test_dns(monkeypatch):
         sockaddr = (str(address), port or 0, 0, 0) if address.version == 6 else (str(address), port or 0)
         return [(family, socket.SOCK_STREAM, 6, "", sockaddr)]
 
-    monkeypatch.setattr("capturd.shots.capture.socket.getaddrinfo", resolve)
+    monkeypatch.setattr("capturd.shots.capture._getaddrinfo", resolve)
     return resolve

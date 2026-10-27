@@ -126,16 +126,23 @@ job = mgr.start({"crawl": True, "crawl_url": "https://example.com",
                  "viewports": ["desktop", "mobile"], "schemes": ["light", "dark"]})
 ```
 
+For one page, the singular `url` payload key is an alternative to `urls`, for example
+`mgr.start({"url": "https://example.com"})`. The exactly-one-source rule still applies:
+do not combine `url`, `urls`, map, sitemap, crawl, or local inputs.
+
 Captures run behind a default-deny navigation guard (HTTP and WebSocket):
 loopback, private and link-local hosts are refused. To capture a local dev
 server from code, pass the capability at the call site, e.g.
 `mgr.start(payload, allow_loopback=True)` (the target's own host only) or
 `allow_private_hosts=["172.17.0.1"]` (a list of exact hosts, never a string).
+The guard is installed on the whole browser context before capture creates a page,
+so popup requests receive the same policy; service workers are blocked. Each target's
+exact loopback host is part of context reuse, preventing sibling-host permission leaks.
 
 ## Requirements
 
 - Python **3.10+**
-- **Playwright** + Chromium (`python -m playwright install chromium`).
+- **Playwright >=1.48** + Chromium (`python -m playwright install chromium`). `BrowserContext.route_web_socket` is required; capture refuses loudly when it is unavailable.
 - For `walk` mode: a RHOBEAR Vertex Gateway token (`RHOBEAR_GW_API_KEY`) — walkthrough narration
   and camera choreography go through the family gateway. No API keys checked into source.
 - For `walk` MP4 export: `ffmpeg` on PATH.

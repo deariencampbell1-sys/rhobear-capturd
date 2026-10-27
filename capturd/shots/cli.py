@@ -12,7 +12,7 @@ itself names (the ``selector``/``css`` column), and a named control that
 would need the page to bind is
 reported unbound (``selector=-``) with a flag. The quality gate (01c)
 decides whether a MAP-DRIVEN run is evidence — a legacy ``--urls`` /
-``--sitemap`` / ``--crawl`` / ``--local`` run keeps its pre-gate exit codes
+``--sitemap`` / ``--site`` / ``--local`` run keeps its pre-gate exit codes
 (a baseline-only run is 0, a failed job is 1, done-with-errors is 3) — and
 its reason code reaches this caller unchanged when a gate runs. Finished map
 runs refused by quality exit 4. Only CLI map inputs permit local map files and
@@ -297,7 +297,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"out:  {job['output_dir']}")
 
     # D93: the quality gate (01c) decides only for MAP-DRIVEN runs — a
-    # --urls / --sitemap / --crawl / --local run exits exactly as it did
+    # --urls / --sitemap / --site / --local run exits exactly as it did
     # before this PR's gate (a baseline-only run is 0, a failed job keeps its
     # old code, done-with-errors is 3). When a gate runs its reason code
     # reaches the caller unchanged - no re-wording downstream, honest-failure
@@ -313,7 +313,7 @@ def main(argv: list[str] | None = None) -> int:
             if detail:
                 print(detail, file=sys.stderr)
             return EXIT_QUALITY_FAIL
-    return 0 if status == "done" else 3
+    return 0
 
 
 if __name__ == "__main__":

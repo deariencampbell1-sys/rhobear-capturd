@@ -938,7 +938,8 @@ async def test_r6_document_refusal_does_not_poison_sibling_page(tmp_path, monkey
     assert good["status"] == "ok"
     assert (tmp_path / good["file"]).stat().st_size > 0
     assert not (tmp_path / capture._capture_file_name(targets[0], settings["format"])).exists()
-    assert context.route.await_count <= 1
+    context.route.assert_awaited_once()
+    context.route_web_socket.assert_awaited_once()
 
 
 @pytest.mark.asyncio
