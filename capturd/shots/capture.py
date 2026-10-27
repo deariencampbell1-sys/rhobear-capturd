@@ -45,7 +45,6 @@ MAX_CRAWL_URLS = 1000
 DEFAULT_TIMEOUT_MS = 30000
 TRIGGER_CLICK_TIMEOUT_MS = 2500
 TRIGGER_STATE_TIMEOUT_MS = 2500
-TRIGGER_STATE_POLL_LIMIT = 5
 NAV_GUARD_TIMEOUT_S = 10
 DEFAULT_WAIT_MS = 600
 DEFAULT_CONCURRENCY = 3
@@ -443,11 +442,10 @@ async def _check_navigation_url(
         _canonical_host(loopback_host),
         tuple(_canonical_host(host) for host in allow_private_hosts), allow_file_access,
     )
-    if cache is not None and key in cache:
-        cached = cache[key]
-        if cached is not None:
-            raise cached
-        return
+    if cache is not None and key in cache and cache[key] is not None:
+        # Refusals are fail-closed and reusable. Successful verdicts are never
+        # cached: every allowed request re-resolves to narrow DNS rebinding.
+        raise cache[key]
     resolver_kwargs = {
         "allow_loopback": allow_loopback, "loopback_host": loopback_host,
     }
@@ -465,8 +463,6 @@ async def _check_navigation_url(
         raise
     except (asyncio.TimeoutError, TimeoutError):
         raise RestedCaptureError("navigation URL check timed out") from None
-    if cache is not None:
-        cache[key] = None
 
 
 async def _install_navigation_guard(
@@ -1446,9 +1442,7 @@ async def _apply_trigger(page: Any, selector: str, wait_ms: int) -> bool:
         if page.url != before_url or after != before:
             return True
         deadline = time.monotonic() + TRIGGER_STATE_TIMEOUT_MS / 1000
-        for _ in range(TRIGGER_STATE_POLL_LIMIT):
-            if time.monotonic() >= deadline:
-                break
+        while time.monotonic() < deadline:
             await page.wait_for_timeout(100)
             after = await page.evaluate(_FINGERPRINT_JS)
             if page.url != before_url or after != before:
@@ -1552,11 +1546,7 @@ async def _capture_one(
                 "elapsed_ms": int((time.perf_counter() - started) * 1000),
             }
         except Exception as exc:
-            selected_error = (
-                page_errors[0] if page_errors
-                else guard_errors[0] if guard_errors
-                else exc
-            )
+            selected_error = page_errors[0] if page_errors else exc
             last_error = str(selected_error)
             if attempt < attempts:
                 await asyncio.sleep(0.35)

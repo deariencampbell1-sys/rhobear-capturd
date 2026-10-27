@@ -759,15 +759,27 @@ async def test_r5_capture_final_url_refused_before_screenshot(tmp_path, monkeypa
 @pytest.mark.asyncio
 async def test_r5_capture_preserves_first_route_error(tmp_path, monkeypatch):
     context, target, settings, path, page = _capture_stack(tmp_path, monkeypatch)
-    errors = []
+    supplied = []
+    attempt_errors = []
+    real_install = capture._install_navigation_guard
+
+    async def install(page_arg, **kwargs):
+        attempt_errors.append(kwargs["guard_errors"])
+        return await real_install(page_arg, **kwargs)
+
+    monkeypatch.setattr(capture, "_install_navigation_guard", install)
+
     async def aborted(*args, **kwargs):
-        errors.append(RestedCaptureError("first navigation guard refusal"))
+        attempt_errors[0].append(RestedCaptureError("first navigation guard refusal"))
         raise TimeoutError("browser navigation aborted")
+
     page.goto.side_effect = aborted
-    result = await capture._capture_one(context, target, settings, path, guard_errors=errors)
+    result = await capture._capture_one(context, target, settings, path, guard_errors=supplied)
     assert result["status"] == "failed"
     assert result["error"] == "first navigation guard refusal"
-    assert len(errors) == 1 and str(errors[0]) == "first navigation guard refusal"
+    assert len(attempt_errors[0]) == 1
+    assert str(attempt_errors[0][0]) == "first navigation guard refusal"
+    assert supplied == []
     page.screenshot.assert_not_awaited()
 
 

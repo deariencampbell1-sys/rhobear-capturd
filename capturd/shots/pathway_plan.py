@@ -443,8 +443,9 @@ def _load_pages_html(
             # allow_file_access is false: `file:` bases are refused at
             # plan_targets_from_map entry, so this reader never needs them.
             browser = await _launch_browser(p, allow_file_access=False)
-            context = await browser.new_context()
+            context = None
             try:
+                context = await browser.new_context()
                 # Before any page exists: every request, redirects included.
                 guard_errors = await _install_navigation_guard(
                     context, allow_loopback=allow_loopback, loopback_host=loopback_host,
@@ -482,8 +483,11 @@ def _load_pages_html(
                 if guard_errors:
                     raise guard_errors[0]
             finally:
-                await context.close()
-                await browser.close()
+                try:
+                    if context is not None:
+                        await context.close()
+                finally:
+                    await browser.close()
         return html_by_url
 
     async def _bounded() -> dict[str, str]:
