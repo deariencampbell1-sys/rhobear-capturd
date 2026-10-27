@@ -35,25 +35,8 @@ FIXTURES = Path(__file__).parent / "fixtures" / "capture-foundations"
 WIRING = Path(__file__).parent / "fixtures" / "capture-wiring"
 TWO_CONTROL_HTML = (WIRING / "two-control-page.html").read_text(encoding="utf-8")
 
-@pytest.fixture(autouse=True)
-def _offline_test_dns(monkeypatch):
-    # Only reserved test hosts and literal addresses; never a real DNS lookup.
-    import ipaddress
-    import socket
-
-    def resolve(host, port=None, *args, **kwargs):
-        aliases = {"base.test": "93.184.216.34", "example.com": "93.184.216.34",
-                   "localhost": "127.0.0.1"}
-        try:
-            address = ipaddress.ip_address(aliases.get(host, host))
-        except ValueError:
-            raise socket.gaierror("unconfigured test host") from None
-        family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
-        sockaddr = (str(address), port or 0, 0, 0) if address.version == 6 else (str(address), port or 0)
-        return [(family, socket.SOCK_STREAM, 6, "", sockaddr)]
-
-    monkeypatch.setattr("capturd.shots.capture.socket.getaddrinfo", resolve)
-    return resolve
+# One DNS stub for both capture suites (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("_offline_test_dns")
 
 
 
@@ -429,6 +412,9 @@ class _FakeContext:
     async def route(self, pattern: str, handler) -> None:
         self._fake.route_pattern = pattern
         self._fake.route_handler = handler
+
+    async def route_web_socket(self, pattern, handler) -> None:
+        self._fake.ws_route_handler = handler
 
     async def new_page(self) -> _FakePage:
         self._fake.pages_created += 1
@@ -819,7 +805,7 @@ def test_r5_substring_label_never_binds():
     ("127.0.0.1", "http://10.0.0.5/x", False),
 ])
 def test_r5_loopback_redirect_must_stay_on_base_host(base_host, request_url, allowed):
-    context = SimpleNamespace(route=AsyncMock())
+    context = SimpleNamespace(route=AsyncMock(), route_web_socket=AsyncMock())
     errors = asyncio.run(capture_mod._install_navigation_guard(context, allow_loopback=True, loopback_host=base_host))
     handler = context.route.call_args.args[1]
     route = _FakeRoute(request_url)
@@ -835,7 +821,7 @@ def test_r5_loopback_redirect_must_stay_on_base_host(base_host, request_url, all
 
 
 def test_r5_capture_request_guard_aborts_private_redirect():
-    context = SimpleNamespace(route=AsyncMock())
+    context = SimpleNamespace(route=AsyncMock(), route_web_socket=AsyncMock())
     errors = asyncio.run(capture_mod._install_navigation_guard(context, allow_loopback=False, loopback_host=None))
     route = SimpleNamespace(request=SimpleNamespace(url="http://169.254.169.254/latest"),
                             abort=AsyncMock(), continue_=AsyncMock())
@@ -849,7 +835,7 @@ def test_r5_async_guard_resolves_off_loop(monkeypatch):
     real = asyncio.to_thread
     thread = AsyncMock(wraps=real)
     monkeypatch.setattr(capture_mod.asyncio, "to_thread", thread)
-    context = SimpleNamespace(route=AsyncMock())
+    context = SimpleNamespace(route=AsyncMock(), route_web_socket=AsyncMock())
     errors = asyncio.run(capture_mod._install_navigation_guard(context, allow_loopback=True, loopback_host="127.0.0.1"))
     asyncio.run(context.route.call_args.args[1](_FakeRoute("http://127.0.0.1:9/a")))
     assert errors == []
@@ -874,7 +860,7 @@ def test_r5_dns_timeout_aborts_instead_of_continuing(monkeypatch):
         await asyncio.Event().wait()
     monkeypatch.setattr(capture_mod.asyncio, "to_thread", never)
     monkeypatch.setattr(capture_mod, "NAV_GUARD_TIMEOUT_S", 0.001)
-    context = SimpleNamespace(route=AsyncMock())
+    context = SimpleNamespace(route=AsyncMock(), route_web_socket=AsyncMock())
     errors = asyncio.run(capture_mod._install_navigation_guard(context, allow_loopback=True, loopback_host="127.0.0.1"))
     route = _FakeRoute("http://127.0.0.1:9")
     asyncio.run(context.route.call_args.args[1](route))
@@ -892,7 +878,7 @@ def test_r5_dry_run_skips_dns_checks(monkeypatch):
 
 # W0-28-r5: subresource isolation, fail-closed errors, and safe defaults.
 def test_r6_private_subresource_aborts_warns_and_is_not_document_error():
-    context = SimpleNamespace(route=AsyncMock())
+    context = SimpleNamespace(route=AsyncMock(), route_web_socket=AsyncMock())
     guard_errors = asyncio.run(capture_mod._install_navigation_guard(
         context, allow_loopback=False, loopback_host=None,
     ))
@@ -905,7 +891,7 @@ def test_r6_private_subresource_aborts_warns_and_is_not_document_error():
 
 
 def test_r6_document_refusal_is_fatal():
-    context = SimpleNamespace(route=AsyncMock())
+    context = SimpleNamespace(route=AsyncMock(), route_web_socket=AsyncMock())
     guard_errors = asyncio.run(capture_mod._install_navigation_guard(
         context, allow_loopback=False, loopback_host=None,
     ))
@@ -923,7 +909,7 @@ def test_r6_non_guard_subresource_exception_fails_closed(monkeypatch):
     monkeypatch.setattr(capture_mod, "_check_navigation_url", AsyncMock(
         side_effect=socket.gaierror("private host detail"),
     ))
-    context = SimpleNamespace(route=AsyncMock())
+    context = SimpleNamespace(route=AsyncMock(), route_web_socket=AsyncMock())
     guard_errors = asyncio.run(capture_mod._install_navigation_guard(
         context, allow_loopback=False, loopback_host=None,
     ))
@@ -944,7 +930,7 @@ def test_r6_non_guard_document_exception_is_named_error(monkeypatch):
     monkeypatch.setattr(capture_mod, "_check_navigation_url", AsyncMock(
         side_effect=socket.gaierror("private host detail"),
     ))
-    context = SimpleNamespace(route=AsyncMock())
+    context = SimpleNamespace(route=AsyncMock(), route_web_socket=AsyncMock())
     guard_errors = asyncio.run(capture_mod._install_navigation_guard(
         context, allow_loopback=False, loopback_host=None,
     ))

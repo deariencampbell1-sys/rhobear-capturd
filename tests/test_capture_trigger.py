@@ -123,7 +123,7 @@ async def test_r5_no_op_click_is_not_meaningful_state(monkeypatch):
         warnings.simplefilter("always")
         assert await _apply_trigger(page, "#load-state", 123) is False
     assert caught == [], "a genuine no-op must not enter the exception handler"
-    assert page.wait_for_timeout.await_count == capture.TRIGGER_STATE_TIMEOUT_MS // 100 == 25
+    assert page.wait_for_timeout.await_count == capture.TRIGGER_STATE_TIMEOUT_MS // capture.TRIGGER_POLL_INTERVAL_MS == 25
     page.wait_for_timeout.assert_awaited_with(100)
     page.query_selector.return_value.click.assert_awaited_once()
     settle.assert_awaited_once_with(page, 123)

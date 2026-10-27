@@ -126,6 +126,12 @@ job = mgr.start({"crawl": True, "crawl_url": "https://example.com",
                  "viewports": ["desktop", "mobile"], "schemes": ["light", "dark"]})
 ```
 
+Captures run behind a default-deny navigation guard (HTTP and WebSocket):
+loopback, private and link-local hosts are refused. To capture a local dev
+server from code, pass the capability at the call site, e.g.
+`mgr.start(payload, allow_loopback=True)` (the target's own host only) or
+`allow_private_hosts=["172.17.0.1"]` (a list of exact hosts, never a string).
+
 ## Requirements
 
 - Python **3.10+**

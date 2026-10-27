@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import ipaddress
+import inspect
 import json
 import os
 import re
@@ -30,7 +31,7 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 from xml.etree import ElementTree
 
 from capturd._net import is_private_ip
-from capturd.shots.pathway_map import PathwayMapError, load_pathway_map
+from capturd.shots.pathway_map import load_pathway_map
 
 
 DEFAULT_VIEWPORTS: dict[str, dict[str, int]] = {
@@ -45,7 +46,10 @@ MAX_CRAWL_URLS = 1000
 DEFAULT_TIMEOUT_MS = 30000
 TRIGGER_CLICK_TIMEOUT_MS = 2500
 TRIGGER_STATE_TIMEOUT_MS = 2500
+TRIGGER_POLL_INTERVAL_MS = 100
 NAV_GUARD_TIMEOUT_S = 10
+# A refused WebSocket is closed with 1008 (policy violation), never connected.
+WS_REFUSED_CLOSE_CODE = 1008
 DEFAULT_WAIT_MS = 600
 DEFAULT_CONCURRENCY = 3
 DEFAULT_RETRIES = 1
@@ -505,7 +509,36 @@ async def _install_navigation_guard(
             return
         await route.continue_()
 
+    async def ws_guard(ws_route: Any) -> None:
+        # `route` never sees WebSocket traffic, so ws:/wss: get their own
+        # interception with the same policy. A refused socket is closed with
+        # 1008 (policy violation) before any connection to the server is made.
+        try:
+            await _check_navigation_url(
+                ws_route.url, allow_loopback=allow_loopback,
+                loopback_host=loopback_host, allow_private_hosts=allow_private_hosts,
+                allow_file_access=allow_file_access, cache=navigation_cache,
+            )
+        except Exception as exc:
+            await ws_route.close(code=WS_REFUSED_CLOSE_CODE, reason="capture refused")
+            warnings.warn(
+                f"capture websocket refused ({type(exc).__name__}); connection closed",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return
+        ws_route.connect_to_server()
+
+    route_web_socket = getattr(context, "route_web_socket", None)
+    if route_web_socket is None:
+        # Without WebSocket interception the scheme allow-list would claim
+        # coverage it does not have: refuse to capture instead.
+        raise RestedCaptureError(
+            "WebSocket guard unavailable: Playwright >= 1.48 is required")
     await context.route("**/*", guard)
+    installed = route_web_socket(re.compile(r".*"), ws_guard)
+    if inspect.isawaitable(installed):
+        await installed
     return guard_errors
 
 
@@ -964,6 +997,14 @@ def build_capture_plan(
         raise RestedCaptureError("allow_map_files must be a bool from the call site")
     if type(allow_loopback) is not bool:
         raise RestedCaptureError("allow_loopback must be a bool from the call site")
+    # A bare string would be iterated character by character into the
+    # allow-list; the capability must be a sequence of host strings.
+    if isinstance(allow_private_hosts, (str, bytes)) or not isinstance(
+            allow_private_hosts, (list, tuple, set, frozenset)):
+        raise RestedCaptureError(
+            "allow_private_hosts must be a list of host names from the call site")
+    if not all(isinstance(host, str) and host for host in allow_private_hosts):
+        raise RestedCaptureError("allow_private_hosts entries must be non-empty host names")
     if any(key in payload for key in ("_allow_map_files", "_allow_loopback", "_allow_private_hosts")):
         raise RestedCaptureError("_allow_* capabilities are call-site arguments, not payload keys")
     allow_private_hosts = tuple(_canonical_host(host) for host in allow_private_hosts)
@@ -1157,11 +1198,6 @@ def build_capture_plan(
                             scheme=scheme,
                         )
                     )
-
-    # M-expanded-targets: the defensive post-expansion check — the refusal
-    # text says "capture targets", so the ceiling is the TARGET count.
-    if pathway_targets is not None and len(targets) > max_targets:
-        raise RestedCaptureError(f"too many capture targets; maximum is {max_targets}")
 
     # The plan says why a pathway is flagged. Status is read by the closed
     # set (WIRED/MOCKED/UNWIRED/INCOMPLETE/UNCLEAR/UNKNOWN), never by
@@ -1443,7 +1479,7 @@ async def _apply_trigger(page: Any, selector: str, wait_ms: int) -> bool:
             return True
         deadline = time.monotonic() + TRIGGER_STATE_TIMEOUT_MS / 1000
         while time.monotonic() < deadline:
-            await page.wait_for_timeout(100)
+            await page.wait_for_timeout(TRIGGER_POLL_INTERVAL_MS)
             after = await page.evaluate(_FINGERPRINT_JS)
             if page.url != before_url or after != before:
                 return True
@@ -1718,8 +1754,19 @@ def _safe_settings(settings: dict[str, Any]) -> dict[str, Any]:
     return safe
 
 
+# Below this length a secret is replaced only as a whole token, so a short
+# value ("1", "on") cannot eat ordinary words or punctuation out of an error.
+_SHORT_SECRET_LENGTH = 6
+
+
 def _redact_settings_secrets(text: str, settings: dict[str, Any]) -> str:
-    """Remove every non-allowlisted settings value from an outward error."""
+    """Remove secret-bearing settings values from an outward error.
+
+    Only secret positions are collected: a cookie's ``value`` (never its name,
+    domain or path), and every string leaf of any other non-allowlisted key
+    (header values, auth leaves, an authorization string). An error therefore
+    still names its target URL and host.
+    """
     values: list[str] = []
 
     def collect(value: Any) -> None:
@@ -1734,10 +1781,18 @@ def _redact_settings_secrets(text: str, settings: dict[str, Any]) -> str:
                 collect(item)
 
     for key, value in settings.items():
-        if key not in SAFE_SETTINGS_KEYS:
-            collect(value)
+        if key in SAFE_SETTINGS_KEYS:
+            continue
+        if key == "cookies" and isinstance(value, (list, tuple)):
+            for cookie in value:
+                collect(cookie.get("value") if isinstance(cookie, dict) else cookie)
+            continue
+        collect(value)
     for value in sorted(set(values), key=len, reverse=True):
-        text = text.replace(value, "<redacted>")
+        if len(value) >= _SHORT_SECRET_LENGTH:
+            text = text.replace(value, "<redacted>")
+        else:
+            text = re.sub(rf"(?<!\w){re.escape(value)}(?!\w)", "<redacted>", text)
     return text
 
 
@@ -1764,6 +1819,15 @@ class RestedCaptureManager:
         self, payload: dict[str, Any], *, allow_map_files: bool = False,
         allow_loopback: bool = False, allow_private_hosts: tuple[str, ...] = (),
     ) -> dict[str, Any]:
+        """Plan and queue a capture job.
+
+        Migration note (capturd#49): every capture now runs behind a
+        default-deny navigation guard. Loopback, private and link-local hosts
+        are refused unless the caller passes ``allow_loopback=True`` (the
+        target's own host only) or names hosts in ``allow_private_hosts``.
+        Library and service callers that captured a local dev server before
+        must now pass ``allow_loopback=True``; the CLI already does.
+        """
         capabilities = {
             "allow_map_files": allow_map_files,
             "allow_loopback": allow_loopback,

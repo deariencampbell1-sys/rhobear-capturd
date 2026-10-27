@@ -23,7 +23,7 @@ classifiers = [
     "Topic :: Multimedia :: Video :: Capture",
 ]
 dependencies = [
-    "playwright>=1.40",
+    "playwright>=1.48",
     "openai>=1.30",
     "fastmcp>=0.4",
     "edge-tts>=6.1",

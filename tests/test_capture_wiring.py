@@ -26,24 +26,8 @@ FIXTURES = Path(__file__).parent / "fixtures" / "capture-foundations"
 WIRING = Path(__file__).parent / "fixtures" / "capture-wiring"
 TWO_CONTROL_HTML = (WIRING / "two-control-page.html").read_text(encoding="utf-8")
 
-@pytest.fixture(autouse=True)
-def _offline_test_dns(monkeypatch):
-    # Only reserved test hosts and literal addresses; never a real DNS lookup.
-    import ipaddress
-    import socket
-
-    def resolve(host, port=None, *args, **kwargs):
-        aliases = {"base.test": "93.184.216.34", "example.com": "93.184.216.34",
-                   "localhost": "127.0.0.1"}
-        try:
-            address = ipaddress.ip_address(aliases.get(host, host))
-        except ValueError:
-            raise socket.gaierror("unconfigured test host") from None
-        family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
-        sockaddr = (str(address), port or 0, 0, 0) if address.version == 6 else (str(address), port or 0)
-        return [(family, socket.SOCK_STREAM, 6, "", sockaddr)]
-
-    monkeypatch.setattr("capturd.shots.capture.socket.getaddrinfo", resolve)
+# One DNS stub for both capture suites (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures("_offline_test_dns")
 
 
 
@@ -874,6 +858,9 @@ async def test_r6_document_refusal_does_not_poison_sibling_page(tmp_path, monkey
             assert pattern == "**/*"
             self.handler = handler
 
+        async def route_web_socket(self, pattern, handler):
+            self.ws_handler = handler
+
         def set_default_timeout(self, timeout):
             pass
 
@@ -1306,7 +1293,7 @@ def test_r8_remote_url_plan_and_manager_refuse_loopback(tmp_path, monkeypatch, c
     "gopher://example.com/1",
 ])
 def test_r8_non_http_schemes_fail_closed(url):
-    context = SimpleNamespace(route=AsyncMock())
+    context = SimpleNamespace(route=AsyncMock(), route_web_socket=AsyncMock())
     errors = asyncio.run(capture._install_navigation_guard(
         context, allow_loopback=False, loopback_host=None,
     ))
