@@ -1625,7 +1625,7 @@ async def _capture_one(
                     if isinstance(state, dict) and isinstance(state.get("error"), str):
                         state = {
                             **state,
-                            "error": _redact_settings_secrets(state["error"], settings),
+                            "error": _redact_outward_error(state["error"], settings),
                         }
                     extra_states.append(state)
             if page_errors:
@@ -1655,7 +1655,7 @@ async def _capture_one(
                 selected_error = guard_errors[guard_error_start]
             else:
                 selected_error = exc
-            last_error = _redact_settings_secrets(str(selected_error), settings)
+            last_error = _redact_outward_error(str(selected_error), settings)
             if attempt < attempts:
                 await asyncio.sleep(0.35)
         finally:
@@ -1874,6 +1874,26 @@ def _redact_settings_secrets(text: str, settings: dict[str, Any]) -> str:
     return text
 
 
+# Match URL authorities inside browser errors, including Playwright call logs.
+_ERROR_URL_AUTHORITY_RE = re.compile(
+    r"""(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<authority>[^\s/?#"'<>\\]+)"""
+)
+
+
+def _redact_error_url_userinfo(text: str) -> str:
+    """Strip userinfo from URL authorities embedded in free-form error text."""
+    def scrub(match: re.Match[str]) -> str:
+        authority = match.group("authority")
+        return match.group("scheme") + authority.rsplit("@", 1)[-1]
+
+    return _ERROR_URL_AUTHORITY_RE.sub(scrub, text)
+
+
+def _redact_outward_error(text: str, settings: dict[str, Any]) -> str:
+    """Remove configured secrets and URL credentials from outward errors."""
+    return _redact_error_url_userinfo(_redact_settings_secrets(text, settings))
+
+
 def _redact_url_userinfo(url: str) -> str:
     """Remove credentials from an outward URL without changing its target."""
     parsed = urlparse(url)
@@ -1891,6 +1911,12 @@ def _redact_outward_result_urls(result: dict[str, Any]) -> dict[str, Any]:
         safe_url = _redact_url_userinfo(url)
         changed = safe_url != url
         safe["url"] = safe_url
+    error = result.get("error")
+    if isinstance(error, str):
+        safe_error = _redact_error_url_userinfo(error)
+        if safe_error != error:
+            safe["error"] = safe_error
+            changed = True
     states = result.get("states")
     if isinstance(states, list):
         safe_states = [
@@ -2125,5 +2151,5 @@ class RestedCaptureManager:
             self._patch(job_id, {
                 "ok": False,
                 "status": "failed",
-                "message": _redact_settings_secrets(str(exc), settings),
+                "message": _redact_outward_error(str(exc), settings),
             })
