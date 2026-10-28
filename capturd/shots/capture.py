@@ -1768,6 +1768,9 @@ async def _run_capture_async(
                         navigation_cache=navigation_cache, guard_errors=guard_errors,
                         allow_file_access=allow_file_access,
                     )
+                    # This is the shared outward boundary for both library callers
+                    # and manager jobs. Redact before the callback AND the return.
+                    result = _redact_outward_result_urls(result)
                     progress(result)
                     return result
 
