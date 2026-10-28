@@ -1488,7 +1488,7 @@ async def _apply_trigger(page: Any, selector: str, wait_ms: int) -> bool:
     """Click the pathway's named control to reach its rested state.
 
     The selector is the planner's candidate selector (never hand-rolled).
-    A click is meaningful only when its URL or DOM fingerprint changes.
+    A click is meaningful when its URL/DOM changes or its context opens a page.
     A no-op stays baseline evidence. A missing control or a failed click is not a capture error — we shoot the
     loaded state and report ``trigger_fired`` False; the quality gate reads
     that flag to tell a baseline from a meaningful state shot.
@@ -1496,22 +1496,34 @@ async def _apply_trigger(page: Any, selector: str, wait_ms: int) -> bool:
     sel = (selector or "").strip()
     if not sel:
         return False
+    popup_opened = False
+
+    def context_page_opened(_page: Any) -> None:
+        nonlocal popup_opened
+        popup_opened = True
+
     try:
         element = await page.query_selector(sel)
         if element is None:
             return False
+        context = getattr(page, "context", None)
+        on_context_page = getattr(context, "on", None)
+        if callable(on_context_page):
+            registered = on_context_page("page", context_page_opened)
+            if inspect.isawaitable(registered):
+                await registered
         before_url = page.url
         before = await page.evaluate(_FINGERPRINT_JS)
         await element.click(timeout=TRIGGER_CLICK_TIMEOUT_MS)
         await _settle_page(page, wait_ms)
         after = await page.evaluate(_FINGERPRINT_JS)
-        if page.url != before_url or after != before:
+        if popup_opened or page.url != before_url or after != before:
             return True
         deadline = time.monotonic() + TRIGGER_STATE_TIMEOUT_MS / 1000
         while time.monotonic() < deadline:
             await page.wait_for_timeout(TRIGGER_POLL_INTERVAL_MS)
             after = await page.evaluate(_FINGERPRINT_JS)
-            if page.url != before_url or after != before:
+            if popup_opened or page.url != before_url or after != before:
                 return True
         return False
     except Exception as exc:
@@ -1524,16 +1536,19 @@ async def _capture_one(
     context: Any, target: CaptureTarget, settings: dict[str, Any], path: Path,
     *, guard_errors: list[RestedCaptureError] | None = None,
     navigation_cache: dict[tuple[Any, ...], RestedCaptureError | None] | None = None,
+    allow_file_access: bool | None = None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     attempts = max(1, int(settings.get("retries", DEFAULT_RETRIES)) + 1)
     last_error = ""
     if navigation_cache is None:
         navigation_cache = {}
-    allow_file_access = bool(settings.get("local"))
+    if allow_file_access is None:
+        allow_file_access = bool(settings.get("local"))
     allow_private_hosts = tuple(settings.get("allow_private_hosts") or ())
     for attempt in range(1, attempts + 1):
         page = None
+        guard_error_start = len(guard_errors) if guard_errors is not None else 0
         allow_loopback = bool(settings.get("allow_loopback"))
         loopback_host = settings.get("loopback_host")
         if allow_loopback and loopback_host is None:
@@ -1632,7 +1647,14 @@ async def _capture_one(
                 "elapsed_ms": int((time.perf_counter() - started) * 1000),
             }
         except Exception as exc:
-            selected_error = page_errors[0] if page_errors else exc
+            if page_errors:
+                selected_error = page_errors[0]
+            elif guard_errors is not None and len(guard_errors) > guard_error_start:
+                # A context-only refusal (for example a popup) may be the real
+                # cause of the browser's subsequent navigation failure.
+                selected_error = guard_errors[guard_error_start]
+            else:
+                selected_error = exc
             last_error = _redact_settings_secrets(str(selected_error), settings)
             if attempt < attempts:
                 await asyncio.sleep(0.35)
@@ -1693,10 +1715,12 @@ async def _run_capture_async(
 
     sem = asyncio.Semaphore(settings["concurrency"])
     navigation_cache: dict[tuple[Any, ...], RestedCaptureError | None] = {}
+    guard_errors: list[RestedCaptureError] = []
     results: list[dict[str, Any]] = []
 
     async with async_playwright() as p:
-        allow_file_access = any(urlparse(target.url).scheme == "file" for target in targets)
+        # One settings-derived value governs launch, context, and every page.
+        allow_file_access = bool(settings.get("local"))
         browser = await _launch_browser(p, allow_file_access=allow_file_access)
         contexts: dict[tuple[str, str, str, int, int, str], Any] = {}
         context_lock = asyncio.Lock()
@@ -1723,6 +1747,7 @@ async def _run_capture_async(
                         context, allow_loopback=allow_loopback, loopback_host=loopback_host,
                         allow_private_hosts=tuple(settings.get("allow_private_hosts") or ()),
                         allow_file_access=allow_file_access, navigation_cache=navigation_cache,
+                        guard_errors=guard_errors,
                     )
                     # Signed-in capture: without cookies the batch can only ever shoot
                     # what a logged-out visitor sees, so authenticated products are
@@ -1740,7 +1765,8 @@ async def _run_capture_async(
                     context = await context_for(target)
                     result = await _capture_one(
                         context, target, settings, shots_dir / file_name,
-                        navigation_cache=navigation_cache,
+                        navigation_cache=navigation_cache, guard_errors=guard_errors,
+                        allow_file_access=allow_file_access,
                     )
                     progress(result)
                     return result

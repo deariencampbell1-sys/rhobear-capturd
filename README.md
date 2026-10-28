@@ -100,8 +100,10 @@ Map-driven stills accept `--pathway-map JSON` (verifier JSON), `--pathway-manife
 Use `--max-targets N` to bound the expanded capture matrix and `--dry-run` to print a plan
 without browser or network activity. Repeat `--allow-private-host HOST` for an exact-host
 RFC1918/ULA/loopback opt-in; metadata and other prohibited addresses remain refused.
-Legacy direct URL capture keeps its exact-target loopback exception, but sitemap/crawl
-discovery remains loopback-refused.
+Direct `--urls`/`--local` capture keeps its exact-target loopback exception. Sitemap and
+crawl discoveries have no blanket loopback permission: a discovered loopback target is
+refused unless its exact host is named with `--allow-private-host`; other hosts and metadata
+remain refused.
 
 | Exit | Meaning |
 | --- | --- |
@@ -150,8 +152,12 @@ subresource checks have a 2-second bound, then abort only that request and warn.
 paths remain fail-closed, and a deadline cannot cancel an OS resolver already running.
 
 The real WebSocket and popup/service-worker proofs are marked `browser` and `network`.
-They are required security acceptance, not optional skips: missing Playwright or Chromium
-is a named test failure. Install Chromium with `python -m playwright install chromium`.
+A default local `pytest` deselects these optional tests, the pre-existing `slow` Chromium
+viewer tests, and `e2e`, so an unprovisioned workstation can run the unrelated suite. For explicit local selection,
+install the project dependencies and run `python -m playwright install chromium`, then use
+`pytest -m 'browser or network'`. `RB_REQUIRE_BROWSER=1` or `CI` restores the full `not e2e`
+selection for required security acceptance. In those runs the proofs never skip: missing
+Playwright or Chromium is a named required-security failure.
 
 ## Requirements
 
@@ -165,7 +171,9 @@ is a named test failure. Install Chromium with `python -m playwright install chr
 
 ```bash
 pip install -e ".[dev]"
-pytest
+pytest                                      # local: not e2e/browser/network/slow
+python -m playwright install chromium       # required for security acceptance
+RB_REQUIRE_BROWSER=1 pytest                 # required: not e2e, zero security skips
 ```
 
 ## License

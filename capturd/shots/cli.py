@@ -16,10 +16,11 @@ decides whether a MAP-DRIVEN run is evidence — a legacy ``--urls`` /
 (a baseline-only run is 0, a failed job is 1, done-with-errors is 3) — and
 its reason code reaches this caller unchanged when a gate runs. Finished map
 runs refused by quality exit 4. Only CLI map inputs permit local map files and
-loopback navigation on the exact --base-url hostname. Legacy URL/sitemap/crawl/local
-capture permits loopback only on each target's exact host. Explicitly allowed private
-hosts are a separate exact-host opt-in; metadata always remains refused. Sitemap/crawl
-discovery remains loopback-refused. Remote callers
+loopback navigation on the exact --base-url hostname. Direct --urls/--local capture
+permits loopback only on each target's exact host. Sitemap/crawl-discovered targets have
+no blanket loopback permission and require an exact --allow-private-host entry.
+Explicitly allowed private hosts never permit metadata. Discovery fetches and discovered
+loopback targets both remain refused by default. Remote callers
 pass map_text/manifest_text and default to no loopback permission.
 """
 
@@ -261,9 +262,12 @@ def main(argv: list[str] | None = None) -> int:
             "max_targets": args.max_targets,
         })
 
+    # Only direct operator intent receives the per-target loopback exception.
+    # Sitemap/crawl results are attacker-influenced and need an exact allow entry.
+    direct_intent = bool(args.urls or args.local)
     capabilities = {
         "allow_map_files": map_input,
-        "allow_loopback": True,
+        "allow_loopback": map_input or direct_intent,
         "allow_private_hosts": allow_private_hosts,
     }
     if args.dry_run:
