@@ -2158,14 +2158,13 @@ async def test_r15_popup_only_trigger_is_state_not_baseline(monkeypatch):
     page.url = "https://example.com/"
     page.evaluate.return_value = "unchanged-opener-dom"
     popup_handlers = []
-    page.context = SimpleNamespace(
-        on=lambda event, handler: popup_handlers.append((event, handler)),
-    )
+    page.on = Mock(side_effect=lambda event, handler: popup_handlers.append((event, handler)))
+    page.remove_listener = Mock()
     element = page.query_selector.return_value
 
     async def open_popup(**_kwargs):
         if popup_handlers:
-            handler = next(handler for event, handler in popup_handlers if event == "page")
+            handler = next(handler for event, handler in popup_handlers if event == "popup")
             handler(SimpleNamespace(url="https://example.com/popup"))
 
     element.click.side_effect = open_popup

@@ -1553,7 +1553,8 @@ async def _apply_trigger(page: Any, selector: str, wait_ms: int) -> bool:
     """Click the pathway's named control to reach its rested state.
 
     The selector is the planner's candidate selector (never hand-rolled).
-    A click is meaningful when its URL/DOM changes or its context opens a page.
+    A click is meaningful when its URL/DOM changes or THIS page opens a popup
+    (page-scoped: a sibling target's popup on a shared context never counts).
     A no-op stays baseline evidence. A missing control or a failed click is not a capture error — we shoot the
     loaded state and report ``trigger_fired`` False; the quality gate reads
     that flag to tell a baseline from a meaningful state shot.
@@ -1562,8 +1563,9 @@ async def _apply_trigger(page: Any, selector: str, wait_ms: int) -> bool:
     if not sel:
         return False
     popup_opened = False
+    listening = False
 
-    def context_page_opened(_page: Any) -> None:
+    def popup_from_this_page(_popup: Any) -> None:
         nonlocal popup_opened
         popup_opened = True
 
@@ -1571,12 +1573,10 @@ async def _apply_trigger(page: Any, selector: str, wait_ms: int) -> bool:
         element = await page.query_selector(sel)
         if element is None:
             return False
-        context = getattr(page, "context", None)
-        on_context_page = getattr(context, "on", None)
-        if callable(on_context_page):
-            registered = on_context_page("page", context_page_opened)
-            if inspect.isawaitable(registered):
-                await registered
+        registered = page.on("popup", popup_from_this_page)
+        if inspect.isawaitable(registered):
+            await registered
+        listening = True
         before_url = page.url
         before = await page.evaluate(_FINGERPRINT_JS)
         await element.click(timeout=TRIGGER_CLICK_TIMEOUT_MS)
@@ -1595,6 +1595,14 @@ async def _apply_trigger(page: Any, selector: str, wait_ms: int) -> bool:
         warnings.warn(f"capture trigger failed ({type(exc).__name__}); trigger_fired=False",
                       RuntimeWarning, stacklevel=2)
         return False
+    finally:
+        if listening:
+            try:
+                removed = page.remove_listener("popup", popup_from_this_page)
+                if inspect.isawaitable(removed):
+                    await removed
+            except Exception:
+                pass
 
 
 async def _capture_one(
