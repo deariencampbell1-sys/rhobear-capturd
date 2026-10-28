@@ -1947,12 +1947,26 @@ def test_r16_failed_userinfo_navigation_never_reaches_job_manifest_or_zip(
 ):
     """A real _capture_one failure must scrub Playwright's error and call log."""
     raw_url = "https://user:pass@example.com/private"
+    # Hermetic: the navigation guard resolves through the capture-local DNS seam;
+    # patch it so the test never touches the real resolver (round 16 defect repair:
+    # the unpatched seam left a real asyncio.to_thread getaddrinfo running, so the
+    # default executor never joined and the suite hung).
+    monkeypatch.setattr(
+        capture, "_getaddrinfo",
+        lambda host, port=None, *args, **kwargs: [(2, 1, 6, "", ("93.184.216.34", 0))],
+    )
     payload = {
         "urls": [raw_url], "viewports": ["desktop"], "schemes": ["light"],
         "retries": 0,
     }
 
     def failed_navigation(targets, settings, shots_dir, progress):
+        # The _ManualThread patch below stubs the STDLIB threading module, which
+        # asyncio.to_thread also uses - the navigation guard's resolver job would
+        # never run and the executor join would hang the suite (round 16 defect
+        # repair). Restore the real Thread (captured before patching: at this point
+        # threading.Thread IS _ManualThread) before the asyncio.run worker body.
+        monkeypatch.setattr(capture.threading, "Thread", _REAL_THREAD)
         context, _target, _settings, path, page = _capture_stack(
             shots_dir, monkeypatch, url=raw_url,
         )
@@ -1969,6 +1983,7 @@ def test_r16_failed_userinfo_navigation_never_reaches_job_manifest_or_zip(
         progress(result)
         return [result]
 
+    _REAL_THREAD = capture.threading.Thread
     monkeypatch.setattr(capture, "run_capture", failed_navigation)
     _ManualThread.instances = []
     monkeypatch.setattr(capture.threading, "Thread", _ManualThread)
