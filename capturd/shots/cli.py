@@ -35,6 +35,7 @@ from dataclasses import asdict
 from .capture import (
     RestedCaptureError,
     RestedCaptureManager,
+    _redact_url_userinfo,
     _safe_settings,
     build_capture_plan,
     build_quality_summary,
@@ -57,6 +58,7 @@ def _normalize_private_hosts(values: list[str]) -> tuple[str, ...]:
     hosts: list[str] = []
     for value in values:
         host = value.strip().lower()
+        ipv6_literal = False
         if host.startswith("[") and host.endswith("]"):
             literal = host[1:-1]
             try:
@@ -65,12 +67,13 @@ def _normalize_private_hosts(values: list[str]) -> tuple[str, ...]:
             except ValueError:
                 raise RestedCaptureError(message) from None
             host = literal
+            ipv6_literal = True
         elif any(char in host for char in "[]"):
             raise RestedCaptureError(message)
         if (
             not host
             or any(char.isspace() for char in host)
-            or any(char in host for char in ":/?#@*")
+            or any(char in host for char in ("/?#@*" if ipv6_literal else ":/?#@*"))
         ):
             raise RestedCaptureError(message)
         host = host.rstrip(".")
@@ -172,14 +175,15 @@ def _print_plan(urls, targets, settings) -> int:
     The ``plan-json:`` line is what a caller can diff across runs — same input,
     same bytes. Nothing here or there carries a host path.
     """
-    print(f"capture plan: {len(urls)} page(s), {len(targets)} target(s)")
-    for url in urls:
+    safe_urls = [_redact_url_userinfo(url) for url in urls]
+    print(f"capture plan: {len(safe_urls)} page(s), {len(targets)} target(s)")
+    for url in safe_urls:
         print(f"url: {url}")
     for target in targets:
         print(
             f"target {target.index:03d} pathway={target.pathway_id or '-'} "
             f"status={target.pathway_status or '-'} selector={target.trigger_selector or '-'} "
-            f"state={target.state_id} url={target.url}"
+            f"state={target.state_id} url={_redact_url_userinfo(target.url)}"
         )
     for flag in settings.get("pathway_flags") or []:
         print(f"flag: {flag['flag']} {flag['pathway_id']}: {flag['reason']}")
@@ -188,7 +192,14 @@ def _print_plan(urls, targets, settings) -> int:
     print(
         "plan-json: "
         + json.dumps(
-            {"urls": urls, "targets": [asdict(t) for t in targets], "settings": safe_settings},
+            {
+                "urls": safe_urls,
+                "targets": [
+                    {**asdict(target), "url": _redact_url_userinfo(target.url)}
+                    for target in targets
+                ],
+                "settings": safe_settings,
+            },
             sort_keys=True,
         )
     )
@@ -293,7 +304,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"done: {total - failed}/{total} captured" + (f"  ({failed} failed)" if failed else ""))
     if job.get("zip_path"):
         print(f"zip:  {job['zip_path']}")
-    if job.get("output_dir") and (job.get("output_dir") != job.get("zip_path")):
+    if job.get("output_dir") and job.get("output_dir") != job.get("zip_path"):
         print(f"out:  {job['output_dir']}")
 
     # D93: the quality gate (01c) decides only for MAP-DRIVEN runs — a

@@ -1276,7 +1276,8 @@ def test_r8_remote_url_plan_and_manager_refuse_loopback(tmp_path, monkeypatch, c
     monkeypatch.setattr(
         capture.threading, "Thread", lambda **kwargs: SimpleNamespace(start=lambda: None),
     )
-    job = manager.start({"urls": ["http://127.0.0.1:9/admin"]})
+    with pytest.warns(RuntimeWarning, match="without an explicit allow capability"):
+        job = manager.start({"urls": ["http://127.0.0.1:9/admin"]})
     assert manager.get(job["job_id"])["settings"]["allow_loopback"] is False
     monkeypatch.setattr(capture.threading, "Thread", real_thread)
 
@@ -1835,9 +1836,9 @@ async def test_r14_combined_benign_post_goto_and_trigger_uses_requested_policy(
 async def test_r14_saturated_resolver_preserves_document_bound_and_limits_executor(
     monkeypatch,
 ):
-    executor = capture._NAV_RESOLVER_EXECUTOR
     workers = capture.NAV_RESOLVER_WORKERS
-    assert executor._max_workers == workers
+    semaphore = capture._NAV_RESOLVER_SEMAPHORES.get(asyncio.get_running_loop())
+    assert semaphore is None or semaphore._value == workers
     assert capture.NAV_GUARD_SUBRESOURCE_TIMEOUT_S < capture.NAV_GUARD_TIMEOUT_S
 
     release = threading.Event()
@@ -1856,11 +1857,7 @@ async def test_r14_saturated_resolver_preserves_document_bound_and_limits_execut
             with lock:
                 active -= 1
 
-    def default_executor_flood(*args, **kwargs):
-        raise AssertionError("navigation DNS used the shared default executor")
-
     monkeypatch.setattr(capture, "_reject_navigation_url", slow_resolve)
-    monkeypatch.setattr(capture.asyncio, "to_thread", default_executor_flood)
     kwargs = dict(allow_loopback=False, loopback_host=None, allow_private_hosts=())
     subresources = [
         asyncio.create_task(capture._check_navigation_url(
@@ -1887,6 +1884,8 @@ async def test_r14_saturated_resolver_preserves_document_bound_and_limits_execut
         if document is not None:
             await asyncio.gather(document, return_exceptions=True)
     assert max_active == workers
+    semaphore = capture._NAV_RESOLVER_SEMAPHORES[asyncio.get_running_loop()]
+    assert semaphore._value == workers
 
 
 def test_r14_start_warns_once_for_uncapable_private_targets(tmp_path, monkeypatch):

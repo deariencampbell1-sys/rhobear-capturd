@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import importlib
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -91,10 +92,31 @@ _OPEN_SOCKET_JS = """(url) => new Promise((resolve) => {
 })"""
 
 
+def _require_playwright():
+    try:
+        return importlib.import_module("playwright.async_api")
+    except ImportError:
+        pytest.fail(
+            "REQUIRED SECURITY ACCEPTANCE: Playwright is required; install the project dependencies",
+            pytrace=False,
+        )
+
+
+async def _launch_required_chromium(p):
+    try:
+        return await p.chromium.launch()
+    except Exception as exc:
+        pytest.fail(
+            "REQUIRED SECURITY ACCEPTANCE: Chromium is required "
+            f"({type(exc).__name__}); run `python -m playwright install chromium`",
+            pytrace=False,
+        )
+
+
 @pytest.mark.browser
 @pytest.mark.network
 def test_r11_websocket_guard_blocks_private_host_and_connects_permitted_host():
-    async_api = pytest.importorskip("playwright.async_api")
+    async_api = _require_playwright()
     page_server = ThreadingHTTPServer(("127.0.0.1", 0), _Page)
     threading.Thread(target=page_server.serve_forever, daemon=True).start()
     allowed = _RecordingWebSocketServer("127.0.0.1")   # the exact loopback opt-in
@@ -102,7 +124,7 @@ def test_r11_websocket_guard_blocks_private_host_and_connects_permitted_host():
 
     async def run():
         async with async_api.async_playwright() as p:
-            browser = await p.chromium.launch()
+            browser = await _launch_required_chromium(p)
             try:
                 context = await browser.new_context()
                 await capture._install_navigation_guard(
@@ -221,7 +243,7 @@ def test_r13_fake_context_permitted_websocket_connects_without_closing():
 @pytest.mark.browser
 @pytest.mark.network
 def test_r13_real_capture_blocks_popup_egress_and_service_workers(tmp_path, monkeypatch):
-    async_api = pytest.importorskip("playwright.async_api")
+    async_api = _require_playwright()
     hits = []
 
     class PopupPage(BaseHTTPRequestHandler):

@@ -138,6 +138,20 @@ server from code, pass the capability at the call site, e.g.
 The guard is installed on the whole browser context before capture creates a page,
 so popup requests receive the same policy; service workers are blocked. Each target's
 exact loopback host is part of context reuse, preventing sibling-host permission leaks.
+A start against a loopback/private target without the matching capability emits one
+warning per job before the unchanged refusal. Outward plan, job, manifest, and ZIP URL
+projections strip `user:password@` userinfo; live navigation targets are not rewritten.
+
+Allowed navigation checks deliberately re-resolve DNS (there is no success cache or IP
+pinning). A per-event-loop four-slot semaphore bounds resolver jobs queued to the
+default executor, preventing an unbounded executor flood. Document checks have a
+10-second bound and fail the target on timeout;
+subresource checks have a 2-second bound, then abort only that request and warn. Both
+paths remain fail-closed, and a deadline cannot cancel an OS resolver already running.
+
+The real WebSocket and popup/service-worker proofs are marked `browser` and `network`.
+They are required security acceptance, not optional skips: missing Playwright or Chromium
+is a named test failure. Install Chromium with `python -m playwright install chromium`.
 
 ## Requirements
 

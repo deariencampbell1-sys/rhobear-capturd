@@ -28,6 +28,7 @@ from typing import Any
 from urllib import request as urlrequest
 from urllib.request import url2pathname
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
+from weakref import WeakKeyDictionary
 from xml.etree import ElementTree
 
 from capturd._net import is_private_ip
@@ -48,6 +49,9 @@ TRIGGER_CLICK_TIMEOUT_MS = 2500
 TRIGGER_STATE_TIMEOUT_MS = 2500
 TRIGGER_POLL_INTERVAL_MS = 100
 NAV_GUARD_TIMEOUT_S = 10
+NAV_GUARD_SUBRESOURCE_TIMEOUT_S = 2
+NAV_RESOLVER_WORKERS = 4
+_NAV_RESOLVER_SEMAPHORES = WeakKeyDictionary()
 # A refused WebSocket is closed with 1008 (policy violation), never connected.
 WS_REFUSED_CLOSE_CODE = 1008
 DEFAULT_WAIT_MS = 600
@@ -444,6 +448,7 @@ async def _check_navigation_url(
     url: str, *, allow_loopback: bool, loopback_host: str | None,
     allow_private_hosts: tuple[str, ...] = (), allow_file_access: bool = False,
     cache: dict[tuple[Any, ...], RestedCaptureError | None] | None = None,
+    resource_type: str = "document",
 ) -> None:
     parsed = urlparse(url)
     key = (
@@ -454,10 +459,9 @@ async def _check_navigation_url(
     if cache is not None and key in cache:
         # Refusals are fail-closed and reusable. Successful verdicts are never
         # cached: every allowed request re-resolves to narrow DNS rebinding.
-        # Measured cost: one document plus 40 same-origin subresources performs
-        # 41 resolver calls. Very large pages can queue many asyncio.to_thread
-        # jobs and contend for the bounded default executor, delaying other
-        # users and approaching the 10-second guard timeout under slow DNS.
+        # One document plus 40 same-origin subresources performs 41 resolver
+        # calls. A per-loop four-slot semaphore bounds default-executor jobs;
+        # it does not memoize successes or pin Chromium to resolved IPs.
         raise cache[key]
     resolver_kwargs = {
         "allow_loopback": allow_loopback, "loopback_host": loopback_host,
@@ -466,10 +470,23 @@ async def _check_navigation_url(
         resolver_kwargs["allow_private_hosts"] = allow_private_hosts
     if allow_file_access:
         resolver_kwargs["allow_file_access"] = True
+    # Document checks have ten seconds and remain fatal on timeout. A slow
+    # subresource has two seconds, then only that request aborts with a warning.
+    # Neither deadline can cancel an OS resolver call already running.
+    timeout_s = (
+        NAV_GUARD_TIMEOUT_S if resource_type == "document"
+        else NAV_GUARD_SUBRESOURCE_TIMEOUT_S
+    )
     try:
-        await asyncio.wait_for(asyncio.to_thread(
-            _reject_navigation_url, url, **resolver_kwargs,
-        ), timeout=NAV_GUARD_TIMEOUT_S)
+        loop = asyncio.get_running_loop()
+        semaphore = _NAV_RESOLVER_SEMAPHORES.get(loop)
+        if semaphore is None:
+            semaphore = asyncio.BoundedSemaphore(NAV_RESOLVER_WORKERS)
+            _NAV_RESOLVER_SEMAPHORES[loop] = semaphore
+        async with semaphore:
+            await asyncio.wait_for(asyncio.to_thread(
+                _reject_navigation_url, url, **resolver_kwargs,
+            ), timeout=timeout_s)
     except RestedCaptureError as exc:
         if cache is not None:
             cache[key] = exc
@@ -494,18 +511,19 @@ async def _install_navigation_guard(
         guard_errors = []
 
     async def guard(route: Any) -> None:
+        resource_type = getattr(route.request, "resource_type", "document")
         try:
             await _check_navigation_url(
                 route.request.url, allow_loopback=allow_loopback,
                 loopback_host=loopback_host, allow_private_hosts=allow_private_hosts,
                 allow_file_access=allow_file_access, cache=navigation_cache,
+                resource_type=resource_type,
             )
         except Exception as exc:
             original_class = type(exc).__name__
             if not isinstance(exc, RestedCaptureError):
                 exc = RestedCaptureError(f"navigation URL check failed ({original_class})")
             await route.abort()
-            resource_type = getattr(route.request, "resource_type", "document")
             if resource_type == "document":
                 if not guard_errors:
                     guard_errors.append(exc)
@@ -1561,7 +1579,7 @@ async def _capture_one(
             trigger_fired = False
             post_trigger_url = post_goto_url
             if (target.trigger_selector or "").strip():
-                pre_trigger_url = page.url
+                pre_trigger_url = post_goto_url
                 trigger_fired = await _apply_trigger(page, target.trigger_selector, settings["wait_ms"])
                 post_trigger_url = page.url
                 if (
@@ -1830,6 +1848,62 @@ def _redact_settings_secrets(text: str, settings: dict[str, Any]) -> str:
     return text
 
 
+def _redact_url_userinfo(url: str) -> str:
+    """Remove credentials from an outward URL without changing its target."""
+    parsed = urlparse(url)
+    if "@" not in parsed.netloc:
+        return url
+    return urlunparse(parsed._replace(netloc=parsed.netloc.rsplit("@", 1)[-1]))
+
+
+def _redact_outward_result_urls(result: dict[str, Any]) -> dict[str, Any]:
+    """Project result/state URLs without userinfo, preserving identity if clean."""
+    safe = dict(result)
+    changed = False
+    url = result.get("url")
+    if isinstance(url, str):
+        safe_url = _redact_url_userinfo(url)
+        changed = safe_url != url
+        safe["url"] = safe_url
+    states = result.get("states")
+    if isinstance(states, list):
+        safe_states = [
+            _redact_outward_result_urls(state) if isinstance(state, dict) else state
+            for state in states
+        ]
+        if any(new is not old for new, old in zip(safe_states, states)):
+            changed = True
+            safe["states"] = safe_states
+    return safe if changed else result
+
+
+def _warn_if_private_targets_lack_capability(
+    targets: list[CaptureTarget], settings: dict[str, Any],
+) -> None:
+    """Warn once per start for literal local targets lacking explicit policy."""
+    allow_loopback = bool(settings.get("allow_loopback"))
+    allowed = {
+        _canonical_host(host) for host in settings.get("allow_private_hosts") or ()
+    }
+    for target in targets:
+        host = _canonical_host(urlparse(target.url).hostname)
+        address = _unwrapped_address(host)
+        local_name = host == "localhost" or host.endswith(".localhost")
+        if not local_name and (address is None or not is_private_ip(host)):
+            continue
+        if host in allowed:
+            continue
+        if allow_loopback and (local_name or (address is not None and address.is_loopback)):
+            continue
+        warnings.warn(
+            "capture plan includes loopback/private targets without an explicit "
+            "allow capability; navigation will be refused",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return
+
+
 def _write_json(path: Path, data: dict[str, Any]) -> None:
     path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
 
@@ -1876,6 +1950,7 @@ class RestedCaptureManager:
         if map_input:
             plan_payload["dry_run"] = True
         urls, targets, settings = build_capture_plan(plan_payload, **capabilities)
+        _warn_if_private_targets_lack_capability(targets, settings)
         job_id = uuid.uuid4().hex[:12]
         job_name = _slug(str(payload.get("name") or "") or _job_name(), _job_name())
         work_dir = self.root_dir / job_id
@@ -1892,7 +1967,7 @@ class RestedCaptureManager:
             "created_at": utc_now_iso(),
             "updated_at": utc_now_iso(),
             "message": "Queued",
-            "urls": urls,
+            "urls": [_redact_url_userinfo(url) for url in urls],
             "total": len(targets),
             "completed": 0,
             "failed": 0,
@@ -1944,7 +2019,7 @@ class RestedCaptureManager:
     def _record_result(self, job_id: str, result: dict[str, Any]) -> None:
         with self._lock:
             job = self._jobs[job_id]
-            job["results"].append(result)
+            job["results"].append(_redact_outward_result_urls(result))
             job["completed"] = int(job.get("completed", 0)) + 1
             if result.get("status") != "ok":
                 job["failed"] = int(job.get("failed", 0)) + 1
@@ -1969,7 +2044,7 @@ class RestedCaptureManager:
                     live_payload, **(capabilities or {}),
                 )
                 self._patch(job_id, {
-                    "urls": urls,
+                    "urls": [_redact_url_userinfo(url) for url in urls],
                     "total": len(targets),
                     "settings": _safe_settings(settings),
                     "discovery": settings.get("discovery") or {},
@@ -1986,9 +2061,12 @@ class RestedCaptureManager:
                 "job_id": job_id,
                 "captured_at": utc_now_iso(),
                 "settings": _safe_settings(settings),
-                "urls": self.get(job_id).get("urls") or [],
+                "urls": [
+                    _redact_url_userinfo(url)
+                    for url in self.get(job_id).get("urls") or []
+                ],
                 "discovery": settings.get("discovery") or {},
-                "results": results,
+                "results": [_redact_outward_result_urls(result) for result in results],
             }
             _write_json(work_dir / "manifest.json", manifest)
 
