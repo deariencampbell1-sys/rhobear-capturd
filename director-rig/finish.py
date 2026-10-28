@@ -82,12 +82,41 @@ def _ff_text(text: str) -> str:
 # too) -- a real filename containing a colon mid-name (e.g.
 # "logo_v2:final.png") is unaffected, and is_file()+resolve() below is the
 # actual safety net regardless (the resolved absolute path we return always
-# starts with "/", which ffmpeg never treats as a protocol scheme).
+# starts with "/" on POSIX or a drive root on Windows, neither of which
+# ffmpeg treats as a protocol scheme).
 _PROTOCOL_PREFIX_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:")
+
+# The ONE carve-out from the scheme rule: a Windows drive letter. A single
+# ASCII letter followed by ':' and then '\', '/' or end-of-string is a drive
+# path -- absolute "C:\Users\me\shot.png", "C:/Users/me/shot.png", or a bare
+# "C:" -- not a protocol. ffmpeg has no single-letter protocol, so nothing
+# real is lost by the carve-out. Everything else matching the scheme pattern
+# stays rejected, including the drive-RELATIVE form "C:shot.png" (no
+# separator after the colon): it is genuinely ambiguous to ffmpeg's parser
+# and callers should pass absolute paths instead.
+#
+# UNC paths ("\\server\share\shot.png") and device paths ("\\?\C:\...",
+# "\\.\pipe\name") start with a backslash, so they never match the scheme
+# pattern and are not protocol-rejected; they simply fall through to the
+# is_file()+resolve() checks, which are the real safety net for them too.
+_DRIVE_LETTER_RE = re.compile(r"^[A-Za-z]:([\\/]|$)")
+
+
+def _looks_like_protocol(raw: str) -> bool:
+    """True when ffmpeg would parse *raw* as a protocol, not a file path.
+
+    Platform-independent string rule (pinned by director-rig/tests/test_finish.py
+    on both POSIX and Windows): scheme-shaped prefixes are protocols, except
+    the Windows drive-letter form -- a single letter, then a colon, then a
+    path separator or end-of-string (see _DRIVE_LETTER_RE above).
+    """
+    if _DRIVE_LETTER_RE.match(raw):
+        return False
+    return bool(_PROTOCOL_PREFIX_RE.match(raw))
 
 
 def _safe_input_path(raw: str, label: str) -> str:
-    if _PROTOCOL_PREFIX_RE.match(raw):
+    if _looks_like_protocol(raw):
         sys.exit(f"finish.py: --{label} {raw!r} looks like a protocol prefix "
                   f"-- rejected (ffmpeg would interpret this as a protocol, "
                   f"not a file path; use an absolute or ./-relative path)")

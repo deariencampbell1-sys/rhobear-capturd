@@ -8,8 +8,10 @@ output. No network, no Playwright — this module is pure parsing.
 from __future__ import annotations
 
 import ast
+import inspect
 import json
 import re
+import shutil
 import traceback
 from pathlib import Path
 
@@ -958,7 +960,7 @@ def test_overlong_pathway_id_is_refused():
     assert long_id[:40] in message
 
 
-def test_every_manifest_fixture_parses():
+def test_every_manifest_fixture_parses(fixtures_dir: Path | None = None):
     # D3': the duplicate/over-long id refusals must be proven safe for the
     # inputs we ship — every manifest fixture in the repo parses without
     # raising, so the refusal cannot be blamed for breaking a real input.
@@ -968,8 +970,11 @@ def test_every_manifest_fixture_parses():
     # map lists the counts each fixture's table actually declares, and all
     # of them must come out non-None. A fixture added later must join the
     # map — an unlisted fixture fails below instead of silently skipping
-    # the count assertion.
-    manifests = sorted(FIXTURES.glob("*.md"))
+    # the count assertion. D107: fixtures_dir lets the D91 stray-file guard
+    # run this test against a temporary COPY of the fixtures directory, so
+    # the guard never writes into tests/fixtures/.
+    fixtures = Path(fixtures_dir) if fixtures_dir is not None else FIXTURES
+    manifests = sorted(fixtures.glob("*.md"))
     assert manifests, "no manifest fixtures found under capture-foundations"
     declared_counts = {
         "pathway-manifest-boolean-columns.md": (
@@ -997,7 +1002,9 @@ def test_every_manifest_fixture_parses():
             )
 
 
-def test_every_fixture_populates_every_key_main_populated():
+def test_every_fixture_populates_every_key_main_populated(
+    fixtures_dir: Path | None = None,
+):
     # D76: D66's "one table, one extractor" is withdrawn — main's claiming
     # returns. Each extractor claims a table by its OWN heading and header
     # shape, and more than one extractor may read the same table: that is
@@ -1157,14 +1164,17 @@ def test_every_fixture_populates_every_key_main_populated():
     # directory (a .DS_Store, an editor swap file) cannot fail the suite
     # for a reason unrelated to pathway parsing. A fixture added later
     # must still join the maps: test_every_manifest_fixture_parses
-    # asserts every *.md in the directory is mapped.
+    # asserts every *.md in the directory is mapped. D107: fixtures_dir
+    # lets the D91 stray-file guard run this comparison against a
+    # temporary COPY of the fixtures directory.
+    fixtures = Path(fixtures_dir) if fixtures_dir is not None else FIXTURES
     for name in expected:
-        assert (FIXTURES / name).is_file(), (
+        assert (fixtures / name).is_file(), (
             f"{name} is missing from capture-foundations — the fixture "
             "comparison has nothing to compare"
         )
     for name, want in expected.items():
-        path = FIXTURES / name
+        path = fixtures / name
         parsed = (parse_verifier_json(path) if path.suffix == ".json"
                   else parse_manifest_md(path))
         assert parsed["summary"] == want["summary"], name
@@ -1809,20 +1819,6 @@ def test_unknown_unwired_token_is_unclear():
     assert row["status"] == "UNCLEAR"
     assert row["rawStatus"] == "maybe"
     assert row["unwiredFlag"] is False
-
-
-def test_stray_file_in_the_fixtures_directory_does_not_fail_the_suite():
-    # D88: a stray file in the fixtures directory must not fail the suite —
-    # the fixture comparison asserts the REQUIRED fixtures are present and
-    # each has its expected values, never the exact iterdir() set. The two
-    # fixture-consuming tests are run as-is with the stray in place.
-    stray = FIXTURES / "stray-notes.txt"
-    stray.write_text("a stray file — not a fixture\n", encoding="utf-8")
-    try:
-        test_every_manifest_fixture_parses()
-        test_every_fixture_populates_every_key_main_populated()
-    finally:
-        stray.unlink(missing_ok=True)
 
 
 def test_permission_error_becomes_pathway_map_error(tmp_path, monkeypatch):
@@ -3190,3 +3186,520 @@ def test_docstring_is_static_and_refusals_are_text():
     # Every refusal entry appears in the docstring as text.
     for refusal in pathway_map.REFUSALS:
         assert refusal in raw_docstring, refusal
+
+
+def test_consumed_section_count_table_without_separator_refuses():
+    # D89: D85's symmetry, in the safe direction. A count-shaped table a
+    # CONSUMED section cannot read — no separator row, or a header collapsed
+    # over its separator — must refuse naming the section and the line,
+    # exactly as D85 refuses the identical construct in an unconsumed
+    # section. Before D89 the table parser built no table for either
+    # construct, so no extractor gate ever saw it, and the summary read
+    # all-None with no error — a silent drop: the caller could not tell
+    # "no counts" from "counts I could not read". A well-formed count
+    # table reads its counts unchanged in both places (D24/D85 unchanged).
+    noseparator = "\n".join([
+        "# Pathway Manifest — count table without a separator",  # line 1
+        "",                                                      # line 2
+        "## Summary",                                            # line 3
+        "",                                                      # line 4
+        "| Category | Count |",                                  # line 5
+        "| WIRED | 3 |",                                         # line 6 — no separator
+        "",                                                      # line 7
+        "## 1. Pathways Table",                                  # line 8
+        "",                                                      # line 9
+        "| id | status |",                                       # line 10
+        "|---|---|",                                             # line 11
+        "| p1 | WIRED |",                                        # line 12
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(noseparator)
+    message = str(excinfo.value)
+    assert "Summary" in message    # names the section
+    assert "line 5" in message     # names the line
+    assert "count" in message      # names why: counts sit here unread
+
+    collapsed = "\n".join([
+        "# Pathway Manifest — collapsed count header under Summary",  # line 1
+        "",                                                           # line 2
+        "## Summary",                                                 # line 3
+        "",                                                           # line 4
+        "| Wired Count |",                                            # line 5 — one cell
+        "|---|---|",                                                  # line 6 — two columns
+        "| WIRED | 2 |",                                              # line 7
+        "",                                                           # line 8
+        "## 1. Pathways Table",                                       # line 9
+        "",                                                           # line 10
+        "| id | status |",                                            # line 11
+        "|---|---|",                                                  # line 12
+        "| p1 | WIRED |",                                             # line 13
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(collapsed)
+    message = str(excinfo.value)
+    assert "Summary" in message
+    assert "line 5" in message
+    assert "collapsed" in message
+
+    # D24/D85 unchanged: a well-formed count table reads its counts
+    # wherever its shape sits — under the consumed heading and under a
+    # heading no extractor names (the probe finds a count table, so the
+    # Notes section is consumed and its counts are read).
+    well_formed = "\n".join([
+        "# Pathway Manifest — well-formed count table",  # line 1
+        "",                                              # line 2
+        "## Summary",                                    # line 3
+        "",                                              # line 4
+        "| Category | Count |",                          # line 5
+        "|---|---|",                                     # line 6
+        "| WIRED | 3 |",                                 # line 7
+        "",                                              # line 8
+        "## 1. Pathways Table",                          # line 9
+        "",                                              # line 10
+        "| id | status |",                               # line 11
+        "|---|---|",                                     # line 12
+        "| p1 | WIRED |",                                # line 13
+    ])
+    parsed = parse_manifest_text(well_formed)
+    assert parsed["summary"]["wired"] == 3
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+
+    parsed = parse_manifest_text(well_formed.replace("## Summary", "## Notes"))
+    assert parsed["summary"]["wired"] == 3
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+
+
+def test_row_lines_is_not_assumed():
+    # D90: `_extract_summary` and `_extract_anti_patterns` indexed
+    # `table["row_lines"]` unconditionally, but the key exists only when
+    # `_extract_tables` ran with row_lines=True — which the manifest's
+    # strict parse always does (D61), so no production path reaches the
+    # extractors without it today. The read is total now: the key is used
+    # when present, and when it is absent the extractors behave exactly as
+    # today's callers expect — counts read, records read, refusals still
+    # fire (naming the table row, since no input line was parsed) — never
+    # a KeyError.
+    summary_text = "\n".join([
+        "| Category | Count |",     # line 1
+        "|---|---|",                # line 2
+        "| WIRED | 3 |",            # line 3
+        "| TOTAL PATHWAYS | 4 |",   # line 4
+    ])
+    anti_text = "\n".join([
+        "| Category | Count | File | Line | Quote |",        # line 1
+        "|---|---|---|---|---|",                             # line 2
+        "| duplicate-fetch | 2 | hub.ts | 8 | `fetch(x)` |",  # line 3
+    ])
+    # The path: `_extract_tables`' DEFAULT shape — row_lines=False, the
+    # key absent (D40's default dict) — fed straight to the extractors,
+    # the way any non-manifest caller would. This pins the `.get`: the
+    # absent key cannot KeyError.
+    summary_tables = pathway_map._extract_tables(summary_text, 1)
+    assert all("row_lines" not in table for table in summary_tables)
+    summary = pathway_map._extract_summary(
+        [({"heading": "Summary"}, summary_tables)]
+    )
+    assert summary["wired"] == 3
+    assert summary["pathwaysTotal"] == 4
+
+    anti_tables = pathway_map._extract_tables(anti_text, 1)
+    assert all("row_lines" not in table for table in anti_tables)
+    assert pathway_map._extract_anti_patterns(
+        [({"heading": "Anti-patterns"}, anti_tables)]
+    ) == [
+        {"category": "duplicate-fetch", "count": 2, "file": "hub.ts",
+         "line": "8", "quote": "`fetch(x)`"},
+    ]
+
+    # The refusals fire on the same conditions without the key — naming
+    # the table row instead of a line number (none was parsed), never a
+    # KeyError and never a fabricated line.
+    conflicting = "\n".join([
+        "| Category | Count |",   # line 1
+        "|---|---|",              # line 2
+        "| WIRED | 3 |",          # line 3
+        "| WIRED | 4 |",          # line 4 — conflicts
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        pathway_map._extract_summary(
+            [({"heading": "Summary"},
+              pathway_map._extract_tables(conflicting, 1))]
+        )
+    assert "conflicting count row" in str(excinfo.value)
+
+    categoryless = "\n".join([
+        "| Category | Count | File |",   # line 1 — record shape, not count-shaped
+        "|---|---|---|",                 # line 2
+        "| | 3 | hub.ts |",              # line 3 — category cell empty
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        pathway_map._extract_anti_patterns(
+            [({"heading": "Anti-patterns"},
+              pathway_map._extract_tables(categoryless, 1))]
+        )
+    assert "no usable category" in str(excinfo.value)
+
+
+def test_stray_fixture_file_is_a_real_guard(tmp_path):
+    # D91: the D88 stray-file test wrote a .txt — a file NEITHER
+    # FIXTURES.glob("*.md") nor either expected-name map would ever pick
+    # up — so it could not fail and proved nothing: the suite stayed green
+    # because of the file EXTENSION, not because of any guard. This is the
+    # test of that test: the stray is a .md the glob WOULD pick up, so
+    # what holds is the guards themselves —
+    #
+    #   * the comparison test's expectations still pass with the stray in
+    #     place (D88: required names asserted present and compared, the
+    #     exact directory set never asserted), and
+    #   * the D6 count map still catches an unmapped .md BY NAME — a
+    #     fixture added later must join the map, never silently skip the
+    #     count assertion.
+    #
+    # The vacuous .txt variant is gone: a stray-file test that cannot fail
+    # guards nothing. D107: the stray is written into a TEMPORARY COPY of
+    # the fixtures directory — never into tests/fixtures/, which a test
+    # has no business mutating (two parallel runs race; a killed process
+    # leaves a stray in the tree). The stray is deleted in a finally, and
+    # the real fixtures directory is asserted byte-identical afterwards.
+    vacuous = "test_stray_file_in_the_fixtures_directory_does_not_fail_the_suite"
+    assert vacuous not in globals(), (
+        "the vacuous D88 stray-file test is still defined — it writes a .txt "
+        "neither the *.md glob nor either expected-name map would ever pick "
+        "up, so it cannot fail and proves nothing; D91 replaced it with "
+        "this test"
+    )
+    snapshot = {p.name: p.read_bytes() for p in FIXTURES.iterdir()}
+    work = tmp_path / "capture-foundations"
+    shutil.copytree(FIXTURES, work)
+    stray = work / "stray-notes.md"
+    stray.write_text("a stray file — not a fixture\n", encoding="utf-8")
+    try:
+        # D88 holds for a file the glob sees: the comparison expectations
+        # pass unchanged — run against the COPY, never the repository.
+        test_every_fixture_populates_every_key_main_populated(work)
+        # D6's guard bites by name: an unmapped .md fails the count map
+        # with its own message — it never silently skips the counts.
+        with pytest.raises(AssertionError) as excinfo:
+            test_every_manifest_fixture_parses(work)
+        assert "stray-notes.md" in str(excinfo.value)
+        assert "D6 count map" in str(excinfo.value)
+    finally:
+        stray.unlink(missing_ok=True)
+    assert not stray.exists()
+    # D107: tests/fixtures/ is byte-identical to what it was — no stray
+    # left behind, nothing else disturbed.
+    assert {p.name: p.read_bytes() for p in FIXTURES.iterdir()} == snapshot
+
+
+def test_a_fenced_code_block_is_never_a_table():
+    # D105: a pipe-bearing block inside a fenced code region (``` or ~~~)
+    # is PROSE, not a table. A manifest that shows a table-shaped example
+    # inside a code fence must parse with that block contributing nothing
+    # and raising nothing, in any section — judging it is a false refusal
+    # or a false count, the failure class this lane treats as worse than a
+    # miss. The D85/D89 count-intent scan skips fenced lines too, and the
+    # D77 probe never consumes a section on a fenced table. The SAME
+    # constructs outside a fence still behave exactly as D24/D77/D85/D89
+    # and the strict parser decide.
+    tail = [
+        "",                     # blank line before the pathways table
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+    ]
+
+    # A fenced count-shaped construct with no separator under a CONSUMED
+    # section: the D89 scan must not see it — the document parses, the
+    # fenced example contributes nothing.
+    fenced = "\n".join([
+        "# Pathway Manifest — count example inside a fence",  # line 1
+        "",                                                    # line 2
+        "## Summary",                                          # line 3
+        "",                                                    # line 4
+        "```",                                                 # line 5
+        "| Category | Count |",                                # line 6
+        "| WIRED | 3 |",                                       # line 7 — no separator
+        "```",                                                 # line 8
+    ] + tail)
+    parsed = parse_manifest_text(fenced)
+    assert parsed["summary"]["wired"] is None
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+
+    # The same construct outside the fence still refuses (D89 stands).
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(fenced.replace("```", ""))
+    message = str(excinfo.value)
+    assert "Summary" in message   # names the section
+    assert "line 6" in message    # names the line
+    assert "count" in message     # names why: counts sit here unread
+
+    # A fenced WELL-FORMED count table never feeds the summary — a code
+    # example is not a count. Before D105 the strict parser read straight
+    # through the fence and the summary carried the example's counts.
+    fenced_table = "\n".join([
+        "# Pathway Manifest — well-formed count table inside a fence",  # 1
+        "",                                                              # 2
+        "## Summary",                                                    # 3
+        "",                                                              # 4
+        "```md",                                                         # 5
+        "| Category | Count |",                                          # 6
+        "|---|---|",                                                     # 7
+        "| WIRED | 3 |",                                                 # 8
+        "```",                                                           # 9
+    ] + tail)
+    parsed = parse_manifest_text(fenced_table)
+    assert parsed["summary"]["wired"] is None
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+
+    # Outside the fence the same table sets the count (D24 stands).
+    parsed = parse_manifest_text(
+        fenced_table.replace("```md", "").replace("```", "")
+    )
+    assert parsed["summary"]["wired"] == 3
+
+    # A fenced MISALIGNED row never fires the strict parser's misaligned
+    # refusal — the example is prose, not a broken table.
+    fenced_misaligned = "\n".join([
+        "# Pathway Manifest — misaligned row inside a fence",  # line 1
+        "",                                                     # line 2
+        "## Summary",                                           # line 3
+        "",                                                     # line 4
+        "```",                                                  # line 5
+        "| Category | Count |",                                 # line 6
+        "|---|---|",                                            # line 7
+        "| WIRED | 3 | extra |",                                # line 8
+        "```",                                                  # line 9
+    ] + tail)
+    parsed = parse_manifest_text(fenced_misaligned)
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(fenced_misaligned.replace("```", ""))
+    assert "misaligned row" in str(excinfo.value)
+
+    # A tilde fence is a fence too.
+    fenced_tilde = "\n".join([
+        "# Pathway Manifest — tilde-fenced count example",  # line 1
+        "",                                                  # line 2
+        "## Summary",                                        # line 3
+        "",                                                  # line 4
+        "~~~",                                               # line 5
+        "| Category | Count |",                              # line 6
+        "| WIRED | 3 |",                                     # line 7
+        "~~~",                                               # line 8
+    ] + tail)
+    parsed = parse_manifest_text(fenced_tilde)
+    assert parsed["summary"]["wired"] is None
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+
+    # A fenced table under a heading no extractor names: the D77 probe
+    # must not consume the section on it (before D105 the probe PARSED
+    # the fenced table, consumed Notes on it and read its counts — a
+    # count from prose), and the D85 scan must not refuse it either.
+    fenced_notes = "\n".join([
+        "# Pathway Manifest — fenced example under Notes",  # line 1
+        "",                                                  # line 2
+        "## Notes",                                          # line 3
+        "",                                                  # line 4
+        "```",                                               # line 5
+        "| Category | Count |",                              # line 6
+        "|---|---|",                                         # line 7
+        "| WIRED | 3 |",                                     # line 8
+        "```",                                               # line 9
+    ] + tail)
+    parsed = parse_manifest_text(fenced_notes)
+    assert parsed["summary"]["wired"] is None
+    assert [p["id"] for p in parsed["pathways"]] == ["p1"]
+
+
+def test_the_scan_never_preempts_a_strict_refusal():
+    # D106: for every construct that refused BEFORE D89 — a misaligned
+    # row, an unbalanced backtick, an unrecognised count header, a
+    # conflicting count, a duplicate pathway id — the refusal that fires
+    # is the strict parser's own: same class, same message, with the
+    # D85/D89 scan present. The scan is the LAST refusal in the parse: it
+    # runs only after every strict parse and every extractor has had its
+    # refusal, so it can never pre-empt one. Each case plants a construct
+    # the scan WOULD refuse (a two-column count-shaped run with no
+    # separator) in an EARLIER section than the pre-D89 construct, so a
+    # scan that ran first — or at all before the strict parse or the
+    # extractors — would fire the scan's message instead; every case
+    # asserts the pre-D89 message text.
+    plant = [
+        "## Notes",            # unconsumed by heading, unread by gates
+        "| Count | Number |",  # two columns, a count word, NO separator —
+        "| WIRED | 3 |",       # exactly what the D85/D89 scan refuses
+        "",
+    ]
+
+    # A misaligned row keeps its own refusal.
+    text = "\n".join([
+        "# Pathway Manifest — scan must not preempt a misaligned row",  # 1
+        "",                                                              # 2
+    ] + plant + [
+        "## 1. Pathways Table",  # line 7
+        "",                       # line 8
+        "| id | status |",        # line 9
+        "|---|---|",              # line 10
+        "| p1 | WIRED | extra |",  # line 11
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(text)
+    assert str(excinfo.value) == (
+        "table row at line 11 has 3 cells but its header has 2 — refusing "
+        "misaligned row, first cell: 'p1'"
+    )
+
+    # An unbalanced backtick in a confirmed row keeps its own refusal.
+    text = "\n".join([
+        "# Pathway Manifest — scan must not preempt an unbalanced backtick",
+        "",
+    ] + plant + [
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | `WIRED |",  # line 11 — one backtick, odd
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(text)
+    assert str(excinfo.value) == (
+        "table line 11 has an unbalanced backtick in cell '`WIRED' — refusing"
+    )
+
+    # An unrecognised count header keeps the D38 refusal, vocabulary and
+    # all (D48: the message renders from the vocabulary sets themselves).
+    text = "\n".join([
+        "# Pathway Manifest — scan must not preempt an unrecognised header",
+        "",
+    ] + plant + [
+        "## Summary",
+        "",
+        "| foo | bar |",     # line 9
+        "|---|---|",         # line 10
+        "| WIRED | 3 |",     # line 11
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(text)
+    assert str(excinfo.value) == (
+        "table header at line 9 is 'foo | bar' — its rows read like count "
+        "rows (count label 'WIRED' with a numeric count) but the header is "
+        "not a recognised count-table header (accepted orders: a category "
+        "word first and a count word second, or a count word first and a "
+        "category word second; accepted category words: "
+        f"{pathway_map._CATEGORY_WORDS_TEXT}; accepted count words: "
+        f"{pathway_map._COUNT_WORDS_TEXT}) — refusing rather than "
+        "returning nulls"
+    )
+
+    # A conflicting count row keeps the D61 refusal — the extractors'
+    # own message, line references included.
+    text = "\n".join([
+        "# Pathway Manifest — scan must not preempt a conflicting count",
+        "",
+    ] + plant + [
+        "## Summary",
+        "",
+        "| Category | Count |",
+        "|---|---|",
+        "| WIRED | 3 |",     # line 11
+        "| WIRED | 4 |",     # line 12 — conflicts
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(text)
+    assert str(excinfo.value) == (
+        "count row at line 12 sets summary key 'wired' to 4 — already set "
+        "to 3 at line 11 — refusing a conflicting count row"
+    )
+
+    # ...and a duplicate pathway id keeps its refusal.
+    text = "\n".join([
+        "# Pathway Manifest — scan must not preempt a duplicate id",
+        "",
+    ] + plant + [
+        "## 1. Pathways Table",
+        "",
+        "| id | status |",
+        "|---|---|",
+        "| p1 | WIRED |",
+        "| p1 | MOCKED |",
+    ])
+    with pytest.raises(PathwayMapError) as excinfo:
+        parse_manifest_text(text)
+    assert str(excinfo.value) == "duplicate pathway id 'p1' — refusing"
+
+
+def test_the_stray_test_never_writes_into_the_repository(tmp_path, monkeypatch):
+    # D107: the stray-file test must never write into tests/fixtures/ —
+    # it works on a TEMPORARY COPY of the fixtures directory, the stray
+    # is removed in a finally, and the real fixtures directory is asserted
+    # unchanged afterwards. A test that mutates the repository it guards
+    # is a defect in the test: two parallel runs race, and a killed
+    # process leaves a stray file in the tree. This meta-test refuses ANY
+    # write under the real fixtures directory while the stray test runs,
+    # so the pre-D107 shape — which wrote the stray straight into
+    # tests/fixtures/ — fails here by name, and the repository is never
+    # actually touched, not even by the red run.
+    real_fixtures = FIXTURES.resolve()
+    snapshot = {p.name: p.read_bytes() for p in FIXTURES.iterdir()}
+    original_write_text = Path.write_text
+
+    def refuse_repo_writes(self, data, *args, **kwargs):
+        resolved = self.resolve()
+        if resolved == real_fixtures or real_fixtures in resolved.parents:
+            raise AssertionError(
+                f"the stray-fixture test wrote into the repository: '{self}' "
+                "— D107: it must work on a temporary copy of the fixtures "
+                "directory, never write into tests/fixtures/"
+            )
+        return original_write_text(self, data, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", refuse_repo_writes)
+    parameters = inspect.signature(
+        test_stray_fixture_file_is_a_real_guard
+    ).parameters
+    if parameters:
+        # D107 shape: the stray test works on a caller-provided temporary
+        # copy — hand it this meta-test's own tmp_path.
+        test_stray_fixture_file_is_a_real_guard(tmp_path)
+    else:
+        # Pre-D107 shape: the stray test takes no fixtures directory at
+        # all — it can only have been writing into tests/fixtures/,
+        # which refuse_repo_writes refuses above.
+        test_stray_fixture_file_is_a_real_guard()
+    # The real fixtures directory is untouched afterwards — byte-identical
+    # set of names, no stray left behind.
+    assert {p.name: p.read_bytes() for p in FIXTURES.iterdir()} == snapshot
+
+
+def test_row_reference_output_is_asserted_and_a_truncated_list_refuses():
+    # D107: D90's degraded branch was executed but its OUTPUT was never
+    # asserted — a test that runs code without pinning what it returns
+    # guards nothing. And a row_lines list that IS present but shorter
+    # than the table's row list is not silently downgraded to a row
+    # reference: line data that exists but disagrees with the rows is a
+    # misalignment inside the table dict itself — the same class of
+    # defect as a misaligned row — and refuses with a named message
+    # (pre-D90 the same shape raised IndexError, so a loud failure is the
+    # restored behaviour, not a new one). Absence of the key still
+    # degrades honestly to the row's 1-based position (D90, locked).
+    assert pathway_map._row_reference(None, 0) == "row 1"
+    assert pathway_map._row_reference(None, 2) == "row 3"
+    assert pathway_map._row_reference([10, 20], 0) == "line 10"
+    assert pathway_map._row_reference([10, 20], 1) == "line 20"
+    with pytest.raises(PathwayMapError) as excinfo:
+        pathway_map._row_reference([10], 1)
+    assert "truncated row_lines" in str(excinfo.value)
+
+    # The refusal fires through the extractors too: a table dict whose
+    # row_lines disagree with its rows refuses by name, never a message
+    # citing a row number for data the caller meant as an input line.
+    table = {
+        "headers": ["Category", "Count"],
+        "rows": [["WIRED", "3"], ["WIRED", "4"]],
+        "row_lines": [10],
+    }
+    with pytest.raises(PathwayMapError) as excinfo:
+        pathway_map._extract_summary([({"heading": "Summary"}, [table])])
+    assert "truncated row_lines" in str(excinfo.value)
