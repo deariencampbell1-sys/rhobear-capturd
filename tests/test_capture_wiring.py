@@ -1942,6 +1942,53 @@ def test_r14_userinfo_never_reaches_plan_manifest_or_zip(
     assert "https://example.com/private" in manifest_text
 
 
+def test_r16_failed_userinfo_navigation_never_reaches_job_manifest_or_zip(
+    tmp_path, monkeypatch,
+):
+    """A real _capture_one failure must scrub Playwright's error and call log."""
+    raw_url = "https://user:pass@example.com/private"
+    payload = {
+        "urls": [raw_url], "viewports": ["desktop"], "schemes": ["light"],
+        "retries": 0,
+    }
+
+    def failed_navigation(targets, settings, shots_dir, progress):
+        context, _target, _settings, path, page = _capture_stack(
+            shots_dir, monkeypatch, url=raw_url,
+        )
+        page.goto.side_effect = RuntimeError(
+            f"Page.goto: net::ERR_CONNECTION_REFUSED at {raw_url}\n"
+            f'Call log: navigating to "{raw_url}"'
+        )
+        result = asyncio.run(capture._capture_one(
+            context, targets[0], settings, path,
+        ))
+        assert result["status"] == "failed"
+        assert "user:pass" not in result["error"]
+        assert result["error"].count("https://example.com/private") == 2
+        progress(result)
+        return [result]
+
+    monkeypatch.setattr(capture, "run_capture", failed_navigation)
+    _ManualThread.instances = []
+    monkeypatch.setattr(capture.threading, "Thread", _ManualThread)
+    manager = capture.RestedCaptureManager(tmp_path / "jobs")
+    started = manager.start(payload)
+    _ManualThread.instances[0].run()
+
+    finished = manager.get(started["job_id"])
+    manifest = (Path(started["work_dir"]) / "manifest.json").read_text(encoding="utf-8")
+    with zipfile.ZipFile(finished["zip_path"]) as archive:
+        exported = {name: archive.read(name) for name in archive.namelist()}
+
+    assert finished["status"] == "done_with_errors"
+    assert finished["results"][0]["status"] == "failed"
+    assert "user:pass" not in json.dumps(finished)
+    assert "user:pass" not in manifest
+    assert all(b"user:pass" not in value for value in exported.values())
+    assert "https://example.com/private" in finished["results"][0]["error"]
+
+
 # W0-28-r15: discovery intent, one file policy, and popup state/error contracts.
 def _r15_cli_capture(monkeypatch, tmp_path, argv):
     """Run the real CLI/plan/capture path with only browser I/O mocked."""
