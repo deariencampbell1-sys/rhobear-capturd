@@ -7,12 +7,19 @@ branches on which input arrived.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
+import threading
+import warnings
+import zipfile
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from capturd.shots import capture, cli, pathway_plan
 from capturd.shots.capture import (
     CaptureTarget,
     RestedCaptureError,
@@ -20,7 +27,7 @@ from capturd.shots.capture import (
     build_quality_summary,
 )
 from capturd.shots.pathway_map import PathwayMapError, load_pathway_map
-from capturd.shots import cli
+from capturd.shots.quality import is_passing, summarize_capture_quality
 
 FIXTURES = Path(__file__).parent / "fixtures" / "capture-foundations"
 WIRING = Path(__file__).parent / "fixtures" / "capture-wiring"
@@ -532,15 +539,6 @@ def test_r3_build_plan_enforces_expanded_matrix_limit(monkeypatch):
 
 
 # W0-28-r4: use parsed, existing manifests and real capture/manager contracts.
-import asyncio
-import threading
-import warnings
-import warnings
-import zipfile
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
-from capturd.shots import capture, pathway_plan
-from capturd.shots.quality import is_passing, summarize_capture_quality
 
 
 def _control_less_map():
@@ -1942,3 +1940,232 @@ def test_r14_userinfo_never_reaches_plan_manifest_or_zip(
     assert "user:pass" not in manifest_text
     assert all(b"user:pass" not in body for body in zipped.values())
     assert "https://example.com/private" in manifest_text
+
+
+# W0-28-r15: discovery intent, one file policy, and popup state/error contracts.
+def _r15_cli_capture(monkeypatch, tmp_path, argv):
+    """Run the real CLI/plan/capture path with only browser I/O mocked."""
+    _context, _target, _settings, _path, page = _capture_stack(tmp_path, monkeypatch)
+    context = SimpleNamespace(new_page=AsyncMock(return_value=page))
+    calls = []
+
+    class Manager:
+        def start(self, payload, **capabilities):
+            calls.append(capabilities)
+            _urls, targets, settings = capture.build_capture_plan(payload, **capabilities)
+            result = asyncio.run(capture._capture_one(
+                context, targets[0], settings, tmp_path / "r15-cli.png",
+            ))
+            failed = result["status"] != "ok"
+            self.job = {
+                "job_id": "r15-job", "status": "done_with_errors" if failed else "done",
+                "message": "complete", "completed": 1, "total": 1,
+                "failed": int(failed), "results": [result], "zip_path": "", "output_dir": "",
+            }
+            return {"job_id": "r15-job"}
+
+        def get(self, job_id):
+            assert job_id == "r15-job"
+            return self.job
+
+    monkeypatch.setattr(cli, "RestedCaptureManager", Manager)
+    code = cli.main([*argv, "--viewports", "desktop", "--schemes", "light"])
+    return code, calls, page
+
+
+def test_r15_malicious_sitemap_loopback_never_navigates_or_screenshots(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(
+        capture, "expand_sitemap",
+        lambda _url: ["http://127.0.0.1:9/admin"],
+    )
+    code, calls, page = _r15_cli_capture(
+        monkeypatch, tmp_path, ["--sitemap", "https://example.com/sitemap.xml"],
+    )
+    assert code == 3
+    assert calls[0]["allow_loopback"] is False
+    page.goto.assert_not_awaited()
+    page.screenshot.assert_not_awaited()
+
+
+def test_r15_crawled_loopback_link_never_navigates_or_screenshots(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(
+        capture, "discover_site_urls",
+        lambda _urls, **_kwargs: (["http://127.0.0.1:9/admin"], {"mode": "crawl"}),
+    )
+    code, calls, page = _r15_cli_capture(
+        monkeypatch, tmp_path, ["--site", "https://example.com/"],
+    )
+    assert code == 3
+    assert calls[0]["allow_loopback"] is False
+    page.goto.assert_not_awaited()
+    page.screenshot.assert_not_awaited()
+
+
+def test_r15_direct_loopback_and_exact_discovery_allow_still_work(
+    tmp_path, monkeypatch,
+):
+    code, calls, page = _r15_cli_capture(
+        monkeypatch, tmp_path, ["--urls", "http://127.0.0.1:9/direct"],
+    )
+    assert code == 0
+    assert calls[0]["allow_loopback"] is True
+    page.goto.assert_awaited_once()
+    assert page.screenshot.await_count == 1
+
+    monkeypatch.setattr(
+        capture, "expand_sitemap", lambda _url: ["http://127.0.0.1:9/allowed"],
+    )
+    code, calls, page = _r15_cli_capture(
+        monkeypatch, tmp_path,
+        ["--sitemap", "https://example.com/sitemap.xml", "--allow-private-host", "127.0.0.1"],
+    )
+    assert code == 0
+    assert calls[0]["allow_loopback"] is False
+    assert calls[0]["allow_private_hosts"] == ("127.0.0.1",)
+    page.goto.assert_awaited_once()
+    assert page.screenshot.await_count == 1
+
+    monkeypatch.setattr(
+        capture, "expand_sitemap", lambda _url: ["http://localhost:9/not-exact"],
+    )
+    code, calls, page = _r15_cli_capture(
+        monkeypatch, tmp_path,
+        ["--sitemap", "https://example.com/sitemap.xml", "--allow-private-host", "127.0.0.1"],
+    )
+    assert code == 3
+    page.goto.assert_not_awaited()
+    page.screenshot.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_r15_file_access_is_one_settings_policy_for_launch_context_and_page(
+    tmp_path, monkeypatch,
+):
+    local_file = tmp_path / "r15-index.html"
+    local_file.write_text("<!doctype html><title>r15</title>", encoding="utf-8")
+    context, target, settings, _path, page = _capture_stack(
+        tmp_path, monkeypatch, url=local_file.as_uri(),
+    )
+    context.route = AsyncMock()
+    context.route_web_socket = AsyncMock()
+    context.add_cookies = AsyncMock()
+    context.close = AsyncMock()
+    browser = SimpleNamespace(new_context=AsyncMock(return_value=context), close=AsyncMock())
+
+    class Entry:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *args):
+            return False
+
+    monkeypatch.setattr("playwright.async_api.async_playwright", Entry)
+    launch = AsyncMock(return_value=browser)
+    monkeypatch.setattr(capture, "_launch_browser", launch)
+    observed = []
+    real_install = capture._install_navigation_guard
+
+    async def spy(page_or_context, **kwargs):
+        observed.append(kwargs["allow_file_access"])
+        return await real_install(page_or_context, **kwargs)
+
+    monkeypatch.setattr(capture, "_install_navigation_guard", spy)
+    results = await capture._run_capture_async([target], settings, tmp_path, lambda _result: None)
+    assert results[0]["status"] == "failed"
+    assert launch.await_args.kwargs["allow_file_access"] is False
+    assert observed == [False, False]
+    page.goto.assert_not_awaited()
+    page.screenshot.assert_not_awaited()
+
+    settings["local"] = True
+    observed.clear()
+    launch.reset_mock()
+    results = await capture._run_capture_async([target], settings, tmp_path, lambda _result: None)
+    assert results[0]["status"] == "ok"
+    assert launch.await_args.kwargs["allow_file_access"] is True
+    assert observed == [True, True]
+
+
+@pytest.mark.asyncio
+async def test_r15_popup_only_trigger_is_state_not_baseline(monkeypatch):
+    page = AsyncMock()
+    page.url = "https://example.com/"
+    page.evaluate.return_value = "unchanged-opener-dom"
+    popup_handlers = []
+    page.context = SimpleNamespace(
+        on=lambda event, handler: popup_handlers.append((event, handler)),
+    )
+    element = page.query_selector.return_value
+
+    async def open_popup(**_kwargs):
+        if popup_handlers:
+            handler = next(handler for event, handler in popup_handlers if event == "page")
+            handler(SimpleNamespace(url="https://example.com/popup"))
+
+    element.click.side_effect = open_popup
+    monkeypatch.setattr(capture, "_settle_page", AsyncMock())
+    assert await capture._apply_trigger(page, "#open-popup", 10) is True
+    result = {"status": "ok", "trigger_fired": True, "states": []}
+    captures = build_quality_summary([result])["results"][0]["manifest"]["captures"]
+    assert captures == [{"kind": "state", "success": True}]
+    assert is_passing(build_quality_summary([result])) is True
+
+
+@pytest.mark.asyncio
+async def test_r15_context_popup_refusal_reaches_run_first_error_sink(
+    tmp_path, monkeypatch,
+):
+    context, target, settings, _path, page = _capture_stack(tmp_path, monkeypatch)
+    context.close = AsyncMock()
+    context.add_cookies = AsyncMock()
+    context_handler = None
+
+    async def context_route(_pattern, handler):
+        nonlocal context_handler
+        context_handler = handler
+
+    context.route = AsyncMock(side_effect=context_route)
+    context.route_web_socket = AsyncMock()
+    browser = SimpleNamespace(new_context=AsyncMock(return_value=context), close=AsyncMock())
+
+    class Entry:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *args):
+            return False
+
+    monkeypatch.setattr("playwright.async_api.async_playwright", Entry)
+    monkeypatch.setattr(capture, "_launch_browser", AsyncMock(return_value=browser))
+    popup_route = SimpleNamespace(
+        request=SimpleNamespace(url="http://127.0.0.1:9/private-popup", resource_type="document"),
+        abort=AsyncMock(), continue_=AsyncMock(),
+    )
+
+    async def refused_popup(*_args, **_kwargs):
+        await context_handler(popup_route)
+        raise TimeoutError("opener navigation aborted")
+
+    page.goto.side_effect = refused_popup
+    context_sinks = []
+    real_install = capture._install_navigation_guard
+
+    async def spy(page_or_context, **kwargs):
+        if page_or_context is context:
+            context_sinks.append(kwargs.get("guard_errors"))
+        return await real_install(page_or_context, **kwargs)
+
+    monkeypatch.setattr(capture, "_install_navigation_guard", spy)
+    results = await capture._run_capture_async([target], settings, tmp_path, lambda _result: None)
+    assert results[0]["status"] == "failed"
+    assert "private/internal" in results[0]["error"]
+    assert "opener navigation aborted" not in results[0]["error"]
+    assert len(context_sinks) == 1 and context_sinks[0]
+    assert str(context_sinks[0][0]) == results[0]["error"]
+    popup_route.abort.assert_awaited_once()
+    popup_route.continue_.assert_not_awaited()
+    page.screenshot.assert_not_awaited()

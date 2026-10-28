@@ -1,8 +1,19 @@
 """Shared fixtures for the capture suites."""
 import ipaddress
+import os
 import socket
 
 import pytest
+
+
+def pytest_configure(config):
+    """Browser security tests are optional locally and mandatory in CI.
+
+    pyproject supplies the default local exclusion. Required acceptance opts
+    back in through the environment without introducing a skip-to-green path.
+    """
+    if os.environ.get("RB_REQUIRE_BROWSER") == "1" or os.environ.get("CI"):
+        config.option.markexpr = "not e2e"
 
 
 @pytest.fixture
