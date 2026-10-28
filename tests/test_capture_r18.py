@@ -200,3 +200,40 @@ async def test_r19_refused_popup_is_recorded_and_never_counts_as_a_fired_trigger
     assert result["status"] == "ok"  # r13: the opener shot stands
     assert result["trigger_fired"] is False
     assert result["refused"] == ["refusing private/internal popup"]
+
+
+@pytest.mark.asyncio
+async def test_r20_sibling_popup_on_shared_context_never_fires_this_trigger(monkeypatch):
+    """Apollo r20: only a popup opened by THIS page counts; the listener is removed after."""
+    class EventPage(_Page):
+        def __init__(self, url):
+            super().__init__(url)
+            self.handlers = {}
+            self.removed = []
+
+        def on(self, event, handler):
+            self.handlers.setdefault(event, []).append(handler)
+
+        def remove_listener(self, event, handler):
+            self.removed.append(event)
+            self.handlers[event].remove(handler)
+
+    context_handlers = []
+    context = SimpleNamespace(on=lambda event, handler: context_handlers.append(handler))
+    page_a, page_b = EventPage("https://a.example/"), EventPage("https://a.example/b")
+    page_a.context = page_b.context = context
+    page_a.evaluate = AsyncMock(return_value="same")
+    page_a.wait_for_timeout = AsyncMock()
+
+    async def click_no_op(**_kwargs):
+        for handler in context_handlers:  # sibling B opens a popup on the shared context
+            handler(_Page("https://a.example/popup"))
+        for handler in page_b.handlers.get("popup", []):
+            handler(_Page("https://a.example/popup"))
+
+    element = SimpleNamespace(click=AsyncMock(side_effect=click_no_op))
+    page_a.query_selector = AsyncMock(return_value=element)
+    monkeypatch.setattr(capture, "_settle_page", AsyncMock())
+    monkeypatch.setattr(capture, "TRIGGER_STATE_TIMEOUT_MS", 0)
+    assert await capture._apply_trigger(page_a, "#no-op", 10) is False
+    assert page_a.removed == ["popup"] and page_a.handlers["popup"] == []
