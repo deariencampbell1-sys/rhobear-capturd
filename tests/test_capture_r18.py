@@ -140,3 +140,63 @@ def test_r18_discovery_fetch_refuses_redirect_to_metadata(monkeypatch):
         server.shutdown()
         server.server_close()
     assert checked == [start, "http://169.254.169.254/latest/meta-data/"]
+
+
+# r19 (Apollo on d4c5f42f): loopback scoped per target in map mode; a refused popup fails an otherwise-ok shot.
+
+def test_r19_map_loopback_exception_stays_on_the_base_host():
+    settings = {"allow_loopback": True, "loopback_host": "127.0.0.1"}
+    base, _ = _target("http://127.0.0.1:5173/app")
+    foreign, _ = _target("https://attacker.example/x")
+    assert capture._target_loopback(settings, base) == (True, "127.0.0.1")
+    assert capture._target_loopback(settings, foreign) == (False, None)
+    url_mode = {"allow_loopback": True, "loopback_host": None}
+    assert capture._target_loopback(url_mode, base) == (True, "127.0.0.1")
+    assert capture._target_loopback({"allow_loopback": False}, base) == (False, None)
+
+
+@pytest.mark.asyncio
+async def test_r19_foreign_map_target_context_refuses_base_loopback(tmp_path, monkeypatch):
+    target, settings = _target("https://attacker.example/x")
+    settings = {**settings, "allow_loopback": True, "loopback_host": "127.0.0.1"}
+    seen = []
+    real_install = capture._install_navigation_guard
+
+    async def spy(obj, **kwargs):
+        seen.append((kwargs["allow_loopback"], kwargs["loopback_host"]))
+        return await real_install(obj, **kwargs)
+
+    monkeypatch.setattr(capture, "_install_navigation_guard", spy)
+    monkeypatch.setattr(capture, "_check_navigation_url", AsyncMock())
+    page = _Page(target.url)
+    page.goto = AsyncMock(side_effect=RuntimeError("stop after guard install"))
+    context = SimpleNamespace(new_page=AsyncMock(return_value=page))
+    await capture._capture_one(context, target, settings, tmp_path / "x.png")
+    assert seen == [(False, None)]
+
+
+@pytest.mark.asyncio
+async def test_r19_refused_popup_is_recorded_and_never_counts_as_a_fired_trigger(tmp_path, monkeypatch):
+    target, settings = _target("https://a.example/")
+    owner_errors: dict = {}
+    page = _Page(target.url)
+
+    async def goto(*_a, **_k):
+        owner_errors[page].append(RestedCaptureError("refusing private/internal popup"))
+
+    async def shot(**kwargs):
+        open(kwargs["path"], "wb").write(b"png")
+
+    page.goto = AsyncMock(side_effect=goto)
+    page.screenshot = AsyncMock(side_effect=shot)
+    page.evaluate = AsyncMock(return_value="fp")
+    monkeypatch.setattr(capture, "_check_navigation_url", AsyncMock())
+    monkeypatch.setattr(capture, "_settle_page", AsyncMock())
+    monkeypatch.setattr(capture, "_dismiss_overlays", AsyncMock())
+    context = SimpleNamespace(new_page=AsyncMock(return_value=page))
+    result = await capture._capture_one(
+        context, target, settings, tmp_path / "a.png", owner_errors=owner_errors,
+    )
+    assert result["status"] == "ok"  # r13: the opener shot stands
+    assert result["trigger_fired"] is False
+    assert result["refused"] == ["refusing private/internal popup"]
