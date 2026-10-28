@@ -1374,6 +1374,23 @@ async def _settle_page(page: Any, wait_ms: int) -> None:
     await page.wait_for_timeout(wait_ms)
 
 
+def _target_loopback(settings: dict[str, Any], target: CaptureTarget) -> tuple[bool, str | None]:
+    """The loopback exception for one target: only its own host, never a sibling's.
+
+    A map run pins ``loopback_host`` to the base host; a pathway that resolves to
+    another absolute host gets no loopback exception at all.
+    """
+    if not settings.get("allow_loopback"):
+        return False, None
+    target_host = urlparse(target.url).hostname
+    loopback_host = settings.get("loopback_host")
+    if loopback_host is None:
+        return True, target_host
+    if target_host and _canonical_host(target_host) == _canonical_host(loopback_host):
+        return True, loopback_host
+    return False, None
+
+
 def _target_context_key(target: CaptureTarget) -> tuple[str, str, str, int, int, str]:
     parsed = urlparse(target.url)
     if parsed.scheme == "file":
@@ -1597,10 +1614,7 @@ async def _capture_one(
     allow_private_hosts = tuple(settings.get("allow_private_hosts") or ())
     for attempt in range(1, attempts + 1):
         page = None
-        allow_loopback = bool(settings.get("allow_loopback"))
-        loopback_host = settings.get("loopback_host")
-        if allow_loopback and loopback_host is None:
-            loopback_host = urlparse(target.url).hostname
+        allow_loopback, loopback_host = _target_loopback(settings, target)
         page_errors: list[RestedCaptureError] = []
         context_errors: list[RestedCaptureError] = []
         try:
@@ -1681,7 +1695,12 @@ async def _capture_one(
                     extra_states.append(state)
             if page_errors:
                 raise page_errors[0]
+            refused = [_redact_outward_error(str(error), settings) for error in context_errors]
+            if refused:
+                # The shot stands (r13), but a refused popup is no state evidence.
+                trigger_fired = False
             return {
+                **({"refused": refused} if refused else {}),
                 "url": target.url,
                 "states": extra_states,
                 "state_id": target.state_id,
@@ -1792,10 +1811,7 @@ async def _run_capture_async(
                         user_agent=USER_AGENT,
                         service_workers="block",
                     )
-                    allow_loopback = bool(settings.get("allow_loopback"))
-                    loopback_host = settings.get("loopback_host")
-                    if allow_loopback and loopback_host is None:
-                        loopback_host = urlparse(target.url).hostname
+                    allow_loopback, loopback_host = _target_loopback(settings, target)
                     await _install_navigation_guard(
                         context, allow_loopback=allow_loopback, loopback_host=loopback_host,
                         allow_private_hosts=tuple(settings.get("allow_private_hosts") or ()),
