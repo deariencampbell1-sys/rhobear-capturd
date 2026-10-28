@@ -500,8 +500,13 @@ async def _install_navigation_guard(
     allow_private_hosts: tuple[str, ...] = (), allow_file_access: bool = False,
     navigation_cache: dict[tuple[Any, ...], RestedCaptureError | None] | None = None,
     guard_errors: list[RestedCaptureError] | None = None,
+    owner_errors: dict[Any, list[RestedCaptureError]] | None = None,
 ) -> list[RestedCaptureError]:
     """Check requests before Chromium connects; retain the first refusal.
+
+    With ``owner_errors`` (a shared context), each document refusal goes to
+    the in-flight page that owns it (directly or as a popup's opener), never
+    to a run-wide list that concurrent targets would read by index.
 
     Chromium resolves again at connect time. This userspace guard cannot pin
     its socket DNS; rebinding between check and connect remains a residual.
@@ -525,6 +530,11 @@ async def _install_navigation_guard(
                 exc = RestedCaptureError(f"navigation URL check failed ({original_class})")
             await route.abort()
             if resource_type == "document":
+                if owner_errors is not None:
+                    bucket = await _refusal_owner_bucket(route, owner_errors)
+                    if bucket is not None:
+                        bucket.append(exc)
+                    return
                 if not guard_errors:
                     guard_errors.append(exc)
                 return
@@ -569,10 +579,48 @@ async def _install_navigation_guard(
     return guard_errors
 
 
+async def _refusal_owner_bucket(
+    route: Any, owner_errors: dict[Any, list[RestedCaptureError]],
+) -> list[RestedCaptureError] | None:
+    """The refusal list of the in-flight page that caused this request.
+
+    A popup is walked back through its openers. When the owner cannot be
+    resolved, the refusal is attributed only if exactly one page is in
+    flight; otherwise it is dropped rather than pinned on another target.
+    """
+    try:
+        page = route.request.frame.page
+    except Exception:
+        page = None
+    for _hop in range(8):
+        if page is None:
+            break
+        if page in owner_errors:
+            return owner_errors[page]
+        try:
+            page = await page.opener()
+        except Exception:
+            page = None
+    if len(owner_errors) == 1:
+        return next(iter(owner_errors.values()))
+    return None
+
+
+class _GuardedRedirectHandler(urlrequest.HTTPRedirectHandler):
+    """Re-run the private-peer refusal on every redirect hop."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _reject_private_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_GUARDED_OPENER = urlrequest.build_opener(_GuardedRedirectHandler)
+
+
 def _fetch_url_bytes(url: str, timeout: int = 20, limit: int = 10 * 1024 * 1024) -> tuple[bytes, dict[str, str]]:
     _reject_private_url(url)
     req = urlrequest.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "*/*"})
-    with urlrequest.urlopen(req, timeout=timeout) as resp:
+    with _GUARDED_OPENER.open(req, timeout=timeout) as resp:
         body = resp.read(limit)
         headers = {key.lower(): value for key, value in resp.headers.items()}
     if headers.get("content-encoding", "").lower() == "gzip" or urlparse(url).path.endswith(".gz"):
@@ -1535,6 +1583,7 @@ async def _apply_trigger(page: Any, selector: str, wait_ms: int) -> bool:
 async def _capture_one(
     context: Any, target: CaptureTarget, settings: dict[str, Any], path: Path,
     *, guard_errors: list[RestedCaptureError] | None = None,
+    owner_errors: dict[Any, list[RestedCaptureError]] | None = None,
     navigation_cache: dict[tuple[Any, ...], RestedCaptureError | None] | None = None,
     allow_file_access: bool | None = None,
 ) -> dict[str, Any]:
@@ -1548,17 +1597,19 @@ async def _capture_one(
     allow_private_hosts = tuple(settings.get("allow_private_hosts") or ())
     for attempt in range(1, attempts + 1):
         page = None
-        guard_error_start = len(guard_errors) if guard_errors is not None else 0
         allow_loopback = bool(settings.get("allow_loopback"))
         loopback_host = settings.get("loopback_host")
         if allow_loopback and loopback_host is None:
             loopback_host = urlparse(target.url).hostname
         page_errors: list[RestedCaptureError] = []
+        context_errors: list[RestedCaptureError] = []
         try:
             timeout_ms = int(settings["timeout_ms"])
             if attempt > 1:
                 timeout_ms = max(timeout_ms, int(settings.get("retry_timeout_ms") or DEFAULT_RETRY_TIMEOUT_MS))
             page = await context.new_page()
+            if owner_errors is not None:
+                owner_errors[page] = context_errors
             await _install_navigation_guard(
                 page, allow_loopback=allow_loopback, loopback_host=loopback_host,
                 allow_private_hosts=allow_private_hosts, allow_file_access=allow_file_access,
@@ -1649,10 +1700,10 @@ async def _capture_one(
         except Exception as exc:
             if page_errors:
                 selected_error = page_errors[0]
-            elif guard_errors is not None and len(guard_errors) > guard_error_start:
-                # A context-only refusal (for example a popup) may be the real
-                # cause of the browser's subsequent navigation failure.
-                selected_error = guard_errors[guard_error_start]
+            elif context_errors:
+                # A context-only refusal (for example this target's popup) may
+                # be the real cause of the browser's navigation failure.
+                selected_error = context_errors[0]
             else:
                 selected_error = exc
             last_error = _redact_outward_error(str(selected_error), settings)
@@ -1660,6 +1711,8 @@ async def _capture_one(
                 await asyncio.sleep(0.35)
         finally:
             if page is not None:
+                if owner_errors is not None:
+                    owner_errors.pop(page, None)
                 try:
                     await page.close()
                 except Exception:
@@ -1715,7 +1768,7 @@ async def _run_capture_async(
 
     sem = asyncio.Semaphore(settings["concurrency"])
     navigation_cache: dict[tuple[Any, ...], RestedCaptureError | None] = {}
-    guard_errors: list[RestedCaptureError] = []
+    owner_errors: dict[Any, list[RestedCaptureError]] = {}
     results: list[dict[str, Any]] = []
 
     async with async_playwright() as p:
@@ -1747,7 +1800,7 @@ async def _run_capture_async(
                         context, allow_loopback=allow_loopback, loopback_host=loopback_host,
                         allow_private_hosts=tuple(settings.get("allow_private_hosts") or ()),
                         allow_file_access=allow_file_access, navigation_cache=navigation_cache,
-                        guard_errors=guard_errors,
+                        owner_errors=owner_errors,
                     )
                     # Signed-in capture: without cookies the batch can only ever shoot
                     # what a logged-out visitor sees, so authenticated products are
@@ -1765,7 +1818,7 @@ async def _run_capture_async(
                     context = await context_for(target)
                     result = await _capture_one(
                         context, target, settings, shots_dir / file_name,
-                        navigation_cache=navigation_cache, guard_errors=guard_errors,
+                        navigation_cache=navigation_cache, owner_errors=owner_errors,
                         allow_file_access=allow_file_access,
                     )
                     # This is the shared outward boundary for both library callers

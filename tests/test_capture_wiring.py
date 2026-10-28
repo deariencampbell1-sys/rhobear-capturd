@@ -2218,7 +2218,7 @@ async def test_r15_context_popup_refusal_reaches_run_first_error_sink(
 
     async def spy(page_or_context, **kwargs):
         if page_or_context is context:
-            context_sinks.append(kwargs.get("guard_errors"))
+            context_sinks.append(kwargs.get("owner_errors"))
         return await real_install(page_or_context, **kwargs)
 
     monkeypatch.setattr(capture, "_install_navigation_guard", spy)
@@ -2226,8 +2226,8 @@ async def test_r15_context_popup_refusal_reaches_run_first_error_sink(
     assert results[0]["status"] == "failed"
     assert "private/internal" in results[0]["error"]
     assert "opener navigation aborted" not in results[0]["error"]
-    assert len(context_sinks) == 1 and context_sinks[0]
-    assert str(context_sinks[0][0]) == results[0]["error"]
+    # The refusal reached this target through its owner bucket, released after the attempt.
+    assert len(context_sinks) == 1 and context_sinks[0] == {}
     popup_route.abort.assert_awaited_once()
     popup_route.continue_.assert_not_awaited()
     page.screenshot.assert_not_awaited()
