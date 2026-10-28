@@ -95,6 +95,27 @@ capturd serve
 Legacy CLI (`sunsponge-capture ...`) still works as an alias for `capturd shots ...` so existing
 scripts don't break.
 
+Map-driven stills accept `--pathway-map JSON` (verifier JSON), `--pathway-manifest MD`
+(markdown), or `--map-text TEXT` (pasted verifier JSON). All require `--base-url URL`.
+Use `--max-targets N` to bound the expanded capture matrix and `--dry-run` to print a plan
+without browser or network activity. Repeat `--allow-private-host HOST` for an exact-host
+RFC1918/ULA/loopback opt-in; metadata and other prohibited addresses remain refused.
+Direct `--urls`/`--local` capture keeps its exact-target loopback exception. Sitemap and
+crawl discoveries have no blanket loopback permission: a discovered loopback target is
+refused unless its exact host is named with `--allow-private-host`; other hosts and metadata
+remain refused.
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | Capture completed successfully. |
+| 1 | The job failed before capture. |
+| 2 | Usage, input, or plan refusal. |
+| 3 | Capture completed with one or more failed shots. |
+| 4 | A completed map-driven run was refused by the quality gate. |
+
+The quality gate and exit 4 apply only to map-driven runs. Legacy URL, sitemap, crawl, and
+local runs retain their existing 0/1/2/3 behavior.
+
 ### As a library
 
 ```python
@@ -107,10 +128,41 @@ job = mgr.start({"crawl": True, "crawl_url": "https://example.com",
                  "viewports": ["desktop", "mobile"], "schemes": ["light", "dark"]})
 ```
 
+For one page, the singular `url` payload key is an alternative to `urls`, for example
+`mgr.start({"url": "https://example.com"})`. The exactly-one-source rule still applies:
+do not combine `url`, `urls`, map, sitemap, crawl, or local inputs.
+
+Captures run behind a default-deny navigation guard (HTTP and WebSocket):
+loopback, private and link-local hosts are refused. To capture a local dev
+server from code, pass the capability at the call site, e.g.
+`mgr.start(payload, allow_loopback=True)` (the target's own host only) or
+`allow_private_hosts=["172.17.0.1"]` (a list of exact hosts, never a string).
+The guard is installed on the whole browser context before capture creates a page,
+so popup requests receive the same policy; service workers are blocked. Each target's
+exact loopback host is part of context reuse, preventing sibling-host permission leaks.
+A start against a loopback/private target without the matching capability emits one
+warning per job before the unchanged refusal. Outward plan, job, manifest, and ZIP URL
+projections strip `user:password@` userinfo; live navigation targets are not rewritten.
+
+Allowed navigation checks deliberately re-resolve DNS (there is no success cache or IP
+pinning). A per-event-loop four-slot semaphore bounds resolver jobs queued to the
+default executor, preventing an unbounded executor flood. Document checks have a
+10-second bound and fail the target on timeout;
+subresource checks have a 2-second bound, then abort only that request and warn. Both
+paths remain fail-closed, and a deadline cannot cancel an OS resolver already running.
+
+The real WebSocket and popup/service-worker proofs are marked `browser` and `network`.
+A default local `pytest` deselects these optional tests, the pre-existing `slow` Chromium
+viewer tests, and `e2e`, so an unprovisioned workstation can run the unrelated suite. For explicit local selection,
+install the project dependencies and run `python -m playwright install chromium`, then use
+`pytest -m 'browser or network'`. `RB_REQUIRE_BROWSER=1` or `CI` restores the full `not e2e`
+selection for required security acceptance. In those runs the proofs never skip: missing
+Playwright or Chromium is a named required-security failure.
+
 ## Requirements
 
 - Python **3.10+**
-- **Playwright** + Chromium (`python -m playwright install chromium`).
+- **Playwright >=1.48** + Chromium (`python -m playwright install chromium`). `BrowserContext.route_web_socket` is required; capture refuses loudly when it is unavailable.
 - For `walk` mode: a RHOBEAR Vertex Gateway token (`RHOBEAR_GW_API_KEY`) — walkthrough narration
   and camera choreography go through the family gateway. No API keys checked into source.
 - For `walk` MP4 export: `ffmpeg` on PATH.
@@ -119,7 +171,9 @@ job = mgr.start({"crawl": True, "crawl_url": "https://example.com",
 
 ```bash
 pip install -e ".[dev]"
-pytest
+pytest                                      # local: not e2e/browser/network/slow
+python -m playwright install chromium       # required for security acceptance
+RB_REQUIRE_BROWSER=1 pytest                 # required: not e2e, zero security skips
 ```
 
 ## License

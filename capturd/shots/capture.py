@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import ipaddress
+import inspect
 import json
 import os
 import re
@@ -18,16 +20,19 @@ import threading
 import time
 import uuid
 import zipfile
-from dataclasses import dataclass
+import warnings
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib import request as urlrequest
 from urllib.request import url2pathname
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
+from weakref import WeakKeyDictionary
 from xml.etree import ElementTree
 
 from capturd._net import is_private_ip
+from capturd.shots.pathway_map import load_pathway_map
 
 
 DEFAULT_VIEWPORTS: dict[str, dict[str, int]] = {
@@ -40,6 +45,15 @@ MAX_URLS = 1000
 MAX_SITEMAP_URLS = 1000
 MAX_CRAWL_URLS = 1000
 DEFAULT_TIMEOUT_MS = 30000
+TRIGGER_CLICK_TIMEOUT_MS = 2500
+TRIGGER_STATE_TIMEOUT_MS = 2500
+TRIGGER_POLL_INTERVAL_MS = 100
+NAV_GUARD_TIMEOUT_S = 10
+NAV_GUARD_SUBRESOURCE_TIMEOUT_S = 2
+NAV_RESOLVER_WORKERS = 4
+_NAV_RESOLVER_SEMAPHORES = WeakKeyDictionary()
+# A refused WebSocket is closed with 1008 (policy violation), never connected.
+WS_REFUSED_CLOSE_CODE = 1008
 DEFAULT_WAIT_MS = 600
 DEFAULT_CONCURRENCY = 3
 DEFAULT_RETRIES = 1
@@ -137,9 +151,20 @@ class CaptureTarget:
     width: int
     height: int
     scheme: str
+    # Map-driven plans (capturd.shots.pathway_plan) carry the pathway identity
+    # and the named control's planner selector; URL-driven plans leave them
+    # empty. Nothing downstream branches on which input arrived.
+    pathway_id: str = ""
+    pathway_status: str = ""
+    pathway_trigger: str = ""
+    trigger_selector: str = ""  # planner selector to click after load, to reach the rested state
 
     @property
     def state_id(self) -> str:
+        if self.pathway_id:
+            status = _slug(self.pathway_status or "unknown", "unknown")
+            pid = _slug(self.pathway_id, "pathway")
+            return f"{pid}-{status}-{self.viewport_id}-{self.scheme}"
         return f"{self.viewport_id}-{self.scheme}"
 
 
@@ -336,32 +361,266 @@ def _parse_sitemap_xml(xml_bytes: bytes) -> tuple[list[str], list[str]]:
     return page_urls, sitemap_urls
 
 
-def _reject_private_url(url: str) -> None:
-    """Raise RestedCaptureError if *url* resolves to a private/internal IP address.
+def _unwrapped_address(ip: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """The address behind *ip* with any IPv4-mapped wrapper removed.
 
-    Uses the shared canonical guard in :mod:`capturd._net` (stdlib
-    ``ipaddress``-based: fails closed on unparseable input and unwraps
-    IPv6-mapped IPv4) so this fetch surface can't drift from the service and
-    MCP ones — the hand-rolled copy here used to miss IPv6-mapped IPv4 cloud
-    metadata addresses like ``::ffff:169.254.169.254``.
+    ``::ffff:127.0.0.1`` is loopback in IPv4 clothing — classify the unwrapped
+    address so the one loopback exception below cannot be bypassed (or, for
+    anything else, widened) through a mapped form. Unparseable input yields
+    ``None`` and is never treated as loopback (fail closed).
     """
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    mapped = getattr(addr, "ipv4_mapped", None)
+    return mapped if mapped is not None else addr
+
+
+def _getaddrinfo(host: str, port: int | None = None, *args, **kwargs):
+    """Capture-local DNS seam; tests patch this wrapper, never socket globally."""
+    return socket.getaddrinfo(host, port, *args, **kwargs)
+
+
+def _reject_private_url(
+    url: str, *, allow_loopback: bool = False, allow_private_peer: bool = False,
+) -> None:
+    """Refuse private/internal peers, with narrow explicit local exceptions."""
     host = urlparse(url).hostname
     if not host:
         raise RestedCaptureError("could not parse host from url")
     try:
-        addrinfo = socket.getaddrinfo(host, None)
+        addrinfo = _getaddrinfo(host, None)
     except socket.gaierror as exc:
         raise RestedCaptureError(f"hostname not found: {exc}") from exc
     for family, _type, _proto, _canon, sockaddr in addrinfo:
         ip = sockaddr[0]
         if is_private_ip(ip):
+            unwrapped = _unwrapped_address(ip)
+            if unwrapped is not None:
+                private_lan = (
+                    unwrapped.is_loopback
+                    or (
+                        unwrapped.version == 4
+                        and any(
+                            unwrapped in ipaddress.ip_network(network)
+                            for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+                        )
+                    )
+                    or (
+                        unwrapped.version == 6
+                        and unwrapped in ipaddress.ip_network("fc00::/7")
+                    )
+                )
+                if (
+                    (allow_loopback and unwrapped.is_loopback)
+                    or (allow_private_peer and private_lan)
+                ):
+                    continue
             raise RestedCaptureError(f"url resolves to a private/internal IP ({ip}) — not allowed")
+
+
+def _canonical_host(host: str | None) -> str:
+    return (host or "").strip().lower().rstrip(".")
+
+
+def _reject_navigation_url(
+    url: str, *, allow_loopback: bool, loopback_host: str | None,
+    allow_private_hosts: tuple[str, ...] = (), allow_file_access: bool = False,
+) -> None:
+    scheme = urlparse(url).scheme.lower()
+    if scheme == "file" and allow_file_access:
+        return
+    if scheme not in {"http", "https", "ws", "wss"}:
+        raise RestedCaptureError("navigation URL scheme is not allowed")
+    host = _canonical_host(urlparse(url).hostname)
+    permitted = bool(
+        allow_loopback and loopback_host and host == _canonical_host(loopback_host)
+    )
+    private_permitted = host in {
+        _canonical_host(allowed) for allowed in allow_private_hosts
+    }
+    private_kwargs = {"allow_private_peer": True} if private_permitted else {}
+    _reject_private_url(url, allow_loopback=permitted, **private_kwargs)
+
+
+async def _check_navigation_url(
+    url: str, *, allow_loopback: bool, loopback_host: str | None,
+    allow_private_hosts: tuple[str, ...] = (), allow_file_access: bool = False,
+    cache: dict[tuple[Any, ...], RestedCaptureError | None] | None = None,
+    resource_type: str = "document",
+) -> None:
+    parsed = urlparse(url)
+    key = (
+        parsed.scheme.lower(), _canonical_host(parsed.hostname), allow_loopback,
+        _canonical_host(loopback_host),
+        tuple(_canonical_host(host) for host in allow_private_hosts), allow_file_access,
+    )
+    if cache is not None and key in cache:
+        # Refusals are fail-closed and reusable. Successful verdicts are never
+        # cached: every allowed request re-resolves to narrow DNS rebinding.
+        # One document plus 40 same-origin subresources performs 41 resolver
+        # calls. A per-loop four-slot semaphore bounds default-executor jobs;
+        # it does not memoize successes or pin Chromium to resolved IPs.
+        raise cache[key]
+    resolver_kwargs = {
+        "allow_loopback": allow_loopback, "loopback_host": loopback_host,
+    }
+    if allow_private_hosts:
+        resolver_kwargs["allow_private_hosts"] = allow_private_hosts
+    if allow_file_access:
+        resolver_kwargs["allow_file_access"] = True
+    # Document checks have ten seconds and remain fatal on timeout. A slow
+    # subresource has two seconds, then only that request aborts with a warning.
+    # Neither deadline can cancel an OS resolver call already running.
+    timeout_s = (
+        NAV_GUARD_TIMEOUT_S if resource_type == "document"
+        else NAV_GUARD_SUBRESOURCE_TIMEOUT_S
+    )
+    try:
+        loop = asyncio.get_running_loop()
+        semaphore = _NAV_RESOLVER_SEMAPHORES.get(loop)
+        if semaphore is None:
+            semaphore = asyncio.BoundedSemaphore(NAV_RESOLVER_WORKERS)
+            _NAV_RESOLVER_SEMAPHORES[loop] = semaphore
+        async with semaphore:
+            await asyncio.wait_for(asyncio.to_thread(
+                _reject_navigation_url, url, **resolver_kwargs,
+            ), timeout=timeout_s)
+    except RestedCaptureError as exc:
+        if cache is not None:
+            cache[key] = exc
+        raise
+    except (asyncio.TimeoutError, TimeoutError):
+        raise RestedCaptureError("navigation URL check timed out") from None
+
+
+async def _install_navigation_guard(
+    context: Any, *, allow_loopback: bool, loopback_host: str | None,
+    allow_private_hosts: tuple[str, ...] = (), allow_file_access: bool = False,
+    navigation_cache: dict[tuple[Any, ...], RestedCaptureError | None] | None = None,
+    guard_errors: list[RestedCaptureError] | None = None,
+    owner_errors: dict[Any, list[RestedCaptureError]] | None = None,
+) -> list[RestedCaptureError]:
+    """Check requests before Chromium connects; retain the first refusal.
+
+    With ``owner_errors`` (a shared context), each document refusal goes to
+    the in-flight page that owns it (directly or as a popup's opener), never
+    to a run-wide list that concurrent targets would read by index.
+
+    Chromium resolves again at connect time. This userspace guard cannot pin
+    its socket DNS; rebinding between check and connect remains a residual.
+    Coroutine deadlines cannot terminate an OS resolver already in a thread.
+    """
+    if guard_errors is None:
+        guard_errors = []
+
+    async def guard(route: Any) -> None:
+        resource_type = getattr(route.request, "resource_type", "document")
+        try:
+            await _check_navigation_url(
+                route.request.url, allow_loopback=allow_loopback,
+                loopback_host=loopback_host, allow_private_hosts=allow_private_hosts,
+                allow_file_access=allow_file_access, cache=navigation_cache,
+                resource_type=resource_type,
+            )
+        except Exception as exc:
+            original_class = type(exc).__name__
+            if not isinstance(exc, RestedCaptureError):
+                exc = RestedCaptureError(f"navigation URL check failed ({original_class})")
+            await route.abort()
+            if resource_type == "document":
+                if owner_errors is not None:
+                    bucket = await _refusal_owner_bucket(route, owner_errors)
+                    if bucket is not None:
+                        bucket.append(exc)
+                    return
+                if not guard_errors:
+                    guard_errors.append(exc)
+                return
+            warnings.warn(
+                f"capture subresource refused ({original_class}); request aborted",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return
+        await route.continue_()
+
+    async def ws_guard(ws_route: Any) -> None:
+        # `route` never sees WebSocket traffic, so ws:/wss: get their own
+        # interception with the same policy. A refused socket is closed with
+        # 1008 (policy violation) before any connection to the server is made.
+        try:
+            await _check_navigation_url(
+                ws_route.url, allow_loopback=allow_loopback,
+                loopback_host=loopback_host, allow_private_hosts=allow_private_hosts,
+                allow_file_access=allow_file_access, cache=navigation_cache,
+            )
+        except Exception as exc:
+            await ws_route.close(code=WS_REFUSED_CLOSE_CODE, reason="capture refused")
+            warnings.warn(
+                f"capture websocket refused ({type(exc).__name__}); connection closed",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return
+        ws_route.connect_to_server()
+
+    route_web_socket = getattr(context, "route_web_socket", None)
+    if route_web_socket is None:
+        # Without WebSocket interception the scheme allow-list would claim
+        # coverage it does not have: refuse to capture instead.
+        raise RestedCaptureError(
+            "WebSocket guard unavailable: Playwright >= 1.48 is required")
+    await context.route("**/*", guard)
+    installed = route_web_socket(re.compile(r".*"), ws_guard)
+    if inspect.isawaitable(installed):
+        await installed
+    return guard_errors
+
+
+async def _refusal_owner_bucket(
+    route: Any, owner_errors: dict[Any, list[RestedCaptureError]],
+) -> list[RestedCaptureError] | None:
+    """The refusal list of the in-flight page that caused this request.
+
+    A popup is walked back through its openers. When the owner cannot be
+    resolved, the refusal is attributed only if exactly one page is in
+    flight; otherwise it is dropped rather than pinned on another target.
+    """
+    try:
+        page = route.request.frame.page
+    except Exception:
+        page = None
+    for _hop in range(8):
+        if page is None:
+            break
+        if page in owner_errors:
+            return owner_errors[page]
+        try:
+            page = await page.opener()
+        except Exception:
+            page = None
+    if len(owner_errors) == 1:
+        return next(iter(owner_errors.values()))
+    return None
+
+
+class _GuardedRedirectHandler(urlrequest.HTTPRedirectHandler):
+    """Re-run the private-peer refusal on every redirect hop."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _reject_private_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_GUARDED_OPENER = urlrequest.build_opener(_GuardedRedirectHandler)
 
 
 def _fetch_url_bytes(url: str, timeout: int = 20, limit: int = 10 * 1024 * 1024) -> tuple[bytes, dict[str, str]]:
     _reject_private_url(url)
     req = urlrequest.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "*/*"})
-    with urlrequest.urlopen(req, timeout=timeout) as resp:
+    with _GUARDED_OPENER.open(req, timeout=timeout) as resp:
         body = resp.read(limit)
         headers = {key.lower(): value for key, value in resp.headers.items()}
     if headers.get("content-encoding", "").lower() == "gzip" or urlparse(url).path.endswith(".gz"):
@@ -805,87 +1064,258 @@ def discover_site_urls(
     }
 
 
-def build_capture_plan(payload: dict[str, Any]) -> tuple[list[str], list[CaptureTarget], dict[str, Any]]:
-    raw_urls = payload.get("urls") or []
-    if isinstance(raw_urls, str):
-        raw_urls = re.split(r"[\r\n,]+", raw_urls)
-    if not isinstance(raw_urls, list):
-        raise RestedCaptureError("urls must be a list or newline text")
+def build_capture_plan(
+    payload: dict[str, Any], *, allow_map_files: bool = False,
+    allow_loopback: bool = False, allow_private_hosts: tuple[str, ...] = (),
+) -> tuple[list[str], list[CaptureTarget], dict[str, Any]]:
+    if type(allow_map_files) is not bool:
+        raise RestedCaptureError("allow_map_files must be a bool from the call site")
+    if type(allow_loopback) is not bool:
+        raise RestedCaptureError("allow_loopback must be a bool from the call site")
+    # A bare string would be iterated character by character into the
+    # allow-list; the capability must be a sequence of host strings.
+    if isinstance(allow_private_hosts, (str, bytes)) or not isinstance(
+            allow_private_hosts, (list, tuple, set, frozenset)):
+        raise RestedCaptureError(
+            "allow_private_hosts must be a list of host names from the call site")
+    if not all(isinstance(host, str) and host for host in allow_private_hosts):
+        raise RestedCaptureError("allow_private_hosts entries must be non-empty host names")
+    if any(key in payload for key in ("_allow_map_files", "_allow_loopback", "_allow_private_hosts")):
+        raise RestedCaptureError("_allow_* capabilities are call-site arguments, not payload keys")
+    allow_private_hosts = tuple(_canonical_host(host) for host in allow_private_hosts)
 
-    urls = [str(item).strip() for item in raw_urls if str(item).strip()]
-    sitemap_url = str(payload.get("sitemap_url") or "").strip()
-    crawl_url = str(payload.get("crawl_url") or "").strip()
-    local_path = str(payload.get("local_path") or "").strip()
-    crawl_enabled = bool(payload.get("crawl") or crawl_url)
-    local_enabled = bool(payload.get("local") or local_path)
-    discovery: dict[str, Any] = {"mode": "manual", "page_count": 0}
-    if crawl_url:
-        urls.append(crawl_url)
-
-    if local_enabled:
-        urls, discovery = discover_local_html(
-            local_path or (urls[0] if urls else ""),
-            max_urls=int(payload.get("max_pages") or payload.get("max_urls") or MAX_CRAWL_URLS),
-            max_depth=int(payload.get("crawl_depth") or DEFAULT_CRAWL_DEPTH),
-        )
-    elif crawl_enabled:
-        urls, discovery = discover_site_urls(
-            urls,
-            explicit_sitemap_urls=[sitemap_url] if sitemap_url else [],
-            max_urls=int(payload.get("max_pages") or payload.get("max_urls") or MAX_CRAWL_URLS),
-            max_depth=int(payload.get("crawl_depth") or DEFAULT_CRAWL_DEPTH),
-            concurrency=int(payload.get("crawl_concurrency") or DEFAULT_CRAWL_CONCURRENCY),
-            timeout_ms=int(payload.get("discovery_timeout_ms") or DEFAULT_DISCOVERY_TIMEOUT_MS),
-            wait_ms=int(payload.get("discovery_wait_ms") or DEFAULT_DISCOVERY_WAIT_MS),
-            include_sitemaps=bool(payload.get("include_sitemaps", True)),
-        )
-    elif sitemap_url:
-        urls.extend(expand_sitemap(sitemap_url))
-
-    urls = _dedupe_urls(urls)
-
-    if not urls:
+    # The input seam: exactly one of the plain URL family or one map input.
+    map_inputs = [
+        ("manifest_path", payload.get("manifest_path")),
+        ("map_path", payload.get("map_path")),
+        ("manifest_text", payload.get("manifest_text")),
+        ("map_text", payload.get("map_text")),
+    ]
+    supplied_maps = [name for name, value in map_inputs if value is not None]
+    url_supplied = bool(
+        payload.get("url")
+        or payload.get("urls")
+        or payload.get("sitemap_url")
+        or payload.get("crawl_url")
+        or payload.get("local_path")
+        or payload.get("crawl")
+        or payload.get("local")
+    )
+    source_names = (["url"] if url_supplied else []) + supplied_maps
+    if not source_names:
         raise RestedCaptureError("add at least one URL")
-    if len(urls) > MAX_URLS:
-        raise RestedCaptureError(f"too many URLs; maximum is {MAX_URLS}")
+    if len(source_names) > 1:
+        raise RestedCaptureError(
+            "provide exactly one capture source — got " + ", ".join(sorted(source_names))
+        )
 
-    viewport_ids = payload.get("viewports") or list(DEFAULT_VIEWPORTS)
-    if not isinstance(viewport_ids, list):
-        raise RestedCaptureError("viewports must be a list")
-    viewport_ids = [str(v).strip().lower() for v in viewport_ids if str(v).strip()]
-    if not viewport_ids:
-        raise RestedCaptureError("choose at least one viewport")
+    # Imported here (not at module top) to keep the capture/pathway module
+    # pair free of an import cycle.
+    from .pathway_plan import MAX_TARGETS, plan_targets_from_map
 
-    schemes = payload.get("schemes") or list(DEFAULT_SCHEMES)
-    if isinstance(schemes, str):
-        schemes = [schemes]
-    if not isinstance(schemes, list):
-        raise RestedCaptureError("schemes must be a list")
-    schemes = [str(s).strip().lower() for s in schemes if str(s).strip()]
-    if not schemes:
-        raise RestedCaptureError("choose at least one color scheme")
+    max_targets = MAX_TARGETS
+    if supplied_maps:
+        try:
+            max_targets = int(payload.get("max_targets", MAX_TARGETS))
+        except (TypeError, ValueError):
+            raise RestedCaptureError("max_targets must be a number") from None
+        if max_targets < 1:
+            raise RestedCaptureError("max_targets must be at least 1")
+
+    def capture_matrix() -> tuple[list[str], list[str]]:
+        viewport_ids = payload.get("viewports") or list(DEFAULT_VIEWPORTS)
+        if not isinstance(viewport_ids, list):
+            raise RestedCaptureError("viewports must be a list")
+        viewport_ids = [str(v).strip().lower() for v in viewport_ids if str(v).strip()]
+        if not viewport_ids:
+            raise RestedCaptureError("choose at least one viewport")
+        for viewport_id in viewport_ids:
+            if not DEFAULT_VIEWPORTS.get(viewport_id):
+                raise RestedCaptureError(f"unknown viewport: {viewport_id}")
+
+        schemes = payload.get("schemes") or list(DEFAULT_SCHEMES)
+        if isinstance(schemes, str):
+            schemes = [schemes]
+        if not isinstance(schemes, list):
+            raise RestedCaptureError("schemes must be a list")
+        schemes = [str(s).strip().lower() for s in schemes if str(s).strip()]
+        if not schemes:
+            raise RestedCaptureError("choose at least one color scheme")
+        for scheme in schemes:
+            if scheme not in {"light", "dark", "no-preference"}:
+                raise RestedCaptureError(f"unknown color scheme: {scheme}")
+        return viewport_ids, schemes
+
+    # Map mode validates before planning; legacy validates after discovery.
+    if supplied_maps:
+        viewport_ids, schemes = capture_matrix()
+
+    pathway_targets: list[CaptureTarget] | None = None
+    if supplied_maps:
+        base_url = str(payload.get("base_url") or "").strip()
+        if not base_url:
+            raise RestedCaptureError("base_url is required when feeding a pathway map")
+        if any(payload.get(key) is not None for key in ("manifest_path", "map_path")) and not allow_map_files:
+            raise RestedCaptureError("map file paths are CLI-only; pass map_text or manifest_text")
+        pathway_map = load_pathway_map(
+            manifest_path=payload.get("manifest_path"),
+            map_path=payload.get("map_path"),
+            manifest_text=payload.get("manifest_text"),
+            map_text=payload.get("map_text"),
+        )
+        urls, pathway_targets = plan_targets_from_map(
+            pathway_map,
+            base_url,
+            max_targets=max_targets,
+            # M-expanded-targets: the planner refuses the EXPANDED matrix
+            # (pathways x viewports x schemes) before any navigation.
+            viewport_count=len(viewport_ids),
+            scheme_count=len(schemes),
+            # D92: a dry-run plan is built with no navigation and no network
+            # call — never a page read to bind a named control.
+            dry_run=bool(payload.get("dry_run")),
+            allow_loopback=allow_loopback,
+            allow_private_hosts=allow_private_hosts,
+        )
+        crawl_enabled = False
+        local_enabled = False
+        discovery: dict[str, Any] = {
+            "mode": "map",
+            "pathway_count": len(pathway_map.get("pathways") or []),
+            "route_count": len(pathway_map.get("routes") or []),
+            "manifest_hash": pathway_map.get("hash"),
+        }
+    else:
+        raw_urls = payload.get("urls") or []
+        if isinstance(raw_urls, str):
+            raw_urls = re.split(r"[\r\n,]+", raw_urls)
+        if not isinstance(raw_urls, list):
+            raise RestedCaptureError("urls must be a list or newline text")
+
+        urls = [str(item).strip() for item in raw_urls if str(item).strip()]
+        if payload.get("url"):
+            urls.append(str(payload.get("url")).strip())
+        sitemap_url = str(payload.get("sitemap_url") or "").strip()
+        crawl_url = str(payload.get("crawl_url") or "").strip()
+        local_path = str(payload.get("local_path") or "").strip()
+        crawl_enabled = bool(payload.get("crawl") or crawl_url)
+        local_enabled = bool(payload.get("local") or local_path)
+        discovery = {"mode": "manual", "page_count": 0}
+        if crawl_url:
+            urls.append(crawl_url)
+
+        if local_enabled:
+            urls, discovery = discover_local_html(
+                local_path or (urls[0] if urls else ""),
+                max_urls=int(payload.get("max_pages") or payload.get("max_urls") or MAX_CRAWL_URLS),
+                max_depth=int(payload.get("crawl_depth") or DEFAULT_CRAWL_DEPTH),
+            )
+        elif crawl_enabled:
+            urls, discovery = discover_site_urls(
+                urls,
+                explicit_sitemap_urls=[sitemap_url] if sitemap_url else [],
+                max_urls=int(payload.get("max_pages") or payload.get("max_urls") or MAX_CRAWL_URLS),
+                max_depth=int(payload.get("crawl_depth") or DEFAULT_CRAWL_DEPTH),
+                concurrency=int(payload.get("crawl_concurrency") or DEFAULT_CRAWL_CONCURRENCY),
+                timeout_ms=int(payload.get("discovery_timeout_ms") or DEFAULT_DISCOVERY_TIMEOUT_MS),
+                wait_ms=int(payload.get("discovery_wait_ms") or DEFAULT_DISCOVERY_WAIT_MS),
+                include_sitemaps=bool(payload.get("include_sitemaps", True)),
+            )
+        elif sitemap_url:
+            urls.extend(expand_sitemap(sitemap_url))
+
+        urls = _dedupe_urls(urls)
+
+        if not urls:
+            raise RestedCaptureError("add at least one URL")
+        if len(urls) > MAX_URLS:
+            raise RestedCaptureError(f"too many URLs; maximum is {MAX_URLS}")
+        viewport_ids, schemes = capture_matrix()
 
     targets: list[CaptureTarget] = []
-    for url_index, url in enumerate(urls, start=1):
-        for viewport_id in viewport_ids:
-            viewport = DEFAULT_VIEWPORTS.get(viewport_id)
-            if not viewport:
-                raise RestedCaptureError(f"unknown viewport: {viewport_id}")
-            for scheme in schemes:
-                if scheme not in {"light", "dark", "no-preference"}:
-                    raise RestedCaptureError(f"unknown color scheme: {scheme}")
-                targets.append(
-                    CaptureTarget(
-                        index=url_index,
-                        url=url,
-                        viewport_id=viewport_id,
-                        width=int(viewport["width"]),
-                        height=int(viewport["height"]),
-                        scheme=scheme,
+    if pathway_targets is not None:
+        # Map-driven: every pathway target expands across the same
+        # viewport x scheme matrix a URL-driven plan builds, so the two plans
+        # are one shape.
+        for pathway_target in pathway_targets:
+            for viewport_id in viewport_ids:
+                viewport = DEFAULT_VIEWPORTS.get(viewport_id)
+                if not viewport:
+                    raise RestedCaptureError(f"unknown viewport: {viewport_id}")
+                for scheme in schemes:
+                    if scheme not in {"light", "dark", "no-preference"}:
+                        raise RestedCaptureError(f"unknown color scheme: {scheme}")
+                    targets.append(
+                        replace(
+                            pathway_target,
+                            viewport_id=viewport_id,
+                            width=int(viewport["width"]),
+                            height=int(viewport["height"]),
+                            scheme=scheme,
+                        )
                     )
-                )
+    else:
+        for url_index, url in enumerate(urls, start=1):
+            for viewport_id in viewport_ids:
+                viewport = DEFAULT_VIEWPORTS.get(viewport_id)
+                if not viewport:
+                    raise RestedCaptureError(f"unknown viewport: {viewport_id}")
+                for scheme in schemes:
+                    if scheme not in {"light", "dark", "no-preference"}:
+                        raise RestedCaptureError(f"unknown color scheme: {scheme}")
+                    targets.append(
+                        CaptureTarget(
+                            index=url_index,
+                            url=url,
+                            viewport_id=viewport_id,
+                            width=int(viewport["width"]),
+                            height=int(viewport["height"]),
+                            scheme=scheme,
+                        )
+                    )
+
+    # The plan says why a pathway is flagged. Status is read by the closed
+    # set (WIRED/MOCKED/UNWIRED/INCOMPLETE/UNCLEAR/UNKNOWN), never by
+    # substring; an UNWIRED pathway is planned AND flagged, never dropped.
+    pathway_flags: list[dict[str, str]] = []
+    if pathway_targets is not None:
+        for pathway_target in pathway_targets:
+            if pathway_target.pathway_status == "UNWIRED":
+                pathway_flags.append({
+                    "pathway_id": pathway_target.pathway_id,
+                    "flag": "UNWIRED",
+                    "reason": (
+                        "the map marks this pathway UNWIRED — planned and kept, "
+                        "but its control may not be wired to a real state"
+                    ),
+                })
+        if bool(payload.get("dry_run")):
+            from .pathway_plan import named_control_needs_the_page
+
+            # D92: in dry-run nothing is bound from a page. A named control
+            # the map hands no selector for is reported unbound (selector=-)
+            # with a flag saying so — planned and kept, never silently dropped.
+            for pathway, pathway_target in zip(
+                pathway_map.get("pathways") or [], pathway_targets
+            ):
+                if not pathway_target.trigger_selector and named_control_needs_the_page(pathway):
+                    pathway_flags.append({
+                        "pathway_id": pathway_target.pathway_id,
+                        "flag": "UNBOUND",
+                        "reason": (
+                            "the map names this control only by label or call — dry-run "
+                            "launches no browser and makes no network call, so it stays "
+                            "unbound (selector=-); run without --dry-run to bind it from "
+                            "the page"
+                        ),
+                    })
 
     settings = {
+        "allow_loopback": allow_loopback,
+        "loopback_host": (
+            urlparse(base_url).hostname if supplied_maps and allow_loopback else None
+        ),
+        "allow_private_hosts": allow_private_hosts,
         "format": str(payload.get("format") or "png").lower(),
         "full_page": bool(payload.get("full_page", True)),
         "timeout_ms": int(payload.get("timeout_ms") or DEFAULT_TIMEOUT_MS),
@@ -909,6 +1339,7 @@ def build_capture_plan(payload: dict[str, Any]) -> tuple[list[str], list[Capture
         "crawl": crawl_enabled,
         "local": local_enabled,
         "page_count": len(urls),
+        "pathway_flags": pathway_flags,
         "discovery": {**discovery, "page_count": len(urls)},
     }
     if settings["format"] not in {"png", "jpeg"}:
@@ -943,11 +1374,31 @@ async def _settle_page(page: Any, wait_ms: int) -> None:
     await page.wait_for_timeout(wait_ms)
 
 
-def _target_context_key(target: CaptureTarget) -> tuple[str, str, int, int, str]:
+def _target_loopback(settings: dict[str, Any], target: CaptureTarget) -> tuple[bool, str | None]:
+    """The loopback exception for one target: only its own host, never a sibling's.
+
+    A map run pins ``loopback_host`` to the base host; a pathway that resolves to
+    another absolute host gets no loopback exception at all.
+    """
+    if not settings.get("allow_loopback"):
+        return False, None
+    target_host = urlparse(target.url).hostname
+    loopback_host = settings.get("loopback_host")
+    if loopback_host is None:
+        return True, target_host
+    if target_host and _canonical_host(target_host) == _canonical_host(loopback_host):
+        return True, loopback_host
+    return False, None
+
+
+def _target_context_key(target: CaptureTarget) -> tuple[str, str, str, int, int, str]:
     parsed = urlparse(target.url)
     if parsed.scheme == "file":
-        return ("local-file", target.viewport_id, target.width, target.height, target.scheme)
-    return (_site_host_key(parsed.hostname), target.viewport_id, target.width, target.height, target.scheme)
+        return ("local-file", "", target.viewport_id, target.width, target.height, target.scheme)
+    return (
+        _site_host_key(parsed.hostname), _canonical_host(parsed.hostname),
+        target.viewport_id, target.width, target.height, target.scheme,
+    )
 
 
 # ── deterministic state sweep ────────────────────────────────────────────────
@@ -1098,24 +1549,132 @@ async def _sweep_states(page: Any, target: CaptureTarget, settings: dict[str, An
     return shots
 
 
-async def _capture_one(context: Any, target: CaptureTarget, settings: dict[str, Any], path: Path) -> dict[str, Any]:
+async def _apply_trigger(page: Any, selector: str, wait_ms: int) -> bool:
+    """Click the pathway's named control to reach its rested state.
+
+    The selector is the planner's candidate selector (never hand-rolled).
+    A click is meaningful when its URL/DOM changes or THIS page opens a popup
+    (page-scoped: a sibling target's popup on a shared context never counts).
+    A no-op stays baseline evidence. A missing control or a failed click is not a capture error — we shoot the
+    loaded state and report ``trigger_fired`` False; the quality gate reads
+    that flag to tell a baseline from a meaningful state shot.
+    """
+    sel = (selector or "").strip()
+    if not sel:
+        return False
+    popup_opened = False
+    listening = False
+
+    def popup_from_this_page(_popup: Any) -> None:
+        nonlocal popup_opened
+        popup_opened = True
+
+    try:
+        element = await page.query_selector(sel)
+        if element is None:
+            return False
+        registered = page.on("popup", popup_from_this_page)
+        if inspect.isawaitable(registered):
+            await registered
+        listening = True
+        before_url = page.url
+        before = await page.evaluate(_FINGERPRINT_JS)
+        await element.click(timeout=TRIGGER_CLICK_TIMEOUT_MS)
+        await _settle_page(page, wait_ms)
+        after = await page.evaluate(_FINGERPRINT_JS)
+        if popup_opened or page.url != before_url or after != before:
+            return True
+        deadline = time.monotonic() + TRIGGER_STATE_TIMEOUT_MS / 1000
+        while time.monotonic() < deadline:
+            await page.wait_for_timeout(TRIGGER_POLL_INTERVAL_MS)
+            after = await page.evaluate(_FINGERPRINT_JS)
+            if popup_opened or page.url != before_url or after != before:
+                return True
+        return False
+    except Exception as exc:
+        warnings.warn(f"capture trigger failed ({type(exc).__name__}); trigger_fired=False",
+                      RuntimeWarning, stacklevel=2)
+        return False
+    finally:
+        if listening:
+            try:
+                removed = page.remove_listener("popup", popup_from_this_page)
+                if inspect.isawaitable(removed):
+                    await removed
+            except Exception:
+                pass
+
+
+async def _capture_one(
+    context: Any, target: CaptureTarget, settings: dict[str, Any], path: Path,
+    *, guard_errors: list[RestedCaptureError] | None = None,
+    owner_errors: dict[Any, list[RestedCaptureError]] | None = None,
+    navigation_cache: dict[tuple[Any, ...], RestedCaptureError | None] | None = None,
+    allow_file_access: bool | None = None,
+) -> dict[str, Any]:
     started = time.perf_counter()
     attempts = max(1, int(settings.get("retries", DEFAULT_RETRIES)) + 1)
     last_error = ""
+    if navigation_cache is None:
+        navigation_cache = {}
+    if allow_file_access is None:
+        allow_file_access = bool(settings.get("local"))
+    allow_private_hosts = tuple(settings.get("allow_private_hosts") or ())
     for attempt in range(1, attempts + 1):
         page = None
+        allow_loopback, loopback_host = _target_loopback(settings, target)
+        page_errors: list[RestedCaptureError] = []
+        context_errors: list[RestedCaptureError] = []
         try:
             timeout_ms = int(settings["timeout_ms"])
             if attempt > 1:
                 timeout_ms = max(timeout_ms, int(settings.get("retry_timeout_ms") or DEFAULT_RETRY_TIMEOUT_MS))
             page = await context.new_page()
+            if owner_errors is not None:
+                owner_errors[page] = context_errors
+            await _install_navigation_guard(
+                page, allow_loopback=allow_loopback, loopback_host=loopback_host,
+                allow_private_hosts=allow_private_hosts, allow_file_access=allow_file_access,
+                navigation_cache=navigation_cache, guard_errors=page_errors,
+            )
             page.set_default_timeout(timeout_ms)
+            await _check_navigation_url(
+                target.url, allow_loopback=allow_loopback, loopback_host=loopback_host,
+                allow_private_hosts=allow_private_hosts, allow_file_access=allow_file_access,
+                cache=navigation_cache,
+            )
+            if page_errors:
+                raise page_errors[0]
             await page.goto(target.url, wait_until="domcontentloaded", timeout=timeout_ms)
+            if page_errors:
+                raise page_errors[0]
+            post_goto_url = page.url
+            if (
+                page.url == "about:blank"
+                or urlparse(page.url).scheme.lower() in {"data", "blob"}
+            ):
+                post_goto_url = target.url
+            await _check_navigation_url(
+                post_goto_url, allow_loopback=allow_loopback, loopback_host=loopback_host,
+                allow_private_hosts=allow_private_hosts, allow_file_access=allow_file_access,
+                cache=navigation_cache,
+            )
             try:
                 await page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 15000))
             except Exception:
                 pass
             await _settle_page(page, settings["wait_ms"])
+            trigger_fired = False
+            post_trigger_url = post_goto_url
+            if (target.trigger_selector or "").strip():
+                pre_trigger_url = post_goto_url
+                trigger_fired = await _apply_trigger(page, target.trigger_selector, settings["wait_ms"])
+                post_trigger_url = page.url
+                if (
+                    page.url == "about:blank"
+                    or urlparse(page.url).scheme.lower() in {"data", "blob"}
+                ):
+                    post_trigger_url = pre_trigger_url
             screenshot_kwargs: dict[str, Any] = {
                 "path": str(path),
                 "type": settings["format"],
@@ -1124,12 +1683,32 @@ async def _capture_one(context: Any, target: CaptureTarget, settings: dict[str, 
             }
             if settings["format"] == "jpeg":
                 screenshot_kwargs["quality"] = settings["jpeg_quality"]
+            if page_errors:
+                raise page_errors[0]
+            await _check_navigation_url(
+                post_trigger_url, allow_loopback=allow_loopback, loopback_host=loopback_host,
+                allow_private_hosts=allow_private_hosts, allow_file_access=allow_file_access,
+                cache=navigation_cache,
+            )
             await page.screenshot(**screenshot_kwargs)
             stat = path.stat()
             extra_states: list[dict[str, Any]] = []
             if settings.get("states"):
-                extra_states = await _sweep_states(page, target, settings, path)
+                for state in await _sweep_states(page, target, settings, path):
+                    if isinstance(state, dict) and isinstance(state.get("error"), str):
+                        state = {
+                            **state,
+                            "error": _redact_outward_error(state["error"], settings),
+                        }
+                    extra_states.append(state)
+            if page_errors:
+                raise page_errors[0]
+            refused = [_redact_outward_error(str(error), settings) for error in context_errors]
+            if refused:
+                # The shot stands (r13), but a refused popup is no state evidence.
+                trigger_fired = False
             return {
+                **({"refused": refused} if refused else {}),
                 "url": target.url,
                 "states": extra_states,
                 "state_id": target.state_id,
@@ -1140,19 +1719,33 @@ async def _capture_one(context: Any, target: CaptureTarget, settings: dict[str, 
                 "status": "ok",
                 "file": path.name,
                 "bytes": stat.st_size,
+                "trigger_selector": target.trigger_selector,
+                "trigger_fired": trigger_fired,
                 "attempts": attempt,
                 "elapsed_ms": int((time.perf_counter() - started) * 1000),
             }
         except Exception as exc:
-            last_error = str(exc)
+            if page_errors:
+                selected_error = page_errors[0]
+            elif context_errors:
+                # A context-only refusal (for example this target's popup) may
+                # be the real cause of the browser's navigation failure.
+                selected_error = context_errors[0]
+            else:
+                selected_error = exc
+            last_error = _redact_outward_error(str(selected_error), settings)
             if attempt < attempts:
                 await asyncio.sleep(0.35)
         finally:
             if page is not None:
+                if owner_errors is not None:
+                    owner_errors.pop(page, None)
                 try:
                     await page.close()
                 except Exception:
                     pass
+            if guard_errors is not None:
+                guard_errors.extend(page_errors)
 
     return {
         "url": target.url,
@@ -1201,12 +1794,15 @@ async def _run_capture_async(
         ) from exc
 
     sem = asyncio.Semaphore(settings["concurrency"])
+    navigation_cache: dict[tuple[Any, ...], RestedCaptureError | None] = {}
+    owner_errors: dict[Any, list[RestedCaptureError]] = {}
     results: list[dict[str, Any]] = []
 
     async with async_playwright() as p:
-        allow_file_access = any(urlparse(target.url).scheme == "file" for target in targets)
+        # One settings-derived value governs launch, context, and every page.
+        allow_file_access = bool(settings.get("local"))
         browser = await _launch_browser(p, allow_file_access=allow_file_access)
-        contexts: dict[tuple[str, str, int, int, str], Any] = {}
+        contexts: dict[tuple[str, str, str, int, int, str], Any] = {}
         context_lock = asyncio.Lock()
 
         async def context_for(target: CaptureTarget) -> Any:
@@ -1221,6 +1817,14 @@ async def _run_capture_async(
                         device_scale_factor=1,
                         locale="en-US",
                         user_agent=USER_AGENT,
+                        service_workers="block",
+                    )
+                    allow_loopback, loopback_host = _target_loopback(settings, target)
+                    await _install_navigation_guard(
+                        context, allow_loopback=allow_loopback, loopback_host=loopback_host,
+                        allow_private_hosts=tuple(settings.get("allow_private_hosts") or ()),
+                        allow_file_access=allow_file_access, navigation_cache=navigation_cache,
+                        owner_errors=owner_errors,
                     )
                     # Signed-in capture: without cookies the batch can only ever shoot
                     # what a logged-out visitor sees, so authenticated products are
@@ -1236,7 +1840,14 @@ async def _run_capture_async(
                 async with sem:
                     file_name = _capture_file_name(target, settings["format"])
                     context = await context_for(target)
-                    result = await _capture_one(context, target, settings, shots_dir / file_name)
+                    result = await _capture_one(
+                        context, target, settings, shots_dir / file_name,
+                        navigation_cache=navigation_cache, owner_errors=owner_errors,
+                        allow_file_access=allow_file_access,
+                    )
+                    # This is the shared outward boundary for both library callers
+                    # and manager jobs. Redact before the callback AND the return.
+                    result = _redact_outward_result_urls(result)
                     progress(result)
                     return result
 
@@ -1261,6 +1872,170 @@ def run_capture(
     return asyncio.run(_run_capture_async(targets, settings, shots_dir, progress))
 
 
+def build_quality_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Map run_capture's results to the shape quality.summarize_capture_quality reads.
+
+    One entry per shot file: the page shot is the rested ``baseline`` unless
+    its named control fired (then it is a ``state``), and every swept state
+    shot is a ``state``. The quality module only ever reads — this mapping
+    invents no successes and renames no failure.
+    """
+    entries: list[dict[str, Any]] = []
+    for result in results or []:
+        if not isinstance(result, dict):
+            continue
+        ok = result.get("status") == "ok"
+        captures: list[dict[str, Any]] = [{
+            "kind": "state" if result.get("trigger_fired") else "baseline",
+            "success": bool(ok),
+        }]
+        for state in result.get("states") or []:
+            if isinstance(state, dict):
+                captures.append({"kind": "state", "success": state.get("status") == "ok"})
+        entries.append({"file": result.get("file") or "", "manifest": {"captures": captures}})
+    return {"results": entries}
+
+
+SAFE_SETTINGS_KEYS = frozenset({
+    "format", "full_page", "timeout_ms", "wait_ms", "concurrency", "retries",
+    "retry_timeout_ms", "jpeg_quality", "states", "states_limit", "state_wait_ms",
+    "capture_count", "crawl", "local", "page_count", "pathway_flags", "discovery",
+    "allow_loopback", "loopback_host", "allow_private_hosts",
+})
+
+
+def _safe_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    """Only non-secret, JSON-safe capture settings may be shared or persisted."""
+    safe = {key: value for key, value in settings.items() if key in SAFE_SETTINGS_KEYS}
+    if "allow_private_hosts" in safe:
+        safe["allow_private_hosts"] = list(safe["allow_private_hosts"])
+    return safe
+
+
+# Below this length a secret is replaced only as a whole token, so a short
+# value ("1", "on") cannot eat ordinary words or punctuation out of an error.
+_SHORT_SECRET_LENGTH = 6
+
+
+def _redact_settings_secrets(text: str, settings: dict[str, Any]) -> str:
+    """Remove secret-bearing settings values from an outward error.
+
+    Only secret positions are collected: a cookie's ``value`` (never its name,
+    domain or path), and every string leaf of any other non-allowlisted key
+    (header values, auth leaves, an authorization string). An error therefore
+    still names its target URL and host.
+    """
+    values: list[str] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, str):
+            if value:
+                values.append(value)
+        elif isinstance(value, dict):
+            for item in value.values():
+                collect(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                collect(item)
+
+    for key, value in settings.items():
+        if key in SAFE_SETTINGS_KEYS:
+            continue
+        if key == "cookies" and isinstance(value, (list, tuple)):
+            for cookie in value:
+                collect(cookie.get("value") if isinstance(cookie, dict) else cookie)
+            continue
+        collect(value)
+    for value in sorted(set(values), key=len, reverse=True):
+        if len(value) >= _SHORT_SECRET_LENGTH:
+            text = text.replace(value, "<redacted>")
+        else:
+            text = re.sub(rf"(?<!\w){re.escape(value)}(?!\w)", "<redacted>", text)
+    return text
+
+
+# Match URL authorities inside browser errors, including Playwright call logs.
+_ERROR_URL_AUTHORITY_RE = re.compile(
+    r"""(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<authority>[^\s/?#"'<>\\]+)"""
+)
+
+
+def _redact_error_url_userinfo(text: str) -> str:
+    """Strip userinfo from URL authorities embedded in free-form error text."""
+    def scrub(match: re.Match[str]) -> str:
+        authority = match.group("authority")
+        return match.group("scheme") + authority.rsplit("@", 1)[-1]
+
+    return _ERROR_URL_AUTHORITY_RE.sub(scrub, text)
+
+
+def _redact_outward_error(text: str, settings: dict[str, Any]) -> str:
+    """Remove configured secrets and URL credentials from outward errors."""
+    return _redact_error_url_userinfo(_redact_settings_secrets(text, settings))
+
+
+def _redact_url_userinfo(url: str) -> str:
+    """Remove credentials from an outward URL without changing its target."""
+    parsed = urlparse(url)
+    if "@" not in parsed.netloc:
+        return url
+    return urlunparse(parsed._replace(netloc=parsed.netloc.rsplit("@", 1)[-1]))
+
+
+def _redact_outward_result_urls(result: dict[str, Any]) -> dict[str, Any]:
+    """Project result/state URLs without userinfo, preserving identity if clean."""
+    safe = dict(result)
+    changed = False
+    url = result.get("url")
+    if isinstance(url, str):
+        safe_url = _redact_url_userinfo(url)
+        changed = safe_url != url
+        safe["url"] = safe_url
+    error = result.get("error")
+    if isinstance(error, str):
+        safe_error = _redact_error_url_userinfo(error)
+        if safe_error != error:
+            safe["error"] = safe_error
+            changed = True
+    states = result.get("states")
+    if isinstance(states, list):
+        safe_states = [
+            _redact_outward_result_urls(state) if isinstance(state, dict) else state
+            for state in states
+        ]
+        if any(new is not old for new, old in zip(safe_states, states)):
+            changed = True
+            safe["states"] = safe_states
+    return safe if changed else result
+
+
+def _warn_if_private_targets_lack_capability(
+    targets: list[CaptureTarget], settings: dict[str, Any],
+) -> None:
+    """Warn once per start for literal local targets lacking explicit policy."""
+    allow_loopback = bool(settings.get("allow_loopback"))
+    allowed = {
+        _canonical_host(host) for host in settings.get("allow_private_hosts") or ()
+    }
+    for target in targets:
+        host = _canonical_host(urlparse(target.url).hostname)
+        address = _unwrapped_address(host)
+        local_name = host == "localhost" or host.endswith(".localhost")
+        if not local_name and (address is None or not is_private_ip(host)):
+            continue
+        if host in allowed:
+            continue
+        if allow_loopback and (local_name or (address is not None and address.is_loopback)):
+            continue
+        warnings.warn(
+            "capture plan includes loopback/private targets without an explicit "
+            "allow capability; navigation will be refused",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return
+
+
 def _write_json(path: Path, data: dict[str, Any]) -> None:
     path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
 
@@ -1280,8 +2055,34 @@ class RestedCaptureManager:
         self._lock = threading.Lock()
         self._jobs: dict[str, dict[str, Any]] = {}
 
-    def start(self, payload: dict[str, Any]) -> dict[str, Any]:
-        urls, targets, settings = build_capture_plan(payload)
+    def start(
+        self, payload: dict[str, Any], *, allow_map_files: bool = False,
+        allow_loopback: bool = False, allow_private_hosts: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        """Plan and queue a capture job.
+
+        Migration note (capturd#49): every capture now runs behind a
+        default-deny navigation guard. Loopback, private and link-local hosts
+        are refused unless the caller passes ``allow_loopback=True`` (the
+        target's own host only) or names hosts in ``allow_private_hosts``.
+        Library and service callers that captured a local dev server before
+        must now pass ``allow_loopback=True``; the CLI already does.
+        """
+        capabilities = {
+            "allow_map_files": allow_map_files,
+            "allow_loopback": allow_loopback,
+            "allow_private_hosts": allow_private_hosts,
+        }
+        map_input = any(
+            payload.get(key) is not None
+            for key in ("manifest_path", "map_path", "manifest_text", "map_text")
+        )
+        live_payload = dict(payload) if map_input else None
+        plan_payload = dict(payload) if map_input else payload
+        if map_input:
+            plan_payload["dry_run"] = True
+        urls, targets, settings = build_capture_plan(plan_payload, **capabilities)
+        _warn_if_private_targets_lack_capability(targets, settings)
         job_id = uuid.uuid4().hex[:12]
         job_name = _slug(str(payload.get("name") or "") or _job_name(), _job_name())
         work_dir = self.root_dir / job_id
@@ -1298,12 +2099,12 @@ class RestedCaptureManager:
             "created_at": utc_now_iso(),
             "updated_at": utc_now_iso(),
             "message": "Queued",
-            "urls": urls,
+            "urls": [_redact_url_userinfo(url) for url in urls],
             "total": len(targets),
             "completed": 0,
             "failed": 0,
             "results": [],
-            "settings": settings,
+            "settings": _safe_settings(settings),
             "discovery": settings.get("discovery") or {},
             "work_dir": str(work_dir),
             "output_dir": "",
@@ -1315,7 +2116,10 @@ class RestedCaptureManager:
 
         thread = threading.Thread(
             target=self._run_job,
-            args=(job_id, targets, settings, work_dir, shots_dir, export_dir, export_mode),
+            args=(
+                job_id, targets, settings, work_dir, shots_dir, export_dir, export_mode,
+                live_payload, capabilities if map_input else None,
+            ),
             daemon=False,
             name=f"rested-capture-{job_id}",
         )
@@ -1327,7 +2131,9 @@ class RestedCaptureManager:
             job = self._jobs.get(job_id)
             if not job:
                 raise KeyError(job_id)
-            return dict(job)
+            result = dict(job)
+            result["settings"] = _safe_settings(result.get("settings") or {})
+            return result
 
     def zip_path(self, job_id: str) -> Path:
         job = self.get(job_id)
@@ -1345,7 +2151,7 @@ class RestedCaptureManager:
     def _record_result(self, job_id: str, result: dict[str, Any]) -> None:
         with self._lock:
             job = self._jobs[job_id]
-            job["results"].append(result)
+            job["results"].append(_redact_outward_result_urls(result))
             job["completed"] = int(job.get("completed", 0)) + 1
             if result.get("status") != "ok":
                 job["failed"] = int(job.get("failed", 0)) + 1
@@ -1361,8 +2167,20 @@ class RestedCaptureManager:
         shots_dir: Path,
         export_dir: Path | None,
         export_mode: str,
+        live_payload: dict[str, Any] | None = None,
+        capabilities: dict[str, Any] | None = None,
     ) -> None:
         try:
+            if live_payload is not None:
+                urls, targets, settings = build_capture_plan(
+                    live_payload, **(capabilities or {}),
+                )
+                self._patch(job_id, {
+                    "urls": [_redact_url_userinfo(url) for url in urls],
+                    "total": len(targets),
+                    "settings": _safe_settings(settings),
+                    "discovery": settings.get("discovery") or {},
+                })
             shots_dir.mkdir(parents=True, exist_ok=True)
             self._patch(job_id, {"status": "running", "message": "Capturing"})
             results = run_capture(
@@ -1374,10 +2192,13 @@ class RestedCaptureManager:
             manifest = {
                 "job_id": job_id,
                 "captured_at": utc_now_iso(),
-                "settings": settings,
-                "urls": self.get(job_id).get("urls") or [],
+                "settings": _safe_settings(settings),
+                "urls": [
+                    _redact_url_userinfo(url)
+                    for url in self.get(job_id).get("urls") or []
+                ],
                 "discovery": settings.get("discovery") or {},
-                "results": results,
+                "results": [_redact_outward_result_urls(result) for result in results],
             }
             _write_json(work_dir / "manifest.json", manifest)
 
@@ -1407,4 +2228,8 @@ class RestedCaptureManager:
                 },
             )
         except Exception as exc:
-            self._patch(job_id, {"ok": False, "status": "failed", "message": str(exc)})
+            self._patch(job_id, {
+                "ok": False,
+                "status": "failed",
+                "message": _redact_outward_error(str(exc), settings),
+            })
