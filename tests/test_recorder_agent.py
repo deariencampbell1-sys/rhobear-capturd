@@ -387,3 +387,94 @@ async def test_consecutive_scroll_steps_have_different_screenshots(tmp_path) -> 
     for s in steps:
         assert s.interaction.target["captureSpace"] == "viewport"
         assert s.interaction.target["region"] in ("body", "full_viewport")
+
+
+# ---------------------------------------------------------------------------
+# W1-03-r2 — scrolling inside an SPA pane and valid edge no-ops
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_scroll_inside_nested_pane_preserves_window_offset(tmp_path) -> None:
+    """Wheel a scrollable app pane, even though the document itself is fixed."""
+    url = _tmp_page(
+        tmp_path,
+        "<style>html,body{margin:0;height:100%;overflow:hidden}</style>"
+        "<div id='pane' style='position:absolute;left:40px;top:40px;"
+        "width:330px;height:200px;overflow:auto'>"
+        "<div style='height:900px;background:linear-gradient(red,blue)'>"
+        "inside scroll pane</div></div>",
+    )
+    rec = await _recording_session(url, tmp_path, viewport={"width": 800, "height": 400})
+    try:
+        before = await rec._page.evaluate(
+            "() => ({inner: document.querySelector('#pane').scrollTop, outer: window.scrollY})"
+        )
+        assert before == {"inner": 0, "outer": 0}
+        await rec._act_async("scroll", "#pane", "down", None)
+        after = await rec._page.evaluate(
+            "() => ({inner: document.querySelector('#pane').scrollTop, outer: window.scrollY})"
+        )
+        assert after["inner"] > 0, after
+        assert after["outer"] == 0, after
+        assert len(rec.spec.steps) == 1
+        assert rec.spec.steps[0].interaction.type == "scroll"
+    finally:
+        await rec._stop_async()
+
+
+@pytest.mark.asyncio
+async def test_scroll_top_and_bottom_at_document_edges_are_valid(tmp_path) -> None:
+    """Already-at-edge top/bottom actions are valid, even at zero delta."""
+    url = _tmp_page(
+        tmp_path,
+        "<div style='height:1600px;background:linear-gradient(red,blue)'>long page</div>",
+    )
+    rec = await _recording_session(url, tmp_path, viewport={"width": 800, "height": 400})
+    try:
+        await rec._act_async("scroll", "body", "top", None)
+        assert await rec._page.evaluate("() => window.scrollY") == 0
+        await rec._page.evaluate(
+            "() => window.scrollTo(0, document.scrollingElement.scrollHeight)"
+        )
+        at_bottom = await rec._page.evaluate(
+            "() => document.scrollingElement.scrollTop"
+        )
+        assert at_bottom > 0
+        await rec._act_async("scroll", "body", "bottom", None)
+        assert await rec._page.evaluate(
+            "() => document.scrollingElement.scrollTop"
+        ) == at_bottom
+        assert len(rec.spec.steps) == 2
+        assert all(s.interaction.type == "scroll" for s in rec.spec.steps)
+    finally:
+        await rec._stop_async()
+
+
+@pytest.mark.asyncio
+async def test_scroll_nested_pane_top_and_bottom_edges(tmp_path) -> None:
+    """Top/bottom commands respect an explicitly selected nested scroll pane."""
+    url = _tmp_page(
+        tmp_path,
+        "<style>body{overflow:hidden}</style>"
+        "<div id='pane' style='height:180px;width:320px;overflow-y:auto'>"
+        "<div style='height:1000px'>long pane</div></div>",
+    )
+    rec = await _recording_session(url, tmp_path, viewport={"width": 800, "height": 400})
+    try:
+        await rec._act_async("scroll", "#pane", "top", None)
+        assert await rec._page.evaluate(
+            "() => document.querySelector('#pane').scrollTop"
+        ) == 0
+        await rec._act_async("scroll", "#pane", "bottom", None)
+        at_bottom = await rec._page.evaluate(
+            "() => document.querySelector('#pane').scrollTop"
+        )
+        assert at_bottom > 0
+        await rec._act_async("scroll", "#pane", "bottom", None)
+        assert await rec._page.evaluate(
+            "() => document.querySelector('#pane').scrollTop"
+        ) == at_bottom
+        assert len(rec.spec.steps) == 3
+    finally:
+        await rec._stop_async()
