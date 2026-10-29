@@ -478,3 +478,154 @@ async def test_scroll_nested_pane_top_and_bottom_edges(tmp_path) -> None:
         assert len(rec.spec.steps) == 3
     finally:
         await rec._stop_async()
+
+
+# ---------------------------------------------------------------------------
+# W1-03-r3 — wheel movement governs refusal; run_async guard coverage
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "surface,edge",
+    [("document", "top"), ("document", "bottom"),
+     ("pane", "top"), ("pane", "bottom")],
+)
+@pytest.mark.asyncio
+async def test_wheel_at_scroll_target_edge_is_refused(tmp_path, surface, edge) -> None:
+    """A WHEEL whose target does not move is refused even on a scrollable
+    target — including an outward wheel at the target's own edge. Explicit
+    normalized top/bottom edge commands stay recorded no-ops; only wheel
+    movement governs refusal."""
+    from capturd.walk.recorder import DemoRecorderError
+
+    if surface == "document":
+        url = _tmp_page(
+            tmp_path,
+            "<div style='height:1600px;background:linear-gradient(red,blue)'>"
+            "long page</div>",
+        )
+        selector = "body"
+        target_js = "document.scrollingElement"
+    else:
+        url = _tmp_page(
+            tmp_path,
+            "<style>html,body{margin:0;height:100%;overflow:hidden}</style>"
+            "<div id='pane' style='position:absolute;left:40px;top:40px;"
+            "width:330px;height:200px;overflow:auto'>"
+            "<div style='height:900px;background:linear-gradient(red,blue)'>"
+            "inside scroll pane</div></div>",
+        )
+        selector = "#pane"
+        target_js = "document.querySelector('#pane')"
+
+    rec = await _recording_session(
+        url, tmp_path, viewport={"width": 800, "height": 400}
+    )
+    try:
+        # Put the ACTUAL wheel target at the requested edge and prove it has
+        # more than one pixel of scroll range (a real, scrollable target).
+        placed = await rec._page.evaluate(
+            "(edge) => {"
+            " const el = " + target_js + ";"
+            " const range = el.scrollHeight - el.clientHeight;"
+            " el.scrollTop = edge === 'top' ? 0 : el.scrollHeight;"
+            " return {range: range, y: el.scrollTop};"
+            "}",
+            edge,
+        )
+        assert placed["range"] > 1, f"target needs scroll range: {placed}"
+        y_before = await rec._page.evaluate(
+            "() => (" + target_js + ").scrollTop"
+        )
+        with pytest.raises(
+            DemoRecorderError,
+            match="refusing to record an identical scroll screenshot",
+        ):
+            await rec._act_async(
+                "scroll", selector, "up" if edge == "top" else "down", None
+            )
+        y_after = await rec._page.evaluate("() => (" + target_js + ").scrollTop")
+        assert y_after == y_before, "refused wheel must not move the target"
+        assert len(rec.spec.steps) == 0, (
+            f"refused wheel must not record a step: {rec.spec.steps}"
+        )
+        if surface == "pane" and edge == "bottom":
+            # Numeric zero is a wheel value too: same refusal, same count.
+            with pytest.raises(
+                DemoRecorderError,
+                match="refusing to record an identical scroll screenshot",
+            ):
+                await rec._act_async("scroll", selector, "0", None)
+            assert await rec._page.evaluate(
+                "() => (" + target_js + ").scrollTop"
+            ) == y_before
+            assert len(rec.spec.steps) == 0
+    finally:
+        await rec._stop_async()
+
+
+def test_run_async_preserves_started_runtime_error(monkeypatch) -> None:
+    """An application RuntimeError raised by a coroutine that already started
+    surfaces as the identical exception object — the CORO_CREATED guard
+    re-raises instead of re-running it through asyncio.run."""
+    from capturd.walk.recorder import run_async
+
+    loop = asyncio.new_event_loop()
+    started: list[int] = []
+    err = RuntimeError("boom from started coroutine")
+
+    async def coro():
+        started.append(1)
+        await asyncio.sleep(0)
+        raise err
+
+    runs: list[int] = []
+    real_run = asyncio.run
+
+    def counting_run(c, *args, **kwargs):
+        runs.append(1)
+        return real_run(c, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "get_event_loop", lambda: loop)
+    monkeypatch.setattr(asyncio, "run", counting_run)
+    try:
+        with pytest.raises(RuntimeError) as excinfo:
+            run_async(coro())
+        assert excinfo.value is err, "started-coroutine error must surface verbatim"
+        assert str(excinfo.value) == "boom from started coroutine"
+        assert started == [1], "the coroutine must run exactly once"
+        assert runs == [], "the asyncio.run fallback must not re-run a started coroutine"
+    finally:
+        monkeypatch.undo()
+        loop.close()
+
+
+def test_run_async_falls_back_for_created_coroutine(monkeypatch) -> None:
+    """A never-started coroutine against a closed loop runs exactly once
+    through the asyncio.run fallback and returns its result."""
+    from capturd.walk.recorder import run_async
+
+    loop = asyncio.new_event_loop()
+    loop.close()
+    started: list[int] = []
+
+    async def coro():
+        started.append(1)
+        return 37
+
+    runs: list[int] = []
+    real_run = asyncio.run
+
+    def counting_run(c, *args, **kwargs):
+        runs.append(1)
+        return real_run(c, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "get_event_loop", lambda: loop)
+    monkeypatch.setattr(asyncio, "run", counting_run)
+    try:
+        assert run_async(coro()) == 37
+        assert started == [1], "the coroutine must run exactly once"
+        assert len(runs) == 1, "exactly one asyncio.run fallback call"
+    finally:
+        monkeypatch.undo()
+        loop.close()

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import base64
 import math
+import shutil
 from pathlib import Path
 
 import pytest
@@ -614,3 +615,171 @@ def test_png_public_decoder_forces_fallback_without_pillow(monkeypatch) -> None:
 
     monkeypatch.setattr(builtins, "__import__", without_pillow)
     assert _decode_png_rgb(png) == _decode_png_rgb_stdlib(png)
+
+
+# ---------------------------------------------------------------------------
+# W1-03-r3 — malformed PNG normalizes to DemoExportError at the decoder
+# boundary, and the coordinator's missing-source refusal contract
+# ---------------------------------------------------------------------------
+
+
+def _png_chunk(kind: bytes, data: bytes) -> bytes:
+    """The module's existing length/CRC chunk construction, reused."""
+    import struct
+    import zlib
+
+    return (struct.pack(">I", len(data)) + kind + data
+            + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
+
+
+def _split_png(png: bytes) -> list[tuple[bytes, bytes]]:
+    """Split a tiny PNG into (chunk type, payload) pairs for surgery."""
+    import struct
+
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+    parts = []
+    pos = 8
+    while pos + 8 <= len(png):
+        (length,) = struct.unpack(">I", png[pos:pos + 4])
+        parts.append((png[pos + 4:pos + 8], png[pos + 8:pos + 8 + length]))
+        pos += 12 + length
+    return parts
+
+
+def _join_png(parts: list[tuple[bytes, bytes]]) -> bytes:
+    return b"\x89PNG\r\n\x1a\n" + b"".join(_png_chunk(k, d) for k, d in parts)
+
+
+@pytest.mark.parametrize("entry", ("stdlib", "public_no_pillow"))
+@pytest.mark.parametrize("corrupt", ("short_ihdr", "bad_idat", "short_rows"))
+def test_malformed_png_raises_export_error(corrupt, entry, monkeypatch) -> None:
+    """Truncated IHDR, invalid IDAT and too-short decompressed rows all
+    become DemoExportError('invalid PNG: …') with a chained cause — through
+    the direct stdlib entry point and the public decoder with Pillow forced
+    unavailable. These are explicit malformed-format inputs, not fabricated
+    product responses."""
+    import zlib
+
+    from capturd.walk.exporter import (
+        DemoExportError,
+        _decode_png_rgb,
+        _decode_png_rgb_stdlib,
+    )
+
+    png, _expected = _filtered_png_fixture(2, 0)  # 3x2 RGB: 20 scanline bytes
+    parts = _split_png(png)
+    if corrupt == "short_ihdr":
+        # 12-byte IHDR payload where 13 bytes are required.
+        bad = _join_png([(k, d[:12] if k == b"IHDR" else d) for k, d in parts])
+    elif corrupt == "bad_idat":
+        bad = _join_png([(k, b"bad" if k == b"IDAT" else d) for k, d in parts])
+    else:  # short_rows: 9 valid decompressed bytes where 20 are required
+        bad = _join_png([
+            (k, zlib.compress(b"\x00" * 9) if k == b"IDAT" else d)
+            for k, d in parts
+        ])
+
+    decode = _decode_png_rgb_stdlib
+    if entry == "public_no_pillow":
+        import builtins
+
+        real_import = builtins.__import__
+
+        def without_pillow(name, *args, **kwargs):
+            if name == "PIL" or name.startswith("PIL."):
+                raise ImportError("Pillow is deliberately unavailable in this test")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", without_pillow)
+        decode = _decode_png_rgb
+
+    with pytest.raises(DemoExportError, match="invalid PNG") as excinfo:
+        decode(bad)
+    assert excinfo.value.__cause__ is not None, (
+        "normalized malformed-PNG errors must chain their cause"
+    )
+
+
+@pytest.mark.parametrize("fmt", ("mp4", "gif"))
+@pytest.mark.parametrize("missing_kind", ("absent", "dangling"))
+def test_coordinator_refuses_missing_export_sources(
+    tmp_path: Path, monkeypatch, fmt, missing_kind
+) -> None:
+    """mp4/gif export refuses a missing step source BEFORE HTML/output
+    creation or any export_video call — and the refusal is catchable as
+    DemoForgeError AND DemoExportError. The missing step carries index 7.
+    A truthy but unreadable screenshotPath is not proof of a source."""
+    from capturd.walk.coordinator import DemoForge, DemoForgeError
+    from capturd.walk.exporter import DemoExportError
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("export_video must not be called for a missing source")
+
+    monkeypatch.setattr("capturd.walk.exporter.export_video", fail_if_called)
+
+    demo_id = "missing-src"
+    forge = DemoForge(demos_dir=tmp_path / "demos")
+    if missing_kind == "absent":
+        missing_step = _step_with_source(7, None)
+    else:
+        missing_step = _step_with_source(7, None, "missing.png")
+    spec = _spec_of([_step_with_source(0, _b64(SOURCE_0)), missing_step])
+    forge.save_spec(demo_id, spec)
+
+    with pytest.raises(DemoForgeError) as excinfo:
+        forge.export_demo(demo_id, fmt=fmt)
+
+    err = excinfo.value
+    assert isinstance(err, DemoExportError), (
+        "missing-source refusal must also be catchable as DemoExportError"
+    )
+    msg = str(err)
+    assert "DemoExportMissingSourceError" in msg, msg
+    assert "step 7" in msg, msg
+    d = forge.demo_dir(demo_id)
+    assert not (d / "export.html").exists(), "refusal must precede HTML creation"
+    assert not (d / f"walkthrough.{fmt}").exists(), "no output for a refused export"
+
+
+@pytest.mark.parametrize("fmt", ("mp4", "gif"))
+def test_coordinator_inlines_real_source_before_export(
+    tmp_path: Path, monkeypatch, fmt
+) -> None:
+    """Real sources still pass the precheck: both fixtures are inlined to
+    their exact bytes before the encoder boundary is reached. The encoder is
+    instrumented to inspect its arguments — this does not claim a stub
+    produced an accepted video."""
+    from capturd.walk.coordinator import DemoForge
+
+    calls: list[dict] = []
+
+    def fake_export_video(spec, viewer_html, out_path, *, fmt="mp4", fps=30):
+        calls.append({"spec": spec, "viewer_html": viewer_html,
+                      "out_path": out_path, "fmt": fmt})
+        return out_path
+
+    monkeypatch.setattr("capturd.walk.exporter.export_video", fake_export_video)
+
+    demo_id = "inline-src"
+    forge = DemoForge(demos_dir=tmp_path / "demos")
+    spec = _spec_of([
+        _step_with_source(0, _b64(SOURCE_0)),
+        _step_with_source(1, None, "scroll-source-1.png"),
+    ])
+    forge.save_spec(demo_id, spec)
+    d = forge.demo_dir(demo_id)
+    shutil.copy(SOURCE_1, d / "scroll-source-1.png")
+
+    out = forge.export_demo(demo_id, fmt=fmt)
+
+    assert len(calls) == 1, "the encoder boundary must be reached exactly once"
+    call = calls[0]
+    assert call["fmt"] == fmt
+    expected_out = d / f"walkthrough.{fmt}"
+    assert call["out_path"] == expected_out
+    assert out == expected_out
+    steps = call["spec"]["steps"]
+    assert base64.b64decode(steps[0]["screenshotBase64"]) == SOURCE_0.read_bytes()
+    assert base64.b64decode(steps[1]["screenshotBase64"]) == SOURCE_1.read_bytes()
+    for s in steps:
+        assert "screenshotError" not in s, s
