@@ -376,6 +376,10 @@ def test_step_windows_agree_with_html_and_mp4_chapters(tmp_path):
     import shutil
     import subprocess
 
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        pytest.skip("ffprobe not available")
+
     from playwright.sync_api import sync_playwright
 
     from capturd.walk.exporter import export_video
@@ -428,8 +432,6 @@ def test_step_windows_agree_with_html_and_mp4_chapters(tmp_path):
     export_video(spec, viewer, out, fmt="mp4", fps=8)
     assert out.is_file()
 
-    ffprobe = shutil.which("ffprobe")
-    assert ffprobe, "ffprobe required for chapter agreement"
     dur_s = float(subprocess.run(
         [ffprobe, "-v", "error", "-show_entries", "format=duration",
          "-of", "default=noprint_wrappers=1:nokey=1", str(out)],

@@ -1133,13 +1133,14 @@ class DemoRecorder:
                     await self._page.mouse.wheel(0, dy)
                 await asyncio.sleep(0.3)
                 after_y = await scroll_target.evaluate("(el) => el.scrollTop")
-                if (v not in ("top", "bottom")
-                        and abs(float(after_y) - float(before["y"])) < 1
-                        and not before["scrollable"]):
-                    raise DemoRecorderError(
-                        "page has no scrollable target — "
-                        "refusing to record an identical scroll screenshot"
-                    )
+                # WHEEL movement governs refusal: any wheel value (including
+                # numeric 0) whose target did not move is refused before a
+                # synthetic step can be recorded. Explicit normalized top/
+                # bottom edge commands stay valid no-ops at their edge.
+                if v not in ("top", "bottom") and abs(float(after_y) - float(before["y"])) < 1:
+                    reason = ("page has no scrollable target" if not before["scrollable"]
+                              else "scroll target did not move")
+                    raise DemoRecorderError(reason + " — refusing to record an identical scroll screenshot")
             finally:
                 await scroll_target.dispose()
 

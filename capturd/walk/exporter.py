@@ -63,7 +63,30 @@ def _decode_png_rgb(png: bytes) -> tuple[int, int, bytes]:
 
 
 def _decode_png_rgb_stdlib(png: bytes) -> tuple[int, int, bytes]:
-    """Minimal PNG reader: 8-bit grey/RGB/grey-alpha/RGBA, non-interlaced."""
+    """Minimal PNG reader: 8-bit grey/RGB/grey-alpha/RGBA, non-interlaced.
+
+    Malformed input is normalized at this boundary: structural corruption
+    (truncated chunks, bad IHDR size, invalid compressed data, short
+    scanlines) raises ``DemoExportError("invalid PNG: ...")`` with the
+    underlying cause chained. The documented format refusals (bad signature,
+    missing IHDR, unsupported format, unknown filter) propagate unchanged.
+    """
+    import struct
+    import zlib
+
+    try:
+        return _decode_png_rgb_stdlib_impl(png)
+    except (struct.error, zlib.error, IndexError, ValueError) as exc:
+        raise DemoExportError("invalid PNG: " + str(exc)) from exc
+
+
+def _decode_png_rgb_stdlib_impl(png: bytes) -> tuple[int, int, bytes]:
+    """PNG chunk parsing + unfilter math (implementation helper).
+
+    New validation failures raise ``ValueError`` for
+    ``_decode_png_rgb_stdlib`` to normalize with a cause; the unfilter math
+    below is kept byte-identical to the original decoder.
+    """
     import struct
     import zlib
 
@@ -76,9 +99,14 @@ def _decode_png_rgb_stdlib(png: bytes) -> tuple[int, int, bytes]:
     while pos + 8 <= len(png):
         (length,) = struct.unpack(">I", png[pos : pos + 4])
         ctype = png[pos + 4 : pos + 8]
+        # Validate the chunk's complete payload + CRC extent before slicing.
+        if pos + 12 + length > len(png):
+            raise ValueError(f"truncated PNG chunk {ctype!r}")
         data = png[pos + 8 : pos + 8 + length]
         pos += 12 + length
         if ctype == b"IHDR":
+            if length != 13:
+                raise ValueError(f"IHDR payload must be 13 bytes, got {length}")
             width, height, bit_depth, color_type, _c, _f, interlace = struct.unpack(
                 ">IIBBBBB", data
             )
@@ -95,6 +123,15 @@ def _decode_png_rgb_stdlib(png: bytes) -> tuple[int, int, bytes]:
     channels = {0: 1, 2: 3, 4: 2, 6: 4}[color_type]
     raw = zlib.decompress(bytes(idat))
     stride = width * channels
+    # Short data must never return a silently shortened RGB buffer: the
+    # decompressed payload has to hold exactly one filter byte per row plus
+    # every scanline byte.
+    expected = height * (1 + stride)
+    if len(raw) != expected:
+        raise ValueError(
+            f"PNG pixel data must be {expected} bytes "
+            f"({height} rows x {1 + stride}), got {len(raw)}"
+        )
     out = bytearray(height * stride)
     prev = bytearray(stride)
     pos = 0

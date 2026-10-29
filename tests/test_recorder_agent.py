@@ -308,7 +308,31 @@ async def _recording_session(url: str, tmp_path: Path, viewport=None):
         headful=False,
     )
     await rec.start()
-    await asyncio.sleep(0.4)  # overlay install + first paint
+    try:
+        # Deterministic readiness instead of a fixed sleep: the installed flag
+        # alone is set BEFORE the click bridge attaches and the HUD badge
+        # exists, so wait for the connected badge + both exposed functions,
+        # then give the installed overlay two animation frames to paint.
+        await rec._page.wait_for_function(
+            """() => {
+                const badge = document.getElementById('__demo-recorder-indicator');
+                return !!window.__demoRecorderInstalled
+                    && !!badge && badge.isConnected
+                    && typeof window.recordClick === 'function'
+                    && typeof window.__demoRecorderSetStepCount === 'function';
+            }""",
+            timeout=5000,
+        )
+        await rec._page.evaluate(
+            "() => new Promise((resolve) => {"
+            "  requestAnimationFrame(() => {"
+            "    requestAnimationFrame(() => resolve());"
+            "  });"
+            "})"
+        )
+    except Exception:
+        await rec._stop_async()
+        raise
     return rec
 
 

@@ -43,6 +43,7 @@ from capturd.walk.ai_pipeline import (
     _llm_vision,
     _synthesize_one,
 )
+from capturd.walk.exporter import DemoExportError
 from capturd.walk.recorder import DemoManager, run_async
 
 logger = logging.getLogger(__name__)
@@ -86,6 +87,15 @@ class DemoNotFound(DemoForgeError):
 
 class DemoCorrupt(DemoForgeError):
     pass
+
+
+class DemoExportMissingSourceError(DemoForgeError, DemoExportError):
+    """A required export source is missing or unreadable.
+
+    Inherits BOTH error bases — the coordinator's ``DemoForgeError`` and the
+    exporter's ``DemoExportError`` — so this refusal is catchable under
+    either contract without changing every other DemoForge error.
+    """
 
 
 
@@ -586,13 +596,16 @@ class DemoForge:
 
         propagate_target_metadata(data)
         if fmt in {"mp4", "gif"}:
+            # A truthy screenshotPath is NOT proof of a source: after
+            # _inline_screenshots, only screenshotBase64 (without a
+            # screenshotError) proves the bytes were actually read.
             missing = [
                 str(step.get("index", i))
                 for i, step in enumerate(data.get("steps") or [])
-                if not (step.get("screenshotBase64") or step.get("screenshotPath"))
+                if step.get("screenshotError") or not step.get("screenshotBase64")
             ]
             if missing:
-                raise DemoForgeError(
+                raise DemoExportMissingSourceError(
                     "DemoExportMissingSourceError: missing export source for step "
                     + ", step ".join(missing)
                     + " — refusing to substitute a placeholder"
@@ -666,6 +679,7 @@ class DemoForge:
 __all__ = [
     "DEMOS_DIR_NAME",
     "DemoCorrupt",
+    "DemoExportMissingSourceError",
     "DemoForge",
     "DemoForgeError",
     "DemoNotFound",

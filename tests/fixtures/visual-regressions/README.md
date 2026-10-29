@@ -26,3 +26,50 @@ NOT reused here.
 Capture tool: Playwright Chromium (headless), repo base
 `39eb73c0a4db3347e011ac9046cdd063850fbe68`, venv
 `/work/lanes/L8c-capturd/rhobear-capturd/.venv`.
+
+---
+
+## Export harness contract
+
+The export harness in `capturd/walk/templates/viewer.html` exposes
+`window.__demoExport.prepare()` and `window.__demoExport.seek(tMs)`:
+
+* Both return Promises. `tMs` is milliseconds on the compiled timeline.
+* Callers must await `prepare()` before any `seek()`, and must await each
+  `seek()` before reading pixels or screenshotting the page.
+* On source-index changes, `seek` awaits live image decoding and one
+  animation frame before resolving.
+* A synchronous call without awaiting can return before painting — a
+  screenshot taken at that point may capture the previous frame or no source
+  at all.
+
+JavaScript usage:
+
+```javascript
+await window.__demoExport.prepare();
+await window.__demoExport.seek(tMs);
+```
+
+Python (Playwright) usage:
+
+```python
+await page.evaluate("() => window.__demoExport.prepare()")
+await page.evaluate("async (t) => { await window.__demoExport.seek(t); }", t_ms)
+png = await page.screenshot(type="png")
+```
+
+Refusal contracts (recorder and coordinator):
+
+* Wheel no-movement refusal: a WHEEL scroll whose target does not move by at
+  least one pixel is refused (`DemoRecorderError`, zero recorded steps) —
+  including an outward wheel at the target's own edge. The explicit
+  normalized `top`/`bottom` edge commands are the documented exception: at
+  their requested edge they remain recorded no-op steps.
+* Coordinator missing-source refusal: when a required step screenshot is
+  missing or unreadable, mp4/gif export refuses before HTML/output creation
+  with `DemoExportMissingSourceError`, which is catchable as BOTH
+  `DemoForgeError` and `DemoExportError`.
+
+The uniform-frame histogram (blank guard) does not detect overlay-only
+images; the separate source-pixel regression
+(`test_second_scroll_frame_contains_source_pixels`) provides that proof.
