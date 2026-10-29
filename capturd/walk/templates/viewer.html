@@ -833,9 +833,8 @@
     // keyframes (AI timeline missing or failed), synthesize the default
     // spotlight → zoom → hold → release sequence from the recorded click
     // target. Smaller targets get closer zoom.
-    function defaultZoomLevel(step) {
-      const vp = (STATE.spec && STATE.spec.viewport) || { width: 1440, height: 900 };
-      const r = _exp_targetRect(step);
+    function defaultZoomLevelFromRect(r, vp) {
+      if (!r) return 1;
       const rel = (r.width * r.height) / Math.max(1, vp.width * vp.height);
       // Punch in HARD on little chips/icons so they read; ease off for big
       // elements that already fill the frame.
@@ -847,6 +846,11 @@
       return 1.2;
     }
 
+    function defaultZoomLevel(step) {
+      const vp = (STATE.spec && STATE.spec.viewport) || { width: 1440, height: 900 };
+      return defaultZoomLevelFromRect(_exp_targetRect(step), vp);
+    }
+
     function defaultStepKeyframes(stepIndex) {
       const step = STATE.spec.steps[stepIndex];
       if (!step) return [];
@@ -854,16 +858,23 @@
       const h = (step.interaction && step.interaction.hotspot) || {};
       const sel = t.selector || 'body';
       // Snappy by default: quick zoom in, a short beat to read it, quick out.
-      return [
+      const kfs = [
         { stepIndex: stepIndex, action: 'spotlightOn', target: sel,
           duration: 160, intensity: 0.6 },
-        { stepIndex: stepIndex, action: 'zoomTo', target: sel,
-          offset: { x: Number.isFinite(h.xPct) ? h.xPct : 50,
-                    y: Number.isFinite(h.yPct) ? h.yPct : 50 },
-          zoomLevel: defaultZoomLevel(step), duration: 460, easing: 'ease-out' },
-        { stepIndex: stepIndex, action: 'hold', duration: 1300 },
-        { stepIndex: stepIndex, action: 'spotlightOff', duration: 160 },
       ];
+      const cam = camResolve(t, sel,
+        { x: Number.isFinite(h.xPct) ? h.xPct : 50,
+          y: Number.isFinite(h.yPct) ? h.yPct : 50 });
+      if (!cam.suppressed) {
+        kfs.push(
+          { stepIndex: stepIndex, action: 'zoomTo', target: sel,
+            offset: { x: Number.isFinite(h.xPct) ? h.xPct : 50,
+                      y: Number.isFinite(h.yPct) ? h.yPct : 50 },
+            zoomLevel: defaultZoomLevel(step), duration: 460, easing: 'ease-out' });
+      }
+      kfs.push({ stepIndex: stepIndex, action: 'hold', duration: 1300 });
+      kfs.push({ stepIndex: stepIndex, action: 'spotlightOff', duration: 160 });
+      return kfs;
     }
 
     // Authored keyframes win; otherwise every step gets the default camera.
@@ -998,25 +1009,177 @@
     // ----------------------------------------------------------------
     //  Camera actions via panzoom
     // ----------------------------------------------------------------
+    // Semantic camera (W1-03-r1) — selector → rect → wide, mirroring
+    // capturd.walk.ai_pipeline.camera_focus. The recorded target rect is the
+    // camera anchor (never the raw click pixel), zoom is suppressed for
+    // body / full-viewport / scrollbar-gutter / degenerate targets, and
+    // every scale/translation stays finite for malformed recorded targets.
+    const CAM_SUPPRESSED = ['body', 'full_viewport', 'scrollbar_gutter', 'degenerate'];
+    const CAM_RESULT_ROLES = ['dialog', 'alertdialog'];
+    const CAM_REGIONS = ['meaningful', 'result', 'body', 'full_viewport',
+                         'scrollbar_gutter', 'degenerate'];
+
+    function _camNum(v, dflt) {
+      const n = typeof v === 'number' ? v : parseFloat(v);
+      return Number.isFinite(n) ? n : dflt;
+    }
+
+    function _camRect(target) {
+      const raw = (target && target.boundingRect) || null;
+      if (raw && typeof raw === 'object') {
+        const keys = ['x', 'y', 'width', 'height'];
+        for (let i = 0; i < keys.length; i++) {
+          const v = raw[keys[i]];
+          if (typeof v === 'number' && !Number.isFinite(v)) return null;
+        }
+        const x = _camNum(raw.x, 0), y = _camNum(raw.y, 0);
+        const w = _camNum(raw.width, 0), h = _camNum(raw.height, 0);
+        return (w > 0 && h > 0) ? { x: x, y: y, width: w, height: h } : null;
+      }
+      const w = _camNum(target && target.width, 0);
+      const h = _camNum(target && target.height, 0);
+      return (w > 0 && h > 0) ? { x: 0, y: 0, width: w, height: h } : null;
+    }
+
+    function _camViewport(target) {
+      const vp = (target && target.viewport) || (STATE.spec && STATE.spec.viewport) || {};
+      return {
+        width: _camNum(vp.width, 1024),
+        height: _camNum(vp.height, 768),
+        deviceScaleFactor: _camNum(vp.deviceScaleFactor, 1),
+      };
+    }
+
+    function camRegion(target) {
+      target = target || {};
+      const role = String(target.role || '').toLowerCase();
+      if (CAM_RESULT_ROLES.indexOf(role) >= 0) return 'result';
+      const rect = _camRect(target);
+      if (!rect) return 'degenerate';
+      const vp = _camViewport(target);
+      if (rect.x + rect.width >= vp.width - 18 && rect.width <= 24 &&
+          rect.height >= vp.height * 0.5) return 'scrollbar_gutter';
+      if (rect.x <= vp.width * 0.02 && rect.y <= vp.height * 0.02 &&
+          rect.x + rect.width >= vp.width * 0.98 &&
+          rect.y + rect.height >= vp.height * 0.98) return 'full_viewport';
+      const tag = String(target.tagName || '').toLowerCase();
+      const sel = String(target.selector || '').toLowerCase();
+      if (tag === 'body' || tag === 'html' || sel === 'body' || sel === 'html') {
+        return 'body';
+      }
+      return 'meaningful';
+    }
+
+    function camResolve(target, keyframeTarget, offset) {
+      target = target || {};
+      const classified = camRegion(target);
+      let region = classified;
+      if (classified === 'meaningful' && CAM_REGIONS.indexOf(target.region) >= 0) {
+        region = target.region;
+      }
+      const suppressed = CAM_SUPPRESSED.indexOf(region) >= 0;
+      const rect = _camRect(target);
+      const sel = String(target.selector || '');
+      let source = 'wide';
+      if (rect && keyframeTarget && sel && keyframeTarget === sel) source = 'selector';
+      else if (rect) source = 'rect';
+      const vp = _camViewport(target);
+      let fx = vp.width / 2, fy = vp.height / 2;
+      if (rect) {
+        const ox = Math.min(100, Math.max(0, _camNum(offset && offset.x, 50)));
+        const oy = Math.min(100, Math.max(0, _camNum(offset && offset.y, 50)));
+        fx = rect.x + rect.width * ox / 100;
+        fy = rect.y + rect.height * oy / 100;
+      }
+      if (!Number.isFinite(fx)) fx = vp.width / 2;
+      if (!Number.isFinite(fy)) fy = vp.height / 2;
+      return {
+        source: source,
+        region: region,
+        suppressed: suppressed,
+        rect: rect,
+        focus: { x: fx, y: fy },
+        zoomLevel: suppressed ? 1 : defaultZoomLevelFromRect(rect, vp),
+        captureSpace: target.captureSpace === 'full_page' ? 'full_page' : 'viewport',
+        viewport: vp,
+      };
+    }
+
+    // Source pixels ride the layer 1:1 for viewport captures; full-page
+    // captures map through the image's displayed (contain) box so page-space
+    // coordinates stay associated with their source pixels.
+    function _camLayerMap(captureSpace) {
+      const lw = $panzoomLayer.clientWidth || STATE.vw;
+      const lh = $panzoomLayer.clientHeight || STATE.vh;
+      if (captureSpace === 'full_page') {
+        const im = $screenshot;
+        const natW = im && im.naturalWidth > 0 ? im.naturalWidth : lw;
+        const natH = im && im.naturalHeight > 0 ? im.naturalHeight : lh;
+        const k = Math.min(lw / natW, lh / natH);
+        if (Number.isFinite(k) && k > 0) {
+          return { k: k, ox: (lw - natW * k) / 2, oy: (lh - natH * k) / 2 };
+        }
+      }
+      return { k: 1, ox: 0, oy: 0 };
+    }
+
+    function camLayerPoint(x, y, captureSpace) {
+      const m = _camLayerMap(captureSpace);
+      return { x: m.ox + x * m.k, y: m.oy + y * m.k };
+    }
+
+    function camLayerRect(rect, captureSpace) {
+      if (!rect) return null;
+      const m = _camLayerMap(captureSpace);
+      return {
+        x: m.ox + rect.x * m.k,
+        y: m.oy + rect.y * m.k,
+        width: rect.width * m.k,
+        height: rect.height * m.k,
+      };
+    }
+
+    // Bounded framing: pad the target rect and cap the zoom so a large
+    // target never gets an unbounded close-up; suppressed / rect-less
+    // targets hold wide at the fit transform. Always finite.
+    function camFrameTarget(target, keyframeTarget, offset, level, fitOverride) {
+      const fit = fitOverride || STATE.fit || computeFit();
+      const fallback = { scale: fit.scale, x: fit.x, y: fit.y, pad: 0, zoomLevel: 1 };
+      try {
+        const cam = camResolve(target, keyframeTarget, offset);
+        const r = camLayerRect(cam.rect, cam.captureSpace);
+        if (cam.suppressed || !r) return fallback;
+        const pad = Math.max(8, Math.min(48, Math.min(r.width, r.height) * 0.08));
+        const padScale = Math.min(fit.cw / (r.width + 2 * pad),
+                                 fit.ch / (r.height + 2 * pad));
+        let s = fit.scale * Math.max(1.0, Math.min(3.0, _camNum(level, 1.5)));
+        s = Math.max(fit.scale, Math.min(s, padScale));
+        const lp = camLayerPoint(cam.focus.x, cam.focus.y, cam.captureSpace);
+        const x = fit.cw / 2 - lp.x * s;
+        const y = fit.ch / 2 - lp.y * s;
+        if (![s, x, y].every(Number.isFinite) || s <= 0) return fallback;
+        return { scale: s, x: x, y: y, pad: pad, zoomLevel: s / fit.scale };
+        return { scale: s, x: x, y: y };
+      } catch (err) {
+        return fallback;
+      }
+    }
+
     // Resolve the content point a keyframe wants centred: the step's
     // recorded target rect + the keyframe's hotspot offset (percentages).
     function keyframeFocus(offset) {
       const step = STATE.spec.steps[STATE.index];
-      const center = getTargetCenter(step);
-      var cx = center.cx, cy = center.cy;
-      if (offset && Number.isFinite(offset.x) && Number.isFinite(offset.y)) {
-        const rect = getTargetRect(step);
-        cx = rect.x + rect.width * (offset.x / 100);
-        cy = rect.y + rect.height * (offset.y / 100);
-      }
-      return { cx: cx, cy: cy };
+      const t = (step && step.interaction && step.interaction.target) || {};
+      const cam = camResolve(t, t.selector, offset);
+      return camLayerPoint(cam.focus.x, cam.focus.y, cam.captureSpace);
     }
 
     function zoomToAction(targetSel, offset, zoomLevel, easing, duration) {
       if (!STATE.panzoom || !STATE.spec.steps[STATE.index]) return;
-      const focus = keyframeFocus(offset);
+      const step = STATE.spec.steps[STATE.index];
+      const t = (step.interaction && step.interaction.target) || {};
       animateCameraTo(
-        cameraTargetFor(focus.cx, focus.cy, zoomLevel || 1.5),
+        camFrameTarget(t, targetSel, offset, zoomLevel || 1.5),
         duration || 500,
         easing
       );
@@ -1024,12 +1187,13 @@
 
     function panToAction(targetSel, offset, easing, duration) {
       if (!STATE.panzoom || !STATE.spec.steps[STATE.index]) return;
-      const focus = keyframeFocus(offset);
-      // Keep the current zoom level; only move the centre.
+      const step = STATE.spec.steps[STATE.index];
+      const t = (step.interaction && step.interaction.target) || {};
+      // Keep the current zoom level; only move the centre (bounded).
       const fit = STATE.fit || computeFit();
       const level = STATE.panzoom.getTransform().scale / fit.scale;
       animateCameraTo(
-        cameraTargetFor(focus.cx, focus.cy, level),
+        camFrameTarget(t, targetSel, offset, level),
         duration || 500,
         easing
       );
@@ -1396,7 +1560,8 @@
       const h = (step && step.interaction && step.interaction.hotspot) || {};
       const xPct = Number.isFinite(h.xPct) ? h.xPct : 50;
       const yPct = Number.isFinite(h.yPct) ? h.yPct : 50;
-      if (r && Number.isFinite(r.width) && Number.isFinite(r.height)) {
+      if (r && Number.isFinite(r.x) && Number.isFinite(r.y) &&
+          Number.isFinite(r.width) && Number.isFinite(r.height)) {
         return { x: r.x + r.width * xPct / 100, y: r.y + r.height * yPct / 100 };
       }
       const vp = STATE.spec.viewport || { width: 1440, height: 900 };
@@ -1411,20 +1576,16 @@
       return { x: vp.width / 2 - 60, y: vp.height / 2 - 40, width: 120, height: 80 };
     }
 
-    function _exp_camFor(step, offset, level, fit) {
-      const rect = _exp_targetRect(step);
-      const hp = _exp_hotspotPoint(step);
-      let cx = hp.x, cy = hp.y;
-      if (offset && Number.isFinite(offset.x) && Number.isFinite(offset.y)) {
-        cx = rect.x + rect.width * (offset.x / 100);
-        cy = rect.y + rect.height * (offset.y / 100);
-      }
-      const scale = fit.scale * Math.max(1.0, Math.min(3.0, level || 1.5));
-      return {
-        scale,
-        x: fit.cw / 2 - cx * scale,
-        y: fit.ch / 2 - cy * scale,
-      };
+    // Semantic camera waypoint for a step's zoom keyframe — same rules as
+    // the interactive path (selector → rect → wide, suppressed targets hold
+    // wide, bounded padding, finite values).
+    function _exp_camFor(step, zoomKf, fit) {
+      const t = (step && step.interaction && step.interaction.target) || {};
+      const frame = camFrameTarget(
+        t, zoomKf && zoomKf.target, zoomKf && zoomKf.offset,
+        zoomKf && zoomKf.zoomLevel, fit
+      );
+      return { scale: frame.scale, x: frame.x, y: frame.y };
     }
 
     function _exp_bezier(from, to, e) {
@@ -1480,7 +1641,7 @@
           camPrev = FITCAM;
           return;
         }
-        const cam = _exp_camFor(steps[w.index], zoomKf.offset, zoomKf.zoomLevel, fit);
+        const cam = _exp_camFor(steps[w.index], zoomKf, fit);
         const zoomDur = Math.max(320, Math.min(800, zoomKf.duration || 480));
         // Voice-sync: land the camera when the narrator hits the key word.
         let arrive;
@@ -1607,13 +1768,34 @@
       if (STATE._cameraRaf) { cancelAnimationFrame(STATE._cameraRaf); STATE._cameraRaf = null; }
       if (STATE.panzoom) STATE.panzoom.pause();
 
-      // Pre-decode every screenshot so seek() never catches a half-loaded img.
-      const srcs = STATE.spec.steps.map(s => resolveScreenshot(s));
-      await Promise.all(srcs.map(src => new Promise(res => {
+      // Every step MUST carry its own source screenshot. A missing source —
+      // or one that resolves to the placeholder — fails the export with a
+      // named error instead of silently substituting pixels (W1-03-r1).
+      const srcs = STATE.spec.steps.map((s, i) => {
+        const raw = (s && (s.screenshotBase64 || s.screenshotPath))
+          ? resolveScreenshot(s) : null;
+        if (!raw || raw.indexOf('data:image/svg') === 0) {
+          throw new Error('DemoExportMissingSourceError: missing export source for step ' + i + ' — refusing to substitute a placeholder');
+        }
+        return raw;
+      });
+
+      // Retain the decoded images as proof the sources are real pixels;
+      // exportSeek reuses the same srcs so the live layer paints immediately.
+      EXPORT.images = [];
+      for (let i = 0; i < srcs.length; i++) {
         const im = new Image();
-        im.onload = () => res(); im.onerror = () => res();
-        im.src = src;
-      })));
+        im.src = srcs[i];
+        try {
+          await im.decode();
+        } catch (err) {
+          throw new Error('DemoExportMissingSourceError: failed to decode export source for step ' + i + ' — refusing to substitute a placeholder');
+        }
+        if (!(im.naturalWidth > 0 && im.naturalHeight > 0)) {
+          throw new Error('DemoExportMissingSourceError: failed to decode export source for step ' + i + ' — refusing to substitute a placeholder');
+        }
+        EXPORT.images.push(im);
+      }
 
       const plan = compileExport();
       EXPORT.srcs = srcs;
@@ -1625,10 +1807,22 @@
         totalMs: plan.totalMs,
         audioPlan: plan.audioPlan,
         stepWindows: plan.wins,
+        fit: plan.fit,
+        camWps: plan.camWps,
       };
     }
 
-    function exportSeek(tMs) {
+    // W1-03-r4: a stalled animation frame must fail the export with a typed
+    // error instead of deadlocking it. err.name is the type name and the
+    // message names both the type and the source index.
+    class DemoExportPaintTimeoutError extends Error {
+      constructor(message) {
+        super(message);
+        this.name = 'DemoExportPaintTimeoutError';
+      }
+    }
+
+    async function exportSeek(tMs) {
       const c = EXPORT.compiled;
       if (!c) throw new Error('call prepare() first');
       const steps = STATE.spec.steps;
@@ -1643,9 +1837,11 @@
       for (const w of c.wins) { if (tMs >= w.tStart) win = w; else break; }
       const i = win.index;
       const stageIdx = Math.max(0, i - 1);
+      let needsPaint = false;
       if (EXPORT._shownIndex !== i) {
         $screenshot.src = EXPORT.srcs[i];
         EXPORT._shownIndex = i;
+        needsPaint = true;
       }
       $screenshot.style.opacity = '1';
       const fadeStart = win.fadeStart != null ? win.fadeStart : win.tStart;
@@ -1654,10 +1850,51 @@
         if (EXPORT._prevIndex !== stageIdx) {
           $prev.src = EXPORT.srcs[stageIdx];
           EXPORT._prevIndex = stageIdx;
+          needsPaint = true;
         }
         $prev.style.opacity = String(Math.min(1, Math.max(0, 1 - fadeP)));
       } else {
         $prev.style.opacity = '0';
+      }
+
+      // Paint safety (W1-03-r1): a freshly assigned src paints
+      // asynchronously — await decode() and one animation frame after every
+      // source index change so an immediate screenshot can never capture an
+      // unpainted (overlay-only) frame. The frame wait is bounded (W1-03-r4):
+      // 1000 ms, then a typed DemoExportPaintTimeoutError — never a silent
+      // deadlock and never a resolve that claims paint safety without paint.
+      if (needsPaint) {
+        await Promise.all([
+          $screenshot.decode().catch(function() {}),
+          $prev.decode().catch(function() {}),
+        ]);
+        try {
+          await new Promise(function(res, rej) {
+            let settled = false;
+            let timer = 0;
+            const handle = requestAnimationFrame(function() {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              res();
+            });
+            timer = setTimeout(function() {
+              if (settled) return;
+              settled = true;
+              cancelAnimationFrame(handle);
+              rej(new DemoExportPaintTimeoutError(
+                'DemoExportPaintTimeoutError: no paint frame within 1000 ms ' +
+                'for source index ' + i));
+            }, 1000);
+          });
+        } catch (err) {
+          // A failed paint must never be remembered as painted: invalidate
+          // both source indices so a repeat seek cannot skip painting and
+          // report success without a real frame.
+          EXPORT._shownIndex = null;
+          EXPORT._prevIndex = null;
+          throw err;
+        }
       }
 
       // ---- camera ---------------------------------------------------
@@ -1872,7 +2109,10 @@
         // Expose for browser console / e2e tests.
         window.__demoViewer = { STATE, next, prev, play, pause, togglePlay, toggleMute,
                                  goToStep, playTimeline, cancelSequence, initPanzoom,
-                                 spotlightOn, spotlightOff };
+                                 spotlightOn, spotlightOff, stepDwellMs,
+                                 resolveCamera: camResolve, camRegion,
+                                 camLayerPoint,
+                                 camFrame: camFrameTarget };
       } catch (err) {
         console.error('[demo-viewer]', err);
         $empty.classList.add('visible');

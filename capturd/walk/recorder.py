@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import concurrent.futures
+import inspect
 import json
 import logging
 import os
@@ -32,6 +33,7 @@ from capturd.walk.schema import (
     DemoStep,
     Hotspot,
     Interaction,
+    normalize_target,
 )
 from capturd.walk.voice import MIC_BUTTON_JS, VoiceConfig, VoiceLoop, VoiceLoopError
 
@@ -302,10 +304,38 @@ OVERLAY_JS = r"""
           width: +rect.width.toFixed(2),
           height: +rect.height.toFixed(2),
         },
+        // Semantic camera metadata (W1-03-r1) — role, source viewport and
+        // capture space travel with every recorded target.
+        role: implicitRole(el),
+        viewport: {
+          width: window.innerWidth,
+          height: window.innerHeight,
+          deviceScaleFactor: window.devicePixelRatio || 1,
+        },
+        captureSpace: 'viewport',
       },
       hotspot: { xPct, yPct },
       value: undefined,
     };
+  }
+
+  function implicitRole(el) {
+    const explicit = el.getAttribute && el.getAttribute('role');
+    if (explicit) return explicit;
+    const tag = el.tagName ? el.tagName.toLowerCase() : '';
+    if (tag === 'button') return 'button';
+    if (tag === 'a' && el.hasAttribute('href')) return 'link';
+    if (tag === 'select') return 'combobox';
+    if (tag === 'textarea') return 'textbox';
+    if (tag === 'input') {
+      const t = (el.getAttribute('type') || 'text').toLowerCase();
+      if (t === 'checkbox') return 'checkbox';
+      if (t === 'radio') return 'radio';
+      if (t === 'submit' || t === 'button' || t === 'reset') return 'button';
+      return 'textbox';
+    }
+    if (/^h[1-6]$/.test(tag)) return 'heading';
+    return '';
   }
 
   function handleClick(event) {
@@ -672,6 +702,72 @@ def _parse_agent_reply(reply: str) -> tuple[str | None, str | None, str | None]:
 # ---------------------------------------------------------------------------
 
 
+async def _wait_scroll_settled(scroll_target: Any) -> float:
+    """Observe the selected element's scrollTop until it is stable (W1-03-r4).
+
+    Stability is evidence-based, never assumed from elapsed time: every
+    50 ms a sample records the element's scroll range over that window (a
+    temporary scroll listener plus the current position), and the target is
+    settled only when the variation across three consecutive 50 ms samples
+    is < 1 pixel. Sampling point values would alias against fast movement,
+    so the evidence is the observed range, not a lucky read. The 2000 ms
+    ceiling is separate — movement that never settles raises the named
+    scroll-settle timeout. The sleeps only schedule the observations.
+    """
+    await scroll_target.evaluate(
+        """(el) => {
+            if (!el.__demoScrollObserve) {
+                const s = {lo: el.scrollTop, hi: el.scrollTop};
+                s.onScroll = () => {
+                    const y = el.scrollTop;
+                    if (y < s.lo) s.lo = y;
+                    if (y > s.hi) s.hi = y;
+                };
+                el.addEventListener('scroll', s.onScroll);
+                el.__demoScrollObserve = s;
+            }
+        }"""
+    )
+    deadline = time.monotonic() + 2.0
+    window: list[tuple[float, float]] = []
+    try:
+        while True:
+            obs = await scroll_target.evaluate(
+                """(el) => {
+                    const s = el.__demoScrollObserve;
+                    s.onScroll();
+                    const out = {lo: s.lo, hi: s.hi, y: el.scrollTop};
+                    s.lo = s.hi = el.scrollTop;  // start a fresh 50 ms window
+                    return out;
+                }"""
+            )
+            window.append((float(obs["lo"]), float(obs["hi"])))
+            if len(window) > 3:
+                window.pop(0)
+            if len(window) == 3 and (
+                max(hi for _lo, hi in window) - min(lo for lo, _hi in window) < 1
+            ):
+                return float(obs["y"])
+            if time.monotonic() >= deadline:
+                raise DemoRecorderError(
+                    "scroll-settle timeout — refusing to record a mid-scroll screenshot"
+                )
+            await asyncio.sleep(0.05)
+    finally:
+        try:
+            await scroll_target.evaluate(
+                """(el) => {
+                    const s = el.__demoScrollObserve;
+                    if (s) {
+                        el.removeEventListener('scroll', s.onScroll);
+                        delete el.__demoScrollObserve;
+                    }
+                }"""
+            )
+        except Exception:  # noqa: BLE001 - cleanup must not mask the outcome
+            pass
+
+
 class DemoRecorderError(RuntimeError):
     """Raised when a recording session fails or is in the wrong state."""
 
@@ -1017,19 +1113,131 @@ class DemoRecorder:
         elif action == "scroll":
             # value: "down"/"up"/"top"/"bottom" or a pixel delta ("600").
             v = (value or "down").strip().lower()
-            if v == "top":
-                await self._page.evaluate("() => window.scrollTo({top: 0})")
-            elif v == "bottom":
-                await self._page.evaluate(
-                    "() => window.scrollTo({top: document.body.scrollHeight})"
+
+            # Choose the actual wheel target, not just window.scrollY. SPA
+            # layouts commonly scroll inside an overflow:auto panel while the
+            # document stays fixed. Explicit selectors win, then the viewport
+            # center, then the largest visible scroll pane.
+            scroll_target = await self._page.evaluate_handle(
+                """(selector) => {
+                    const root = document.scrollingElement || document.documentElement;
+                    const canScroll = (el) => {
+                        if (!el || el.scrollHeight <= el.clientHeight + 1) return false;
+                        const overflow = getComputedStyle(el).overflowY;
+                        if (el === root) return overflow !== 'hidden' && overflow !== 'clip';
+                        return /^(auto|scroll|overlay)$/.test(overflow);
+                    };
+                    const ancestor = (el) => {
+                        for (; el; el = el.parentElement) {
+                            if (el !== root && canScroll(el)) return el;
+                        }
+                        return null;
+                    };
+                    let target = null;
+                    try {
+                        if (selector && selector !== 'body' && selector !== 'html')
+                            target = ancestor(document.querySelector(selector));
+                    } catch (_) { /* invalid selector: use visible fallback */ }
+                    if (!target)
+                        target = ancestor(document.elementFromPoint(
+                            innerWidth / 2, innerHeight / 2));
+                    // Scan the DOM only for fixed-layout SPA pages; the
+                    // document itself is the right fallback when scrollable.
+                    if (!target && !canScroll(root)) {
+                        let largest = 0;
+                        for (const el of document.querySelectorAll('body *')) {
+                            if (!canScroll(el) ||
+                                el.closest('#__demo-recorder-indicator')) continue;
+                            const r = el.getBoundingClientRect();
+                            const area = Math.max(0, Math.min(innerWidth, r.right) -
+                                                  Math.max(0, r.left)) *
+                                         Math.max(0, Math.min(innerHeight, r.bottom) -
+                                                  Math.max(0, r.top));
+                            if (area > largest) { largest = area; target = el; }
+                        }
+                    }
+                    return target || root;
+                }""",
+                selector,
+            )
+            try:
+                before = await scroll_target.evaluate(
+                    """(el) => {
+                        const r = el.getBoundingClientRect();
+                        const root = el === document.scrollingElement;
+                        return {
+                            y: el.scrollTop,
+                            scrollable: el.scrollHeight > el.clientHeight + 1 &&
+                                (root
+                                    ? !['hidden', 'clip'].includes(getComputedStyle(el).overflowY)
+                                    : /^(auto|scroll|overlay)$/.test(
+                                        getComputedStyle(el).overflowY)),
+                            x: root ? innerWidth / 2 :
+                                Math.max(1, Math.min(innerWidth - 2,
+                                    (Math.max(0, r.left) + Math.min(innerWidth, r.right)) / 2)),
+                            py: root ? innerHeight / 2 :
+                                Math.max(1, Math.min(innerHeight - 2,
+                                    (Math.max(0, r.top) + Math.min(innerHeight, r.bottom)) / 2)),
+                        };
+                    }"""
                 )
-            else:
-                try:
-                    dy = int(v)
-                except ValueError:
-                    dy = -500 if v == "up" else 500
-                await self._page.mouse.wheel(0, dy)
-            await asyncio.sleep(0.3)
+                if v in ("top", "bottom"):
+                    # Reaching an edge is a valid action even if already
+                    # there — explicit top/bottom stay instant, valid
+                    # recorded no-ops at their requested edge.
+                    await scroll_target.evaluate(
+                        """(el, where) => el.scrollTo({
+                            top: where === 'top' ? 0 : el.scrollHeight,
+                            behavior: 'instant'
+                        })""",
+                        v,
+                    )
+                else:
+                    try:
+                        dy = int(v)
+                    except ValueError:
+                        dy = -500 if v == "up" else 500
+                    await self._page.mouse.move(before["x"], before["py"])
+                    await self._page.mouse.wheel(0, dy)
+                    # WHEEL movement governs refusal, and it is OBSERVED on
+                    # the selected element — a fixed sleep is not evidence
+                    # that the wheel landed (W1-03-r4). The movement wait is
+                    # bounded (2000 ms ceiling, 50 ms polling) and keeps the
+                    # >= 1 pixel threshold. Only the expected Playwright
+                    # timeout is swallowed here; detached-target/browser
+                    # failures keep their true error.
+                    from playwright.async_api import (
+                        TimeoutError as PlaywrightTimeoutError,
+                    )
+
+                    try:
+                        await self._page.wait_for_function(
+                            "(pair) => Math.abs(pair[0].scrollTop - pair[1]) >= 1",
+                            arg=[scroll_target, before["y"]],
+                            timeout=2000,
+                            polling=50,
+                        )
+                    except PlaywrightTimeoutError:
+                        moved = False
+                    else:
+                        moved = True
+                    if moved:
+                        # Before returning for capture, observe a stable
+                        # scrollTop (its own 2000 ms ceiling) so the
+                        # screenshot is never mid-scroll.
+                        after_y = await _wait_scroll_settled(scroll_target)
+                    else:
+                        after_y = await scroll_target.evaluate("(el) => el.scrollTop")
+                    # Any wheel value (including numeric 0) whose target did
+                    # not move is refused before a synthetic step can be
+                    # recorded. Explicit normalized top/bottom edge commands
+                    # above stay valid no-ops at their edge.
+                    if abs(float(after_y) - float(before["y"])) < 1:
+                        reason = ("page has no scrollable target" if not before["scrollable"]
+                                  else "scroll target did not move")
+                        raise DemoRecorderError(reason + " — refusing to record an identical scroll screenshot")
+            finally:
+                await scroll_target.dispose()
 
     def _safe_url_sync(self) -> str:
         """Get current URL without awaiting (for prompt building)."""
@@ -1487,12 +1695,15 @@ class DemoRecorder:
             pageTitle=await self._safe_title(),
             interaction=Interaction(
                 type=action,
-                target={
-                    "selector": selector or "body",
-                    "tagName": "",
-                    "text": value or "",
-                    "boundingRect": rect,
-                },
+                target=normalize_target(
+                    {
+                        "selector": selector or "body",
+                        "tagName": "",
+                        "text": value or "",
+                        "boundingRect": rect,
+                    },
+                    self.spec.viewport,
+                ),
                 hotspot={"xPct": 50, "yPct": 50},
                 value=value,
             ),
@@ -1620,7 +1831,9 @@ class DemoRecorder:
                     pageTitle=payload.get("pageTitle") or (await self._safe_title()),
                     interaction=Interaction(
                         type=payload_type,
-                        target=payload.get("target", {}),
+                        target=normalize_target(
+                            payload.get("target") or {}, self.spec.viewport
+                        ),
                         hotspot=payload.get("hotspot", {"xPct": 0, "yPct": 0}),
                         value=payload.get("value"),
                     ),
@@ -1817,6 +2030,11 @@ def run_async(coro: Any) -> Any:
             return _run_async_executor.submit(asyncio.run, coro).result()
         return loop.run_until_complete(coro)
     except RuntimeError:
+        # "No usable event loop" fallback — but NEVER re-run a coroutine that
+        # already started: its own RuntimeError (e.g. DemoExportError) must
+        # surface verbatim instead of a double-await mystery.
+        if inspect.getcoroutinestate(coro) != inspect.CORO_CREATED:
+            raise
         return asyncio.run(coro)
 
 
