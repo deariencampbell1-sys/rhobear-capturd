@@ -345,3 +345,161 @@ def test_second_scroll_frame_contains_source_pixels(tmp_path: Path) -> None:
             f"result frame lost second-source pixels at ({sx},{sy}): "
             f"got {got} want {want} (first source has {other})"
         )
+
+
+# ---------------------------------------------------------------------------
+# Blank-frame guard + missing/failed source rejection
+# ---------------------------------------------------------------------------
+
+
+def _encode_uniform_png(w: int, h: int, rgb: tuple[int, int, int]) -> bytes:
+    """Minimal PNG encoder for a constant-colour frame (test input only)."""
+    import struct
+    import zlib
+
+    row = b"\x00" + bytes(rgb) * w
+    raw = row * h
+
+    def chunk(ctype: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + ctype + data
+                + struct.pack(">I", zlib.crc32(ctype + data) & 0xFFFFFFFF))
+
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+def _mean_colour(path: Path) -> tuple[int, int, int]:
+    w, h, rgb = _decode_png(path)
+    rs = gs = bs = 0
+    n = w * h
+    for i in range(0, len(rgb), 3):
+        rs += rgb[i]
+        gs += rgb[i + 1]
+        bs += rgb[i + 2]
+    return rs // n, gs // n, bs // n
+
+
+def _blank_spec(mean_rgb: tuple[int, int, int], n_steps: int = 2) -> dict:
+    """Uniform source frames whose export frames are near-uniform.
+
+    The uniform colour is derived from a real captured frame's mean colour;
+    hotspot percentages outside the viewport keep the synthetic cursor out
+    of frame so nothing non-uniform is composited over the uniform source.
+    """
+    uniform = base64.b64encode(_encode_uniform_png(1024, 768, mean_rgb)).decode("ascii")
+    steps = []
+    for i in range(n_steps):
+        t = _scroll_target(i)
+        t["boundingRect"] = {"x": 0, "y": 0, "width": 1024, "height": 768}
+        steps.append({
+            "index": i, "timestamp": i * 2000,
+            "pageUrl": "https://example.com", "pageTitle": "u",
+            "interaction": {
+                "type": "scroll", "target": t,
+                "hotspot": {"xPct": 250, "yPct": 250},
+                "value": "down",
+            },
+            "screenshotBase64": uniform,
+        })
+    return _spec_of(steps)
+
+
+def _spec_of(steps: list[dict]) -> dict:
+    return {
+        "version": 1, "id": "guard", "name": "guard",
+        "goal": "guard", "createdAt": "2026-10-29T00:00:00Z",
+        "viewport": dict(VIEWPORT),
+        "startUrl": "https://example.com",
+        "aiAnnotations": {"style": "snappy", "summary": "", "animationTimeline": []},
+        "steps": steps,
+    }
+
+
+def _step_with_source(index: int, b64: str | None, path: str | None = None) -> dict:
+    step = _step_with(index)
+    step["screenshotBase64"] = b64
+    step["screenshotPath"] = path
+    return step
+
+
+def _step_with(index: int) -> dict:
+    return {
+        "index": index, "timestamp": index * 2000,
+        "pageUrl": "https://example.com", "pageTitle": "t",
+        "interaction": {
+            "type": "click", "target": _scroll_target(index),
+            "hotspot": {"xPct": 50, "yPct": 50},
+        },
+        "annotation": f"Step {index}.",
+    }
+
+
+def test_export_rejects_missing_source_with_named_error(tmp_path: Path) -> None:
+    from capturd.walk.exporter import DemoExportError, export_video
+
+    ok = _b64(SOURCE_0)
+    spec = _spec_of([
+        _step_with_source(0, ok),
+        _step_with_source(1, None),          # required source is missing
+    ])
+    viewer = _render(tmp_path, spec)
+    out = tmp_path / "out.mp4"
+
+    with pytest.raises(DemoExportError) as excinfo:
+        export_video(spec, viewer, out, fmt="mp4", fps=FPS)
+
+    msg = str(excinfo.value)
+    assert "DemoExportMissingSourceError" in msg, msg
+    assert "step 1" in msg, f"named error must identify the missing step: {msg}"
+    assert not out.exists(), "no successful MP4 when a required source is missing"
+
+
+def test_export_rejects_failed_source_with_named_error(tmp_path: Path) -> None:
+    from capturd.walk.exporter import DemoExportError, export_video
+
+    spec = _spec_of([
+        _step_with_source(0, _b64(SOURCE_0)),
+        _step_with_source(1, "!!!not-a-png!!!"),  # decodes to nothing
+    ])
+    viewer = _render(tmp_path, spec)
+    out = tmp_path / "out.mp4"
+
+    with pytest.raises(DemoExportError) as excinfo:
+        export_video(spec, viewer, out, fmt="mp4", fps=FPS)
+
+    msg = str(excinfo.value)
+    assert "DemoExportMissingSourceError" in msg, msg
+    assert "step 1" in msg, f"named error must identify the failed step: {msg}"
+    assert not out.exists(), "no successful MP4 when a required source fails"
+
+
+def test_export_rejects_blank_frames_before_ffmpeg(tmp_path: Path) -> None:
+    from capturd.walk.exporter import DemoExportError, export_video
+
+    spec = _blank_spec(_mean_colour(SOURCE_0))
+    viewer = _render(tmp_path, spec)
+    out = tmp_path / "out.mp4"
+
+    with pytest.raises(DemoExportError) as excinfo:
+        export_video(spec, viewer, out, fmt="mp4", fps=FPS)
+
+    assert str(excinfo.value) == "blank or near-uniform export frame at index 0", (
+        str(excinfo.value)
+    )
+    assert not out.exists(), "blank frames must never reach a successful MP4"
+
+
+def test_blank_guard_inspects_pixels_not_files(tmp_path: Path) -> None:
+    """The mechanical guard looks at downsampled pixels — a frame merely
+    existing is not enough, and real captured content never trips it."""
+    from capturd.walk.exporter import _assert_frame_not_blank
+
+    for real in (SOURCE_0, SOURCE_1, OVERLAY_ONLY):
+        _assert_frame_not_blank(real.read_bytes(), 0)  # must not raise
+
+    mean = _mean_colour(SOURCE_1)
+    blank = _encode_uniform_png(1024, 768, mean)
+    with pytest.raises(Exception) as excinfo:
+        _assert_frame_not_blank(blank, 3)
+    assert "blank or near-uniform export frame at index 3" in str(excinfo.value)
