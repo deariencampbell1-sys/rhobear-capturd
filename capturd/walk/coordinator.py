@@ -580,6 +580,23 @@ class DemoForge:
             raise DemoForgeError(f"viewer template not found: {self.viewer_template}")
         data = self.load_spec(demo_id)
         self._inline_screenshots(data, demo_id)
+        # Carry the semantic target metadata into the embedded viewer so the
+        # HTML export resolves the same camera as the recorder (W1-03-r1).
+        from capturd.walk.viewer import propagate_target_metadata
+
+        propagate_target_metadata(data)
+        if fmt in {"mp4", "gif"}:
+            missing = [
+                str(step.get("index", i))
+                for i, step in enumerate(data.get("steps") or [])
+                if not (step.get("screenshotBase64") or step.get("screenshotPath"))
+            ]
+            if missing:
+                raise DemoForgeError(
+                    "DemoExportMissingSourceError: missing export source for step "
+                    + ", step ".join(missing)
+                    + " — refusing to substitute a placeholder"
+                )
         template = self.viewer_template.read_text(encoding="utf-8")
         if not _SCRIPT_BLOCK_RE.search(template):
             raise DemoForgeError("viewer template missing <script id=\"demo-data\"> block")
@@ -606,14 +623,22 @@ class DemoForge:
             raise DemoForgeError(str(exc)) from exc
 
     def _inline_screenshots(self, data: dict[str, Any], demo_id: str) -> None:
-        """Mutate ``data`` so each step has ``screenshotBase64`` populated."""
+        """Mutate ``data`` so each step has ``screenshotBase64`` populated.
+
+        Steps whose source cannot be read keep an explicit partial state —
+        ``screenshotError`` names the missing step instead of silently
+        shipping a hole.
+        """
         d = self.demo_dir(demo_id)
         steps = data.get("steps") or []
-        for step in steps:
+        for i, step in enumerate(steps):
             if step.get("screenshotBase64"):
                 continue
             rel = step.get("screenshotPath")
             if not rel:
+                step["screenshotError"] = (
+                    f"missing export source for step {step.get('index', i)}"
+                )
                 continue
             # Recorder stores relative paths like ``demos/{id}/step_NNN.png``.
             # Resolve both that and the basename inside our demo_dir.
@@ -632,6 +657,10 @@ class DemoForge:
                     break
                 except OSError:
                     continue
+            if not step.get("screenshotBase64"):
+                step["screenshotError"] = (
+                    f"missing export source for step {step.get('index', i)}"
+                )
 
 
 __all__ = [

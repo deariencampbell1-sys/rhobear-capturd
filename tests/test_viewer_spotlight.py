@@ -295,6 +295,7 @@ def _mk_step(index, selector, rect, hotspot=None, **kw):
             "hotspot": hotspot or {"xPct": 50, "yPct": 50},
         },
         "annotation": f"Click {selector}.",
+        "screenshotBase64": _placeholder_screenshot_b64(1024, 768),
     }
     return step
 

@@ -33,6 +33,7 @@ from capturd.walk.schema import (
     DemoStep,
     Hotspot,
     Interaction,
+    normalize_target,
 )
 from capturd.walk.voice import MIC_BUTTON_JS, VoiceConfig, VoiceLoop, VoiceLoopError
 
@@ -303,10 +304,38 @@ OVERLAY_JS = r"""
           width: +rect.width.toFixed(2),
           height: +rect.height.toFixed(2),
         },
+        // Semantic camera metadata (W1-03-r1) — role, source viewport and
+        // capture space travel with every recorded target.
+        role: implicitRole(el),
+        viewport: {
+          width: window.innerWidth,
+          height: window.innerHeight,
+          deviceScaleFactor: window.devicePixelRatio || 1,
+        },
+        captureSpace: 'viewport',
       },
       hotspot: { xPct, yPct },
       value: undefined,
     };
+  }
+
+  function implicitRole(el) {
+    const explicit = el.getAttribute && el.getAttribute('role');
+    if (explicit) return explicit;
+    const tag = el.tagName ? el.tagName.toLowerCase() : '';
+    if (tag === 'button') return 'button';
+    if (tag === 'a' && el.hasAttribute('href')) return 'link';
+    if (tag === 'select') return 'combobox';
+    if (tag === 'textarea') return 'textbox';
+    if (tag === 'input') {
+      const t = (el.getAttribute('type') || 'text').toLowerCase();
+      if (t === 'checkbox') return 'checkbox';
+      if (t === 'radio') return 'radio';
+      if (t === 'submit' || t === 'button' || t === 'reset') return 'button';
+      return 'textbox';
+    }
+    if (/^h[1-6]$/.test(tag)) return 'heading';
+    return '';
   }
 
   function handleClick(event) {
@@ -1018,6 +1047,12 @@ class DemoRecorder:
         elif action == "scroll":
             # value: "down"/"up"/"top"/"bottom" or a pixel delta ("600").
             v = (value or "down").strip().lower()
+
+            # Refuse scrolls the page cannot perform — a wheel that moves
+            # nothing would record an identical screenshot (W1-03-r1).
+            before_y = await self._page.evaluate(
+                "() => window.scrollY || document.documentElement.scrollTop || 0"
+            )
             if v == "top":
                 await self._page.evaluate("() => window.scrollTo({top: 0})")
             elif v == "bottom":
@@ -1031,6 +1066,14 @@ class DemoRecorder:
                     dy = -500 if v == "up" else 500
                 await self._page.mouse.wheel(0, dy)
             await asyncio.sleep(0.3)
+            after_y = await self._page.evaluate(
+                "() => window.scrollY || document.documentElement.scrollTop || 0"
+            )
+            if abs(float(after_y) - float(before_y)) < 1:
+                raise DemoRecorderError(
+                    f"page did not scroll (scrollY stayed at {after_y}) — "
+                    "refusing to record identical screenshots"
+                )
 
     def _safe_url_sync(self) -> str:
         """Get current URL without awaiting (for prompt building)."""
@@ -1488,12 +1531,15 @@ class DemoRecorder:
             pageTitle=await self._safe_title(),
             interaction=Interaction(
                 type=action,
-                target={
-                    "selector": selector or "body",
-                    "tagName": "",
-                    "text": value or "",
-                    "boundingRect": rect,
-                },
+                target=normalize_target(
+                    {
+                        "selector": selector or "body",
+                        "tagName": "",
+                        "text": value or "",
+                        "boundingRect": rect,
+                    },
+                    self.spec.viewport,
+                ),
                 hotspot={"xPct": 50, "yPct": 50},
                 value=value,
             ),
@@ -1621,7 +1667,9 @@ class DemoRecorder:
                     pageTitle=payload.get("pageTitle") or (await self._safe_title()),
                     interaction=Interaction(
                         type=payload_type,
-                        target=payload.get("target", {}),
+                        target=normalize_target(
+                            payload.get("target") or {}, self.spec.viewport
+                        ),
                         hotspot=payload.get("hotspot", {"xPct": 0, "yPct": 0}),
                         value=payload.get("value"),
                     ),
