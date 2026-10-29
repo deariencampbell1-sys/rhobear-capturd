@@ -504,3 +504,113 @@ def test_blank_guard_inspects_pixels_not_files(tmp_path: Path) -> None:
     with pytest.raises(Exception) as excinfo:
         _assert_frame_not_blank(blank, 3)
     assert "blank or near-uniform export frame at index 3" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# W1-03-r2 — exercise the actual stdlib PNG path, not Pillow's fast path
+# ---------------------------------------------------------------------------
+
+
+def _filtered_png_fixture(color_type: int, filter_type: int) -> tuple[bytes, bytes]:
+    """Encode 3x2 known pixels with one explicit PNG filter per row."""
+    import struct
+    import zlib
+
+    channels = {0: 1, 2: 3, 4: 2, 6: 4}[color_type]
+    rows = [
+        bytes((13 + i * 31) % 256 for i in range(3 * channels)),
+        bytes((83 + i * 47) % 256 for i in range(3 * channels)),
+    ]
+    encoded = bytearray()
+    prior = bytes(3 * channels)
+    for row in rows:
+        encoded.append(filter_type)
+        for i, sample in enumerate(row):
+            left = row[i - channels] if i >= channels else 0
+            above = prior[i]
+            upper_left = prior[i - channels] if i >= channels else 0
+            if filter_type == 0:
+                predictor = 0
+            elif filter_type == 1:
+                predictor = left
+            elif filter_type == 2:
+                predictor = above
+            elif filter_type == 3:
+                predictor = (left + above) // 2
+            else:
+                p = left + above - upper_left
+                distances = (abs(p - left), abs(p - above), abs(p - upper_left))
+                predictor = (left, above, upper_left)[distances.index(min(distances))]
+            encoded.append((sample - predictor) & 255)
+        prior = row
+
+    def png_chunk(kind: bytes, data: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(data))
+            + kind + data
+            + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+        )
+
+    image = (
+        b"\x89PNG\r\n\x1a\n"
+        + png_chunk(b"IHDR", struct.pack(">IIBBBBB", 3, 2, 8, color_type, 0, 0, 0))
+        + png_chunk(b"IDAT", zlib.compress(bytes(encoded)))
+        + png_chunk(b"IEND", b"")
+    )
+    expected = bytearray()
+    for row in rows:
+        for i in range(0, len(row), channels):
+            if color_type in (0, 4):
+                expected.extend([row[i]] * 3)
+            else:
+                expected.extend(row[i:i + 3])
+    return image, bytes(expected)
+
+
+@pytest.mark.parametrize("color_type", (0, 2, 4, 6))
+@pytest.mark.parametrize("filter_type", (0, 1, 2, 3, 4))
+def test_png_stdlib_direct_all_filters_and_colour_types(
+    color_type: int, filter_type: int
+) -> None:
+    from capturd.walk.exporter import _decode_png_rgb_stdlib
+
+    encoded, expected = _filtered_png_fixture(color_type, filter_type)
+    assert _decode_png_rgb_stdlib(encoded) == (3, 2, expected)
+
+
+@pytest.mark.parametrize("source", (SOURCE_0, SOURCE_1))
+def test_png_stdlib_direct_real_scroll_fixtures(source: Path) -> None:
+    from capturd.walk.exporter import _decode_png_rgb_stdlib
+
+    png = source.read_bytes()
+    width, height, rgb = _decode_png_rgb_stdlib(png)
+    assert (width, height) == (VIEWPORT["width"], VIEWPORT["height"])
+    assert len(rgb) == width * height * 3
+    assert len({rgb[(y * width + x) * 3:(y * width + x) * 3 + 3]
+                for y in range(20, height, 79)
+                for x in range(20, width, 83)}) > 2
+
+    try:
+        from PIL import Image
+    except ImportError:
+        pass  # Direct decoder assertions above run without Pillow.
+    else:
+        import io
+        with Image.open(io.BytesIO(png)) as image:
+            assert rgb == image.convert("RGB").tobytes()
+
+
+def test_png_public_decoder_forces_fallback_without_pillow(monkeypatch) -> None:
+    import builtins
+    from capturd.walk.exporter import _decode_png_rgb, _decode_png_rgb_stdlib
+
+    png, _ = _filtered_png_fixture(6, 4)
+    real_import = builtins.__import__
+
+    def without_pillow(name, *args, **kwargs):
+        if name == "PIL" or name.startswith("PIL."):
+            raise ImportError("Pillow is deliberately unavailable in this test")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_pillow)
+    assert _decode_png_rgb(png) == _decode_png_rgb_stdlib(png)
