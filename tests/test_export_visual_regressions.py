@@ -1025,3 +1025,80 @@ async def test_capture_frames_stalled_raf_raises_export_error(tmp_path: Path) ->
         "no frame file may follow a failed seek"
     )
     assert not list(frames_dir.iterdir()), "no output may follow a failed seek"
+
+
+# ---------------------------------------------------------------------------
+# W1-03-r5 — DemoExportError is a DemoForgeError, so the CLI and MCP catch
+# sites (which catch only DemoForgeError) report export failures cleanly
+# ---------------------------------------------------------------------------
+
+
+def test_export_error_shares_demo_forge_error_base() -> None:
+    """One error family: coordinator re-exports the exporter's base class,
+    DemoExportError is both a DemoForgeError and a RuntimeError, and the
+    missing-source refusal has a single, consistent MRO."""
+    from capturd.walk import coordinator, exporter
+
+    assert coordinator.DemoForgeError is exporter.DemoForgeError
+    assert issubclass(exporter.DemoExportError, coordinator.DemoForgeError)
+    assert issubclass(exporter.DemoExportError, RuntimeError)
+    mro = coordinator.DemoExportMissingSourceError.__mro__
+    assert mro[1] is exporter.DemoExportError
+    assert coordinator.DemoForgeError in mro and RuntimeError in mro
+
+
+def _forge_with_failing_export(tmp_path: Path, monkeypatch, message: str):
+    from capturd.walk.coordinator import DemoForge
+    from capturd.walk.exporter import DemoExportError
+
+    def failing_export_video(spec, viewer_html, out_path, *, fmt="mp4", fps=30):
+        raise DemoExportError(message)
+
+    monkeypatch.setattr("capturd.walk.exporter.export_video", failing_export_video)
+    forge = DemoForge(demos_dir=tmp_path / "demos")
+    forge.save_spec("export-fails", _spec_of([
+        _step_with_source(0, _b64(SOURCE_0)),
+        _step_with_source(1, _b64(SOURCE_1)),
+    ]))
+    return forge
+
+
+@pytest.mark.parametrize("fmt", ("mp4", "gif"))
+def test_cli_export_reports_export_failure(tmp_path: Path, monkeypatch, capsys, fmt) -> None:
+    """``capturd walk export`` turns a DemoExportError into exit code 1 and
+    one 'export failed:' line — never an uncaught traceback."""
+    import argparse
+
+    from capturd.walk import cli
+
+    forge = _forge_with_failing_export(tmp_path, monkeypatch, "ffmpeg failed:\nboom")
+    monkeypatch.setattr(cli, "_forge", lambda: forge)
+    args = argparse.Namespace(demo_id="export-fails", format=fmt, out=None)
+
+    assert cli._cmd_export(args) == 1
+    captured = capsys.readouterr()
+    assert captured.err == "export failed: ffmpeg failed:\nboom\n"
+    assert captured.out == ""
+
+
+@pytest.mark.parametrize("fmt", ("mp4", "gif"))
+def test_mcp_export_reports_export_failure(tmp_path: Path, monkeypatch, fmt) -> None:
+    """The MCP ``demo.export`` tool maps a DemoExportError to its clean
+    ValueError(message) path, the same as every other DemoForgeError."""
+    import asyncio
+
+    from fastmcp.exceptions import ToolError
+
+    from capturd.mcp.server import _build_server
+    from capturd.walk.exporter import DemoExportError
+
+    forge = _forge_with_failing_export(tmp_path, monkeypatch, "ffmpeg failed:\nboom")
+    server = _build_server(forge)
+
+    with pytest.raises(ToolError) as excinfo:
+        asyncio.run(server.call_tool("demo.export", {"demo_id": "export-fails", "format": fmt}))
+    assert str(excinfo.value) == "Error calling tool 'demo.export': ffmpeg failed:\nboom"
+    mapped = excinfo.value.__cause__
+    assert type(mapped) is ValueError
+    assert str(mapped) == "ffmpeg failed:\nboom"
+    assert isinstance(mapped.__context__, DemoExportError)
