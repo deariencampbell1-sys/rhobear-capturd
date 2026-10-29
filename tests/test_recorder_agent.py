@@ -653,3 +653,297 @@ def test_run_async_falls_back_for_created_coroutine(monkeypatch) -> None:
     finally:
         monkeypatch.undo()
         loop.close()
+
+
+# ---------------------------------------------------------------------------
+# W1-03-r4 — successful fallback discovery and observable wheel settling
+# ---------------------------------------------------------------------------
+
+
+_DISCOVERY_PROBE = """() => {
+    const root = document.scrollingElement || document.documentElement;
+    const canScroll = (el) => {
+        if (!el || el.scrollHeight <= el.clientHeight + 1) return false;
+        const overflow = getComputedStyle(el).overflowY;
+        if (el === root) return overflow !== 'hidden' && overflow !== 'clip';
+        return /^(auto|scroll|overlay)$/.test(overflow);
+    };
+    const ancestor = (el) => {
+        for (; el; el = el.parentElement) {
+            if (el !== root && canScroll(el)) return el;
+        }
+        return null;
+    };
+    const hit = document.elementFromPoint(innerWidth / 2, innerHeight / 2);
+    const centre = ancestor(hit);
+    const area = (el) => {
+        const r = el.getBoundingClientRect();
+        return Math.max(0, Math.min(innerWidth, r.right) - Math.max(0, r.left)) *
+               Math.max(0, Math.min(innerHeight, r.bottom) - Math.max(0, r.top));
+    };
+    const range = (id) => {
+        const el = document.getElementById(id);
+        return el.scrollHeight - el.clientHeight;
+    };
+    return {
+        hitId: hit ? (hit.id || hit.tagName) : null,
+        centreId: centre ? (centre.id || centre.tagName) : null,
+        canScrollRoot: canScroll(root),
+        paneArea: area(document.getElementById('pane')),
+        decoyArea: area(document.getElementById('decoy')),
+        paneRange: range('pane'),
+        decoyRange: range('decoy'),
+    };
+}"""
+
+
+@pytest.mark.asyncio
+async def test_scroll_without_selector_discovers_nested_pane(tmp_path) -> None:
+    """No selector, fixed root: the CENTRE fallback must find the scrollable
+    pane under the viewport centre even though the decoy pane is larger.
+    This priority assertion kills a centre-only mutation while the
+    largest-pane scan remains enabled."""
+    url = _tmp_page(
+        tmp_path,
+        "<style>html,body{margin:0;height:100%;overflow:hidden}</style>"
+        "<div id='pane' style='position:absolute;left:310px;top:100px;"
+        "width:180px;height:160px;overflow:auto'>"
+        "<div id='pane-inner' style='height:900px;"
+        "background:linear-gradient(#8cf,#c8f)'>pane content</div></div>"
+        "<div id='decoy' style='position:absolute;left:20px;top:20px;"
+        "width:260px;height:300px;overflow:auto'>"
+        "<div style='height:1200px;background:linear-gradient(#fc8,#f8c)'>"
+        "decoy content</div></div>",
+    )
+    rec = await _recording_session(url, tmp_path, viewport={"width": 800, "height": 400})
+    try:
+        proof = await rec._page.evaluate(_DISCOVERY_PROBE)
+        # elementFromPoint's scrollable ancestor is #pane — the centre hit
+        # is the pane's content, and #decoy is entirely off-centre.
+        assert proof["centreId"] == "pane", proof
+        assert proof["hitId"] == "pane-inner", proof
+        # ... yet #decoy has the LARGER visible area, so only centre
+        # priority can prefer #pane over the largest-pane scan.
+        assert proof["decoyArea"] > proof["paneArea"] > 0, proof
+        assert proof["paneRange"] > 1 and proof["decoyRange"] > 1, proof
+
+        before = await rec._page.evaluate(
+            "() => ({pane: document.querySelector('#pane').scrollTop,"
+            " decoy: document.querySelector('#decoy').scrollTop,"
+            " outer: window.scrollY})"
+        )
+        assert before == {"pane": 0, "decoy": 0, "outer": 0}, before
+        await rec._act_async("scroll", None, "down", None)
+        after = await rec._page.evaluate(
+            "() => ({pane: document.querySelector('#pane').scrollTop,"
+            " decoy: document.querySelector('#decoy').scrollTop,"
+            " outer: window.scrollY})"
+        )
+        assert after["pane"] > 0, after
+        assert after["outer"] == 0, after
+        assert after["decoy"] == 0, after
+        assert len(rec.spec.steps) == 1, rec.spec.steps
+        step = rec.spec.steps[0]
+        assert step.interaction.type == "scroll"
+        shot = rec.output_dir.parent / step.screenshotPath
+        assert shot.is_file() and shot.stat().st_size > 0, shot
+    finally:
+        await rec._stop_async()
+
+
+@pytest.mark.asyncio
+async def test_scroll_without_selector_discovers_largest_pane(tmp_path) -> None:
+    """No selector, centre over static content: only the largest-visible
+    scroll-pane scan can find #pane. The smaller decoy is listed FIRST in
+    DOM order and the root cannot scroll, so first-candidate selection or a
+    disabled scan both fail these assertions."""
+    url = _tmp_page(
+        tmp_path,
+        "<style>html,body{margin:0;height:100%;overflow:hidden}</style>"
+        "<div id='static' style='position:absolute;left:300px;top:150px;"
+        "width:300px;height:150px;background:#dde'>static centre content</div>"
+        "<div id='decoy' style='position:absolute;left:650px;top:20px;"
+        "width:100px;height:140px;overflow:auto'>"
+        "<div style='height:900px;background:linear-gradient(#fc8,#f8c)'>"
+        "small decoy</div></div>"
+        "<div id='pane' style='position:absolute;left:20px;top:20px;"
+        "width:260px;height:300px;overflow:auto'>"
+        "<div style='height:1200px;background:linear-gradient(#8cf,#c8f)'>"
+        "big pane</div></div>",
+    )
+    rec = await _recording_session(url, tmp_path, viewport={"width": 800, "height": 400})
+    try:
+        proof = await rec._page.evaluate(_DISCOVERY_PROBE)
+        assert proof["hitId"] == "static", proof
+        assert proof["centreId"] is None, proof  # neither centre ancestor scrolls
+        assert not proof["canScrollRoot"], proof  # the root cannot scroll
+        assert proof["paneArea"] > proof["decoyArea"] > 0, proof
+        assert proof["paneRange"] > 1 and proof["decoyRange"] > 1, proof
+        decoy_first = await rec._page.evaluate(
+            "() => !!(document.getElementById('decoy').compareDocumentPosition("
+            "document.getElementById('pane')) & Node.DOCUMENT_POSITION_FOLLOWING)"
+        )
+        assert decoy_first, "the decoy must be listed BEFORE #pane in DOM order"
+
+        before = await rec._page.evaluate(
+            "() => ({pane: document.querySelector('#pane').scrollTop,"
+            " decoy: document.querySelector('#decoy').scrollTop,"
+            " outer: window.scrollY})"
+        )
+        assert before == {"pane": 0, "decoy": 0, "outer": 0}, before
+        await rec._act_async("scroll", None, "down", None)
+        after = await rec._page.evaluate(
+            "() => ({pane: document.querySelector('#pane').scrollTop,"
+            " decoy: document.querySelector('#decoy').scrollTop,"
+            " outer: window.scrollY})"
+        )
+        assert after["pane"] > 0, after
+        assert after["outer"] == 0, after
+        assert after["decoy"] == 0, after
+        assert len(rec.spec.steps) == 1, rec.spec.steps
+        step = rec.spec.steps[0]
+        assert step.interaction.type == "scroll"
+        shot = rec.output_dir.parent / step.screenshotPath
+        assert shot.is_file() and shot.stat().st_size > 0, shot
+    finally:
+        await rec._stop_async()
+
+
+@pytest.mark.asyncio
+async def test_scroll_waits_for_delayed_movement_and_settle(tmp_path) -> None:
+    """Wheel correctness is OBSERVED, not timed: a scroll whose movement
+    lands 600 ms after the wheel (smooth scroll scheduled by the page) is
+    recorded once it moves and settles; a wheel that never moves is refused;
+    movement that never settles raises the scroll-settle timeout. The old
+    fixed 300 ms gate refuses the first case outright."""
+    from capturd.walk.recorder import DemoRecorderError
+
+    url = _tmp_page(
+        tmp_path,
+        "<style>html,body{margin:0;height:100%;overflow:hidden}</style>"
+        "<div id='pane' style='position:absolute;left:40px;top:40px;"
+        "width:330px;height:200px;overflow:auto'>"
+        "<div style='height:1200px;background:linear-gradient(red,blue)'>"
+        "inside scroll pane</div></div>",
+    )
+    rec = await _recording_session(url, tmp_path, viewport={"width": 800, "height": 400})
+
+    async def _act_within_watchdog(selector, value):
+        try:
+            return await asyncio.wait_for(
+                rec._act_async("scroll", selector, value, None), timeout=5
+            )
+        except asyncio.TimeoutError:
+            pytest.fail("the scroll action must settle or refuse within its watchdog")
+
+    try:
+        # --- 1. delayed movement: the listener prevents the wheel's native
+        # scroll and only schedules a smooth scrollTo 600 ms later. The
+        # timer supplies delayed INPUT; it is not a readiness sleep.
+        await rec._page.evaluate(
+            """() => {
+                window.__wheelTest = {count: 0};
+                window.__wheelTest.handler = (e) => {
+                    e.preventDefault();
+                    window.__wheelTest.count += 1;
+                    const pane = document.getElementById('pane');
+                    setTimeout(
+                        () => pane.scrollTo({top: 500, behavior: 'smooth'}), 600);
+                };
+                window.addEventListener(
+                    'wheel', window.__wheelTest.handler, {passive: false});
+            }"""
+        )
+        before = await rec._page.evaluate(
+            "() => ({pane: document.querySelector('#pane').scrollTop,"
+            " outer: window.scrollY})"
+        )
+        assert before == {"pane": 0, "outer": 0}, before
+        await _act_within_watchdog("#pane", "down")
+        moved = await rec._page.evaluate(
+            "() => ({pane: document.querySelector('#pane').scrollTop,"
+            " outer: window.scrollY, wheels: window.__wheelTest.count})"
+        )
+        assert moved["wheels"] == 1, moved  # the wheel was received once
+        assert abs(moved["pane"] - 500) <= 1, moved  # the scheduled movement ran
+        assert moved["outer"] == 0, moved
+        assert len(rec.spec.steps) == 1, rec.spec.steps
+        step = rec.spec.steps[0]
+        assert step.interaction.type == "scroll"
+        shot = rec.output_dir.parent / step.screenshotPath
+        assert shot.is_file() and shot.stat().st_size > 0, shot
+        # The final offset is stable over observable samples.
+        samples = []
+        for _ in range(3):
+            samples.append(
+                await rec._page.evaluate("() => document.querySelector('#pane').scrollTop")
+            )
+            await asyncio.sleep(0.05)
+        assert max(samples) - min(samples) < 1, samples
+
+        # --- 2. a wheel that never moves: the listener prevents all
+        # movement and schedules nothing — refusal, zero new steps.
+        await rec._page.evaluate(
+            """() => {
+                window.removeEventListener('wheel', window.__wheelTest.handler);
+                window.__wheelTest.handler = (e) => {
+                    e.preventDefault();
+                    window.__wheelTest.count += 1;
+                };
+                window.addEventListener(
+                    'wheel', window.__wheelTest.handler, {passive: false});
+            }"""
+        )
+        stalled_before = await rec._page.evaluate(
+            "() => document.querySelector('#pane').scrollTop"
+        )
+        steps_before = len(rec.spec.steps)
+        with pytest.raises(
+            DemoRecorderError,
+            match="refusing to record an identical scroll screenshot",
+        ):
+            await _act_within_watchdog("#pane", "down")
+        assert await rec._page.evaluate(
+            "() => document.querySelector('#pane').scrollTop"
+        ) == stalled_before
+        assert len(rec.spec.steps) == steps_before
+
+        # --- 3. movement that never settles: a 30 ms interval toggles the
+        # pane between two offsets until the action finishes.
+        await rec._page.evaluate(
+            """() => {
+                window.removeEventListener('wheel', window.__wheelTest.handler);
+                const pane = document.getElementById('pane');
+                window.__wheelTest.handler = (e) => {
+                    e.preventDefault();
+                    window.__wheelTest.count += 1;
+                    if (!window.__wheelTest.toggler) {
+                        window.__wheelTest.toggler = setInterval(() => {
+                            pane.scrollTop = pane.scrollTop < 250 ? 380 : 120;
+                        }, 30);
+                    }
+                };
+                window.addEventListener(
+                    'wheel', window.__wheelTest.handler, {passive: false});
+            }"""
+        )
+        steps_before = len(rec.spec.steps)
+        with pytest.raises(DemoRecorderError, match="scroll-settle timeout"):
+            await _act_within_watchdog("#pane", "down")
+        assert len(rec.spec.steps) == steps_before
+    finally:
+        try:
+            await rec._page.evaluate(
+                """() => {
+                    if (window.__wheelTest) {
+                        if (window.__wheelTest.toggler) {
+                            clearInterval(window.__wheelTest.toggler);
+                        }
+                        window.removeEventListener(
+                            'wheel', window.__wheelTest.handler);
+                    }
+                }"""
+            )
+        except Exception:
+            pass
+        await rec._stop_async()

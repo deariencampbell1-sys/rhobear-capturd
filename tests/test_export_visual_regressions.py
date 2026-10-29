@@ -783,3 +783,245 @@ def test_coordinator_inlines_real_source_before_export(
     assert base64.b64decode(steps[1]["screenshotBase64"]) == SOURCE_1.read_bytes()
     for s in steps:
         assert "screenshotError" not in s, s
+
+
+# ---------------------------------------------------------------------------
+# W1-03-r4 — export errors survive export_demo; the rAF paint wait is typed
+# and bounded (1000 ms) so a stalled frame fails instead of deadlocking
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("fmt", ("mp4", "gif"))
+@pytest.mark.parametrize("kind", ("malformed_png", "blank_frame"))
+def test_coordinator_preserves_export_error(tmp_path: Path, monkeypatch, fmt, kind) -> None:
+    """A downstream DemoExportError keeps its exact object, message, subtype
+    and cause through ``export_demo`` — the coordinator boundary must not
+    re-type it as DemoForgeError. The error is CONSTRUCTED by really running
+    the existing decoder on the short-IHDR fixture (or the real blank guard
+    on a uniform PNG); only exporter.export_video is instrumented to raise
+    that exact object once. This proves the coordinator boundary — it does
+    not claim the instrumented encoder produced or inspected a video."""
+    from capturd.walk.coordinator import DemoForge
+    from capturd.walk.exporter import (
+        DemoExportError,
+        _assert_frame_not_blank,
+        _decode_png_rgb_stdlib,
+    )
+
+    if kind == "malformed_png":
+        png, _expected = _filtered_png_fixture(2, 0)  # 3x2 RGB
+        parts = _split_png(png)
+        bad = _join_png([(k, d[:12] if k == b"IHDR" else d) for k, d in parts])
+        with pytest.raises(DemoExportError, match="invalid PNG") as built:
+            _decode_png_rgb_stdlib(bad)
+    else:
+        with pytest.raises(DemoExportError, match="blank or near-uniform") as built:
+            _assert_frame_not_blank(_encode_uniform_png(1024, 768, (12, 12, 12)), 0)
+    err = built.value
+    message = str(err)
+    cause = err.__cause__
+
+    calls: list[dict] = []
+
+    def raising_export_video(spec, viewer_html, out_path, *, fmt="mp4", fps=30):
+        calls.append({"out_path": out_path})
+        raise err
+
+    monkeypatch.setattr("capturd.walk.exporter.export_video", raising_export_video)
+
+    demo_id = "preserve-err"
+    forge = DemoForge(demos_dir=tmp_path / "demos")
+    spec = _spec_of([
+        _step_with_source(0, _b64(SOURCE_0)),
+        _step_with_source(1, _b64(SOURCE_1)),
+    ])
+    forge.save_spec(demo_id, spec)
+
+    with pytest.raises(DemoExportError) as excinfo:
+        forge.export_demo(demo_id, fmt=fmt)
+
+    got = excinfo.value
+    assert got is err, "the original DemoExportError object must pass through"
+    assert str(got) == message, "the original message must pass through"
+    assert type(got) is type(err), "the original subtype must pass through"
+    assert got.__cause__ is cause, "the original cause must pass through"
+    if kind == "malformed_png":
+        assert cause is not None, "the malformed decoder error keeps its cause"
+    assert len(calls) == 1, "the encoder boundary must be reached exactly once"
+    d = forge.demo_dir(demo_id)
+    assert not (d / f"walkthrough.{fmt}").exists(), (
+        "no video/GIF output follows a failed export"
+    )
+
+
+def test_export_seek_stalled_raf_is_typed_and_bounded(tmp_path: Path) -> None:
+    """A stalled requestAnimationFrame must REJECT the seek with a typed
+    ``DemoExportPaintTimeoutError`` within the 1000 ms bound (observed under
+    an independent 3000 ms watchdog) — never deadlock — cancelling the
+    outstanding frame; and after restoring real rAF the SAME seek must paint
+    a real, decoded source before resolving."""
+    import time
+
+    from playwright.sync_api import sync_playwright
+
+    spec = _build_spec()
+    viewer = _render(tmp_path, spec)
+
+    install_js = """() => {
+        window.__rafTest = {handles: [], cancels: [], next: 990000};
+        window.__rafTest.realRaf = window.requestAnimationFrame;
+        window.__rafTest.realCaf = window.cancelAnimationFrame;
+        window.requestAnimationFrame = function () {
+            const handle = ++window.__rafTest.next;
+            window.__rafTest.handles.push(handle);
+            return handle;  // never invoke the callback
+        };
+        window.cancelAnimationFrame = function (h) {
+            window.__rafTest.cancels.push(h);
+        };
+    }"""
+    restore_js = """() => {
+        if (window.__rafTest) {
+            window.requestAnimationFrame = window.__rafTest.realRaf;
+            window.cancelAnimationFrame = window.__rafTest.realCaf;
+        }
+    }"""
+    stalled_seek_js = """async (t) => {
+        const outcome = await Promise.race([
+            window.__demoExport.seek(t).then(
+                () => ({kind: 'resolved'}),
+                (err) => ({kind: 'rejected',
+                           name: err && err.name,
+                           message: String(err && err.message || err)})),
+            new Promise((resolve) => setTimeout(
+                () => resolve({kind: 'watchdog'}), 3000)),
+        ]);
+        const wins = window.__demoExport.plan().wins;
+        let win = wins[0];
+        for (const w of wins) { if (t >= w.tStart) win = w; else break; }
+        return Object.assign({}, outcome, {
+            index: win.index,
+            handles: window.__rafTest.handles.slice(),
+            cancels: window.__rafTest.cancels.slice(),
+        });
+    }"""
+    retry_seek_js = """async (t) => {
+        window.requestAnimationFrame = window.__rafTest.realRaf;
+        window.cancelAnimationFrame = window.__rafTest.realCaf;
+        let rafRan = false;
+        requestAnimationFrame(() => { rafRan = true; });
+        const outcome = await Promise.race([
+            window.__demoExport.seek(t).then(
+                () => ({kind: 'resolved'}),
+                (err) => ({kind: 'rejected',
+                           name: err && err.name,
+                           message: String(err && err.message || err)})),
+            new Promise((resolve) => setTimeout(
+                () => resolve({kind: 'watchdog'}), 3000)),
+        ]);
+        const sh = document.getElementById('screenshot');
+        const pv = document.getElementById('screenshot-prev');
+        return Object.assign({}, outcome, {
+            rafRanAtResolve: rafRan,
+            shownReady: sh.complete && sh.naturalWidth > 0,
+            prevReady: pv.complete && pv.naturalWidth > 0,
+        });
+    }"""
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        try:
+            page = browser.new_page(viewport=dict(VIEWPORT))
+            page.goto(viewer.resolve().as_uri(), wait_until="domcontentloaded")
+            page.wait_for_function(
+                "() => window.__demoExport && window.__demoViewer && window.__demoViewer.STATE.spec",
+                timeout=15000,
+            )
+            plan = page.evaluate("() => window.__demoExport.prepare()")
+            wins = plan["stepWindows"]
+            t_change = wins[1]["tStart"] + 10  # a real source-index change
+
+            page.evaluate(install_js)
+            try:
+                started = time.monotonic()
+                result = page.evaluate(stalled_seek_js, t_change)
+                elapsed = time.monotonic() - started
+                assert result["kind"] == "rejected", (
+                    f"a stalled rAF must reject, not resolve or deadlock: {result}"
+                )
+                assert result["name"] == "DemoExportPaintTimeoutError", result
+                assert "DemoExportPaintTimeoutError" in result["message"], result
+                assert f"source index {result['index']}" in result["message"], result
+                assert elapsed <= 3.0, f"paint timeout must be bounded: {elapsed:.2f}s"
+                assert result["handles"], "the stalled rAF handle must be recorded"
+                stalled_handle = result["handles"][0]
+                assert stalled_handle in result["cancels"], (
+                    "the outstanding rAF must be cancelled on timeout: "
+                    f"{result['cancels']} vs {stalled_handle}"
+                )
+
+                # Restoring the real rAF lets the SAME seek paint for real.
+                retry = page.evaluate(retry_seek_js, t_change)
+                assert retry["kind"] == "resolved", retry
+                assert retry["rafRanAtResolve"] is True, retry
+                assert retry["shownReady"] is True and retry["prevReady"] is True, retry
+            finally:
+                page.evaluate(restore_js)
+        finally:
+            browser.close()
+
+
+@pytest.mark.asyncio
+async def test_capture_frames_stalled_raf_raises_export_error(tmp_path: Path) -> None:
+    """The real _capture_frames path turns a stalled paint into a named
+    DemoExportError (chained cause) and writes NO frame file and no output.
+    In the TEMPORARY rendered HTML only, prepare() is wrapped so the real
+    plan is produced first and only then requestAnimationFrame is replaced
+    with a never-calling stub. seek, the compiled plan, the screenshot path,
+    the decoder and _capture_frames are untouched."""
+    import asyncio as _asyncio
+
+    from capturd.walk.exporter import DemoExportError, _capture_frames
+
+    spec = _build_spec()
+    viewer = _render(tmp_path, spec)
+    html = viewer.read_text(encoding="utf-8")
+    assert html.count("</body>") == 1, "expected one closing body tag"
+    viewer.write_text(
+        html.replace(
+            "</body>",
+            "<script>\n"
+            "(function () {\n"
+            "  const realPrepare = window.__demoExport.prepare;\n"
+            "  window.__demoExport.prepare = async function () {\n"
+            "    const plan = await realPrepare();\n"
+            "    window.requestAnimationFrame = function () {\n"
+            "      return 424242;  // never invoke the callback\n"
+            "    };\n"
+            "    return plan;\n"
+            "  };\n"
+            "})();\n"
+            "</script>\n</body>",
+        ),
+        encoding="utf-8",
+    )
+
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
+    with pytest.raises(DemoExportError) as excinfo:
+        try:
+            await _asyncio.wait_for(
+                _capture_frames(viewer, dict(VIEWPORT), frames_dir, FPS),
+                timeout=5,
+            )
+        except _asyncio.TimeoutError:
+            pytest.fail("a stalled rAF must raise a bounded error, not deadlock")
+    msg = str(excinfo.value)
+    assert "DemoExportPaintTimeoutError" in msg, msg
+    assert excinfo.value.__cause__ is not None, (
+        "the DemoExportError must chain the JS paint failure"
+    )
+    assert not list(frames_dir.glob("frame_*.png")), (
+        "no frame file may follow a failed seek"
+    )
+    assert not list(frames_dir.iterdir()), "no output may follow a failed seek"
