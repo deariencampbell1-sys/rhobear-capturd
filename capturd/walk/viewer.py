@@ -28,6 +28,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from capturd.walk.schema import normalize_target
+
 
 _SCRIPT_BLOCK_RE = re.compile(
     r'<script id="demo-data"[^>]*>\s*\n.*?\n\s*</script>',
@@ -37,6 +39,22 @@ _SCRIPT_BLOCK_RE = re.compile(
 
 class ViewerRenderError(RuntimeError):
     """Raised when the template is missing or malformed."""
+
+
+def propagate_target_metadata(spec: dict[str, Any]) -> dict[str, Any]:
+    """Normalize every step's ``interaction.target`` for the semantic camera.
+
+    Legacy specs (pre W1-03-r1) gain the optional ``role`` / ``viewport`` /
+    ``captureSpace`` / ``region`` keys; recorded hints survive. Runs at
+    render time so old recordings carry usable target metadata without a
+    re-record. The spec is modified in place and returned.
+    """
+    for step in spec.get("steps") or []:
+        interaction = step.get("interaction") if isinstance(step, dict) else None
+        target = interaction.get("target") if isinstance(interaction, dict) else None
+        if isinstance(target, dict):
+            interaction["target"] = normalize_target(target, spec.get("viewport"))
+    return spec
 
 
 def default_template_path() -> Path:
@@ -68,6 +86,8 @@ def render_viewer(
     tpath = template_path or default_template_path()
     if not tpath.is_file():
         raise ViewerRenderError(f"viewer template not found: {tpath}")
+
+    spec = propagate_target_metadata(spec)
 
     template = tpath.read_text(encoding="utf-8")
     if not _SCRIPT_BLOCK_RE.search(template):

@@ -20,9 +20,10 @@ Aligned with ARCHITECTURE.md §1 (from the prev PR #17 salvage) with additions:
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Mapping
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +49,160 @@ class ContentMetadata:
     hasVideo: bool = False          # <video> element present
     hasIframe: bool = False         # embedded iframe (YouTube etc.)
     mutationRate: float = 0.0       # DOM mutations / second at step time (rrweb)
+
+
+# ---------------------------------------------------------------------------
+# Semantic target metadata — optional fields on Interaction.target (W1-03-r1)
+# ---------------------------------------------------------------------------
+
+#: Where the target's pixels/coordinates live.
+CAPTURE_SPACES = ("viewport", "full_page")
+
+#: What the click target means for the semantic camera.
+TARGET_REGIONS = (
+    "meaningful",
+    "result",
+    "body",
+    "full_viewport",
+    "scrollbar_gutter",
+    "degenerate",
+)
+
+#: Regions where zooming is meaningless — the camera holds wide instead.
+SUPPRESSED_REGIONS = frozenset(
+    {"body", "full_viewport", "scrollbar_gutter", "degenerate"}
+)
+
+#: ARIA roles that mark the step's outcome (modal/result states).
+RESULT_ROLES = frozenset({"dialog", "alertdialog"})
+
+
+def _finite_number(value: Any, default: float) -> float:
+    try:
+        n = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    return n if math.isfinite(n) else default
+
+
+def _target_rect(target: Mapping[str, Any] | None) -> dict[str, float] | None:
+    """Finite, positive target rect in source pixels — else ``None``.
+
+    Accepts ``boundingRect`` or a bare ``width``/``height`` pair (legacy
+    fallback); malformed or zero-area rects are treated as degenerate.
+    """
+    if not isinstance(target, Mapping):
+        return None
+    raw = target.get("boundingRect")
+    if isinstance(raw, Mapping):
+        for key in ("x", "y", "width", "height"):
+            value = raw.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                if not math.isfinite(float(value)):
+                    return None  # NaN / inf recorded geometry → degenerate
+        x = _finite_number(raw.get("x"), 0.0)
+        y = _finite_number(raw.get("y"), 0.0)
+        w = _finite_number(raw.get("width"), 0.0)
+        h = _finite_number(raw.get("height"), 0.0)
+    else:
+        x = y = 0.0
+        w = _finite_number(target.get("width"), 0.0)
+        h = _finite_number(target.get("height"), 0.0)
+    if w <= 0 or h <= 0:
+        return None
+    return {"x": x, "y": y, "width": w, "height": h}
+
+
+def _target_viewport(
+    target: Mapping[str, Any] | None, viewport: Mapping[str, Any] | None
+) -> dict[str, Any] | None:
+    """The source viewport recorded with the target (or the caller's)."""
+    for candidate in (
+        target.get("viewport") if isinstance(target, Mapping) else None,
+        viewport,
+    ):
+        if isinstance(candidate, Mapping):
+            w = _finite_number(candidate.get("width"), 0.0)
+            h = _finite_number(candidate.get("height"), 0.0)
+            if w > 0 and h > 0:
+                dsf = _finite_number(candidate.get("deviceScaleFactor"), 1.0)
+                return {
+                    "width": int(w) if w.is_integer() else w,
+                    "height": int(h) if h.is_integer() else h,
+                    "deviceScaleFactor": int(dsf) if dsf.is_integer() else dsf,
+                }
+    return None
+
+
+def classify_target_region(
+    target: Mapping[str, Any] | None, viewport: Mapping[str, Any] | None = None
+) -> str:
+    """Classify what a click target means for the semantic camera.
+
+    Order: result roles → degenerate geometry → scrollbar gutter →
+    full-viewport coverage → page body → meaningful content. Malformed
+    values classify as ``degenerate`` — never an exception.
+    """
+    if not isinstance(target, Mapping):
+        return "degenerate"
+    role = str(target.get("role") or "").strip().lower()
+    if role in RESULT_ROLES:
+        return "result"
+    rect = _target_rect(target)
+    if rect is None:
+        return "degenerate"
+    vp = _target_viewport(target, viewport) or {"width": 1024, "height": 768}
+    vw = float(vp["width"])
+    vh = float(vp["height"])
+    if (
+        rect["x"] + rect["width"] >= vw - 18
+        and rect["width"] <= 24
+        and rect["height"] >= vh * 0.5
+    ):
+        return "scrollbar_gutter"
+    if (
+        rect["x"] <= vw * 0.02
+        and rect["y"] <= vh * 0.02
+        and rect["x"] + rect["width"] >= vw * 0.98
+        and rect["y"] + rect["height"] >= vh * 0.98
+    ):
+        return "full_viewport"
+    tag = str(target.get("tagName") or "").strip().lower()
+    sel = str(target.get("selector") or "").strip().lower()
+    if tag in ("body", "html") or sel in ("body", "html"):
+        return "body"
+    return "meaningful"
+
+
+def normalize_target(
+    target: Mapping[str, Any] | None,
+    viewport: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return a normalized copy of ``target`` (the input is never mutated).
+
+    Legacy keys survive verbatim; the optional ``role`` / ``viewport`` /
+    ``captureSpace`` / ``region`` keys are backfilled. The region follows the
+    semantic classification (role/geometry) and only falls back to an
+    explicit hint when the geometry is vacuous.
+    """
+    src: Mapping[str, Any] = target if isinstance(target, Mapping) else {}
+    t = dict(src)
+    t["role"] = str(src.get("role") or "")
+    vp = _target_viewport(src, viewport)
+    if vp is not None:
+        t["viewport"] = vp
+    t["captureSpace"] = (
+        src.get("captureSpace") if src.get("captureSpace") in CAPTURE_SPACES else "viewport"
+    )
+    classified = classify_target_region(src, vp)
+    explicit = src.get("region")
+    if classified != "meaningful":
+        t["region"] = classified
+    elif explicit in TARGET_REGIONS:
+        t["region"] = explicit
+    else:
+        t["region"] = "meaningful"
+    return t
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +398,13 @@ __all__ = [
     "Hotspot",
     "BoundingRect",
     "Interaction",
+    # Semantic target metadata
+    "CAPTURE_SPACES",
+    "TARGET_REGIONS",
+    "SUPPRESSED_REGIONS",
+    "RESULT_ROLES",
+    "classify_target_region",
+    "normalize_target",
     # Cursor / voice
     "CursorPoint",
     "WordTimestamp",

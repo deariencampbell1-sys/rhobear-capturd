@@ -34,6 +34,7 @@ import asyncio
 import base64
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -936,6 +937,111 @@ _STYLE_PARAMS: dict[str, dict] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Semantic camera — selector → rect → wide resolution (W1-03-r1)
+# ---------------------------------------------------------------------------
+
+
+def _zoom_level_for_rect(
+    rect: dict[str, float] | None, vp_w: float, vp_h: float
+) -> float:
+    """Adaptive zoom band — smaller targets get closer (unchanged formula)."""
+    if rect is None:
+        return 1.0
+    rel_area = (rect["width"] * rect["height"]) / max(1.0, vp_w * vp_h)
+    if rel_area < 0.02:
+        return 2.0
+    if rel_area < 0.08:
+        return 1.7
+    if rel_area < 0.2:
+        return 1.5
+    return 1.3
+
+
+def camera_focus(
+    target: dict | None,
+    *,
+    keyframe_target: str | None = None,
+    offset: dict | None = None,
+    viewport: dict | None = None,
+) -> dict:
+    """Resolve where the semantic camera looks and how far it frames in.
+
+    Precedence — **target selector first, recorded rect second, wide hold
+    last**: when the keyframe's selector matches the recorded step target the
+    recorded rect is the camera anchor (a moved element still centers its
+    recorded rect); a stale/foreign keyframe selector falls back to the
+    recorded rect; no usable rect at all holds the camera wide. Raw click
+    coordinates/hotspots are NEVER the primary zoom target — ``offset`` is
+    applied as rect-relative percentages only.
+
+    Zoom is suppressed (zoomLevel 1.0) for body / full-viewport / scrollbar
+    / degenerate targets. Every returned value is finite even for malformed
+    recorded targets. Full-page capture spaces keep their page coordinates.
+    """
+    from capturd.walk.schema import (
+        SUPPRESSED_REGIONS,
+        _target_rect,
+        _target_viewport,
+        normalize_target,
+    )
+
+    t = normalize_target(target, viewport)
+    vp = _target_viewport(t, viewport) or {"width": 1024, "height": 768}
+    vp_w = float(vp["width"])
+    vp_h = float(vp["height"])
+    rect = _target_rect(t)
+    region = t.get("region", "meaningful")
+    suppressed = region in SUPPRESSED_REGIONS
+
+    selector = str(t.get("selector") or "")
+    if rect is not None and keyframe_target and selector and keyframe_target == selector:
+        source = "selector"
+    elif rect is not None:
+        source = "rect"
+    else:
+        source = "wide"
+
+    fx = vp_w / 2.0
+    fy = vp_h / 2.0
+    if rect is not None:
+        try:
+            ox = float((offset or {}).get("x"))
+        except (TypeError, ValueError):
+            ox = 50.0
+        try:
+            oy = float((offset or {}).get("y"))
+        except (TypeError, ValueError):
+            oy = 50.0
+        if not math.isfinite(ox):
+            ox = 50.0
+        if not math.isfinite(oy):
+            oy = 50.0
+        ox = min(100.0, max(0.0, ox))
+        oy = min(100.0, max(0.0, oy))
+        fx = rect["x"] + rect["width"] * ox / 100.0
+        fy = rect["y"] + rect["height"] * oy / 100.0
+    if not math.isfinite(fx):
+        fx = vp_w / 2.0
+    if not math.isfinite(fy):
+        fy = vp_h / 2.0
+
+    zoom = 1.0 if suppressed else _zoom_level_for_rect(rect, vp_w, vp_h)
+    if not math.isfinite(zoom) or zoom < 1.0:
+        zoom = 1.0
+
+    return {
+        "source": source,
+        "region": region,
+        "suppressed": suppressed,
+        "rect": rect,
+        "focus": {"x": fx, "y": fy},
+        "zoomLevel": zoom,
+        "captureSpace": t.get("captureSpace", "viewport"),
+        "viewport": dict(vp),
+    }
+
+
 def _deterministic_timeline(spec: dict) -> list[dict]:
     """Deterministic fallback timeline when the LLM produces nothing usable.
 
@@ -971,23 +1077,15 @@ def _deterministic_timeline(spec: dict) -> list[dict]:
         xPct = h.get("xPct", 50)
         yPct = h.get("yPct", 50)
 
-        # Detect target size to scale zoom level
-        r = t.get("boundingRect") or {}
-        w = r.get("width", 0)
-        h_ = r.get("height", 0)
-        vp = spec.get("viewport") or {}
-        vp_w = vp.get("width", 1440)
-        vp_h = vp.get("height", 900)
-        rel_area = (w * h_) / (vp_w * vp_h) if (vp_w * vp_h) > 0 else 0.05
-        # Smaller elements get higher zoom
-        if rel_area < 0.02:
-            zoom_level = 2.0
-        elif rel_area < 0.08:
-            zoom_level = 1.7
-        elif rel_area < 0.2:
-            zoom_level = 1.5
-        else:
-            zoom_level = 1.3
+        # Semantic camera: selector → rect → wide, with zoom suppression for
+        # body / full-viewport / scrollbar-gutter / degenerate targets.
+        focus = camera_focus(
+            t,
+            keyframe_target=t.get("selector"),
+            offset={"x": xPct, "y": yPct},
+            viewport=spec.get("viewport"),
+        )
+        zoom_level = focus["zoomLevel"]
 
         # Voice-sync: find the focus noun tStartMs if voiceoverWords present
         vw = s.get("voiceoverWords")
@@ -1008,7 +1106,7 @@ def _deterministic_timeline(spec: dict) -> list[dict]:
             "easing": "ease-out",
             "intensity": intensity,
         })
-        kf_zoom: dict[str, Any] = {
+        kf_zoom: dict[str, Any] | None = {
             "stepIndex": idx,
             "action": "zoomTo",
             "target": sel,
@@ -1017,9 +1115,14 @@ def _deterministic_timeline(spec: dict) -> list[dict]:
             "duration": zoom_dur,
             "easing": easing,
         }
-        if t_start_ms is not None:
+        if focus["suppressed"]:
+            # Meaningless target (body / viewport / gutter / degenerate):
+            # hold wide — never fake a zoom onto the whole page.
+            kf_zoom = None
+        if kf_zoom is not None and t_start_ms is not None:
             kf_zoom["tStartMs"] = t_start_ms
-        timeline.append(kf_zoom)
+        if kf_zoom is not None:
+            timeline.append(kf_zoom)
         timeline.append({
             "stepIndex": idx,
             "action": "hold",
