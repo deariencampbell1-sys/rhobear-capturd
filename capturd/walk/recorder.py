@@ -1075,7 +1075,9 @@ class DemoRecorder:
                     if (!target)
                         target = ancestor(document.elementFromPoint(
                             innerWidth / 2, innerHeight / 2));
-                    if (!target) {
+                    // Scan the DOM only for fixed-layout SPA pages; the
+                    // document itself is the right fallback when scrollable.
+                    if (!target && !canScroll(root)) {
                         let largest = 0;
                         for (const el of document.querySelectorAll('body *')) {
                             if (!canScroll(el) ||
