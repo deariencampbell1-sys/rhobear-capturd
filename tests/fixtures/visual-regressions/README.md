@@ -68,7 +68,31 @@ Refusal contracts (recorder and coordinator):
 * Coordinator missing-source refusal: when a required step screenshot is
   missing or unreadable, mp4/gif export refuses before HTML/output creation
   with `DemoExportMissingSourceError`, which is catchable as BOTH
-  `DemoForgeError` and `DemoExportError`.
+  `DemoForgeError` and `DemoExportError`. A downstream `DemoExportError`
+  raised by the export pipeline itself keeps its exact object, message,
+  subtype and cause through `export_demo` (it is not re-typed).
+
+Bounded waits (W1-03-r4) — errors, never deadlocks or guessed readiness:
+
+* Paint wait: on source-index changes the awaited animation frame is bounded
+  at **1000 ms**. A stalled frame rejects with a JS
+  `DemoExportPaintTimeoutError` (a real `Error` subclass with
+  `err.name === 'DemoExportPaintTimeoutError'` and a message naming that type
+  and the source index), which the exporter surfaces as `DemoExportError`
+  with the JS failure chained. The outstanding frame is cancelled on timeout
+  and a late callback cannot turn failure into success; the shown/previous
+  source indices are invalidated so a repeat seek must paint again. No
+  screenshot or frame file is written after a failed seek.
+* Scroll settling (recorder): wheel steps observe the selected element's
+  `scrollTop` instead of assuming elapsed time — a **2000 ms** movement
+  window polled every **50 ms** retaining the ≥ 1 pixel movement threshold,
+  then stable scrollTop (variation < 1 pixel across three 50 ms samples —
+  each sample records the scroll range observed over its 50 ms window) under
+  a separate **2000 ms** ceiling before the capture is recorded. No
+  movement raises the existing refusal above with zero steps; movement that
+  never settles raises `DemoRecorderError` naming scroll-settle timeout, also
+  with zero steps. Explicit `top`/`bottom` keep instant scrolling and remain
+  valid recorded edge no-ops (the documented exception).
 
 The uniform-frame histogram (blank guard) does not detect overlay-only
 images; the separate source-pixel regression

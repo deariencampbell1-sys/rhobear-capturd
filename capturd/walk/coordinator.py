@@ -632,8 +632,11 @@ class DemoForge:
         out_path = self.demo_dir(demo_id) / f"walkthrough.{fmt}"
         try:
             return export_video(data, html_path, out_path, fmt=fmt)
-        except DemoExportError as exc:
-            raise DemoForgeError(str(exc)) from exc
+        except DemoExportError:
+            # W1-03-r4: a downstream DemoExportError must keep its exact
+            # object, message, subtype and cause through export_demo — do
+            # NOT re-type it as DemoForgeError here (bare re-raise).
+            raise
 
     def _inline_screenshots(self, data: dict[str, Any], demo_id: str) -> None:
         """Mutate ``data`` so each step has ``screenshotBase64`` populated.

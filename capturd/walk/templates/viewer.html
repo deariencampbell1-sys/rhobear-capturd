@@ -1812,6 +1812,16 @@
       };
     }
 
+    // W1-03-r4: a stalled animation frame must fail the export with a typed
+    // error instead of deadlocking it. err.name is the type name and the
+    // message names both the type and the source index.
+    class DemoExportPaintTimeoutError extends Error {
+      constructor(message) {
+        super(message);
+        this.name = 'DemoExportPaintTimeoutError';
+      }
+    }
+
     async function exportSeek(tMs) {
       const c = EXPORT.compiled;
       if (!c) throw new Error('call prepare() first');
@@ -1850,13 +1860,41 @@
       // Paint safety (W1-03-r1): a freshly assigned src paints
       // asynchronously — await decode() and one animation frame after every
       // source index change so an immediate screenshot can never capture an
-      // unpainted (overlay-only) frame.
+      // unpainted (overlay-only) frame. The frame wait is bounded (W1-03-r4):
+      // 1000 ms, then a typed DemoExportPaintTimeoutError — never a silent
+      // deadlock and never a resolve that claims paint safety without paint.
       if (needsPaint) {
         await Promise.all([
           $screenshot.decode().catch(function() {}),
           $prev.decode().catch(function() {}),
         ]);
-        await new Promise(function(res) { requestAnimationFrame(res); });
+        try {
+          await new Promise(function(res, rej) {
+            let settled = false;
+            let timer = 0;
+            const handle = requestAnimationFrame(function() {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              res();
+            });
+            timer = setTimeout(function() {
+              if (settled) return;
+              settled = true;
+              cancelAnimationFrame(handle);
+              rej(new DemoExportPaintTimeoutError(
+                'DemoExportPaintTimeoutError: no paint frame within 1000 ms ' +
+                'for source index ' + i));
+            }, 1000);
+          });
+        } catch (err) {
+          // A failed paint must never be remembered as painted: invalidate
+          // both source indices so a repeat seek cannot skip painting and
+          // report success without a real frame.
+          EXPORT._shownIndex = null;
+          EXPORT._prevIndex = null;
+          throw err;
+        }
       }
 
       // ---- camera ---------------------------------------------------

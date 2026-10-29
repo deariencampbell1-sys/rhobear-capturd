@@ -702,6 +702,72 @@ def _parse_agent_reply(reply: str) -> tuple[str | None, str | None, str | None]:
 # ---------------------------------------------------------------------------
 
 
+async def _wait_scroll_settled(scroll_target: Any) -> float:
+    """Observe the selected element's scrollTop until it is stable (W1-03-r4).
+
+    Stability is evidence-based, never assumed from elapsed time: every
+    50 ms a sample records the element's scroll range over that window (a
+    temporary scroll listener plus the current position), and the target is
+    settled only when the variation across three consecutive 50 ms samples
+    is < 1 pixel. Sampling point values would alias against fast movement,
+    so the evidence is the observed range, not a lucky read. The 2000 ms
+    ceiling is separate — movement that never settles raises the named
+    scroll-settle timeout. The sleeps only schedule the observations.
+    """
+    await scroll_target.evaluate(
+        """(el) => {
+            if (!el.__demoScrollObserve) {
+                const s = {lo: el.scrollTop, hi: el.scrollTop};
+                s.onScroll = () => {
+                    const y = el.scrollTop;
+                    if (y < s.lo) s.lo = y;
+                    if (y > s.hi) s.hi = y;
+                };
+                el.addEventListener('scroll', s.onScroll);
+                el.__demoScrollObserve = s;
+            }
+        }"""
+    )
+    deadline = time.monotonic() + 2.0
+    window: list[tuple[float, float]] = []
+    try:
+        while True:
+            obs = await scroll_target.evaluate(
+                """(el) => {
+                    const s = el.__demoScrollObserve;
+                    s.onScroll();
+                    const out = {lo: s.lo, hi: s.hi, y: el.scrollTop};
+                    s.lo = s.hi = el.scrollTop;  // start a fresh 50 ms window
+                    return out;
+                }"""
+            )
+            window.append((float(obs["lo"]), float(obs["hi"])))
+            if len(window) > 3:
+                window.pop(0)
+            if len(window) == 3 and (
+                max(hi for _lo, hi in window) - min(lo for lo, _hi in window) < 1
+            ):
+                return float(obs["y"])
+            if time.monotonic() >= deadline:
+                raise DemoRecorderError(
+                    "scroll-settle timeout — refusing to record a mid-scroll screenshot"
+                )
+            await asyncio.sleep(0.05)
+    finally:
+        try:
+            await scroll_target.evaluate(
+                """(el) => {
+                    const s = el.__demoScrollObserve;
+                    if (s) {
+                        el.removeEventListener('scroll', s.onScroll);
+                        delete el.__demoScrollObserve;
+                    }
+                }"""
+            )
+        except Exception:  # noqa: BLE001 - cleanup must not mask the outcome
+            pass
+
+
 class DemoRecorderError(RuntimeError):
     """Raised when a recording session fails or is in the wrong state."""
 
@@ -1116,7 +1182,9 @@ class DemoRecorder:
                     }"""
                 )
                 if v in ("top", "bottom"):
-                    # Reaching an edge is a valid action even if already there.
+                    # Reaching an edge is a valid action even if already
+                    # there — explicit top/bottom stay instant, valid
+                    # recorded no-ops at their requested edge.
                     await scroll_target.evaluate(
                         """(el, where) => el.scrollTo({
                             top: where === 'top' ? 0 : el.scrollHeight,
@@ -1131,16 +1199,43 @@ class DemoRecorder:
                         dy = -500 if v == "up" else 500
                     await self._page.mouse.move(before["x"], before["py"])
                     await self._page.mouse.wheel(0, dy)
-                await asyncio.sleep(0.3)
-                after_y = await scroll_target.evaluate("(el) => el.scrollTop")
-                # WHEEL movement governs refusal: any wheel value (including
-                # numeric 0) whose target did not move is refused before a
-                # synthetic step can be recorded. Explicit normalized top/
-                # bottom edge commands stay valid no-ops at their edge.
-                if v not in ("top", "bottom") and abs(float(after_y) - float(before["y"])) < 1:
-                    reason = ("page has no scrollable target" if not before["scrollable"]
-                              else "scroll target did not move")
-                    raise DemoRecorderError(reason + " — refusing to record an identical scroll screenshot")
+                    # WHEEL movement governs refusal, and it is OBSERVED on
+                    # the selected element — a fixed sleep is not evidence
+                    # that the wheel landed (W1-03-r4). The movement wait is
+                    # bounded (2000 ms ceiling, 50 ms polling) and keeps the
+                    # >= 1 pixel threshold. Only the expected Playwright
+                    # timeout is swallowed here; detached-target/browser
+                    # failures keep their true error.
+                    from playwright.async_api import (
+                        TimeoutError as PlaywrightTimeoutError,
+                    )
+
+                    try:
+                        await self._page.wait_for_function(
+                            "(pair) => Math.abs(pair[0].scrollTop - pair[1]) >= 1",
+                            arg=[scroll_target, before["y"]],
+                            timeout=2000,
+                            polling=50,
+                        )
+                    except PlaywrightTimeoutError:
+                        moved = False
+                    else:
+                        moved = True
+                    if moved:
+                        # Before returning for capture, observe a stable
+                        # scrollTop (its own 2000 ms ceiling) so the
+                        # screenshot is never mid-scroll.
+                        after_y = await _wait_scroll_settled(scroll_target)
+                    else:
+                        after_y = await scroll_target.evaluate("(el) => el.scrollTop")
+                    # Any wheel value (including numeric 0) whose target did
+                    # not move is refused before a synthetic step can be
+                    # recorded. Explicit normalized top/bottom edge commands
+                    # above stay valid no-ops at their edge.
+                    if abs(float(after_y) - float(before["y"])) < 1:
+                        reason = ("page has no scrollable target" if not before["scrollable"]
+                                  else "scroll target did not move")
+                        raise DemoRecorderError(reason + " — refusing to record an identical scroll screenshot")
             finally:
                 await scroll_target.dispose()
 
