@@ -1048,32 +1048,98 @@ class DemoRecorder:
             # value: "down"/"up"/"top"/"bottom" or a pixel delta ("600").
             v = (value or "down").strip().lower()
 
-            # Refuse scrolls the page cannot perform — a wheel that moves
-            # nothing would record an identical screenshot (W1-03-r1).
-            before_y = await self._page.evaluate(
-                "() => window.scrollY || document.documentElement.scrollTop || 0"
+            # Choose the actual wheel target, not just window.scrollY. SPA
+            # layouts commonly scroll inside an overflow:auto panel while the
+            # document stays fixed. Explicit selectors win, then the viewport
+            # center, then the largest visible scroll pane.
+            scroll_target = await self._page.evaluate_handle(
+                """(selector) => {
+                    const root = document.scrollingElement || document.documentElement;
+                    const canScroll = (el) => {
+                        if (!el || el.scrollHeight <= el.clientHeight + 1) return false;
+                        const overflow = getComputedStyle(el).overflowY;
+                        if (el === root) return overflow !== 'hidden' && overflow !== 'clip';
+                        return /^(auto|scroll|overlay)$/.test(overflow);
+                    };
+                    const ancestor = (el) => {
+                        for (; el; el = el.parentElement) {
+                            if (el !== root && canScroll(el)) return el;
+                        }
+                        return null;
+                    };
+                    let target = null;
+                    try {
+                        if (selector && selector !== 'body' && selector !== 'html')
+                            target = ancestor(document.querySelector(selector));
+                    } catch (_) { /* invalid selector: use visible fallback */ }
+                    if (!target)
+                        target = ancestor(document.elementFromPoint(
+                            innerWidth / 2, innerHeight / 2));
+                    if (!target) {
+                        let largest = 0;
+                        for (const el of document.querySelectorAll('body *')) {
+                            if (!canScroll(el) ||
+                                el.closest('#__demo-recorder-indicator')) continue;
+                            const r = el.getBoundingClientRect();
+                            const area = Math.max(0, Math.min(innerWidth, r.right) -
+                                                  Math.max(0, r.left)) *
+                                         Math.max(0, Math.min(innerHeight, r.bottom) -
+                                                  Math.max(0, r.top));
+                            if (area > largest) { largest = area; target = el; }
+                        }
+                    }
+                    return target || root;
+                }""",
+                selector,
             )
-            if v == "top":
-                await self._page.evaluate("() => window.scrollTo({top: 0})")
-            elif v == "bottom":
-                await self._page.evaluate(
-                    "() => window.scrollTo({top: document.body.scrollHeight})"
+            try:
+                before = await scroll_target.evaluate(
+                    """(el) => {
+                        const r = el.getBoundingClientRect();
+                        const root = el === document.scrollingElement;
+                        return {
+                            y: el.scrollTop,
+                            scrollable: el.scrollHeight > el.clientHeight + 1 &&
+                                (root
+                                    ? !['hidden', 'clip'].includes(getComputedStyle(el).overflowY)
+                                    : /^(auto|scroll|overlay)$/.test(
+                                        getComputedStyle(el).overflowY)),
+                            x: root ? innerWidth / 2 :
+                                Math.max(1, Math.min(innerWidth - 2,
+                                    (Math.max(0, r.left) + Math.min(innerWidth, r.right)) / 2)),
+                            py: root ? innerHeight / 2 :
+                                Math.max(1, Math.min(innerHeight - 2,
+                                    (Math.max(0, r.top) + Math.min(innerHeight, r.bottom)) / 2)),
+                        };
+                    }"""
                 )
-            else:
-                try:
-                    dy = int(v)
-                except ValueError:
-                    dy = -500 if v == "up" else 500
-                await self._page.mouse.wheel(0, dy)
-            await asyncio.sleep(0.3)
-            after_y = await self._page.evaluate(
-                "() => window.scrollY || document.documentElement.scrollTop || 0"
-            )
-            if abs(float(after_y) - float(before_y)) < 1:
-                raise DemoRecorderError(
-                    f"page did not scroll (scrollY stayed at {after_y}) — "
-                    "refusing to record identical screenshots"
-                )
+                if v in ("top", "bottom"):
+                    # Reaching an edge is a valid action even if already there.
+                    await scroll_target.evaluate(
+                        """(el, where) => el.scrollTo({
+                            top: where === 'top' ? 0 : el.scrollHeight,
+                            behavior: 'instant'
+                        })""",
+                        v,
+                    )
+                else:
+                    try:
+                        dy = int(v)
+                    except ValueError:
+                        dy = -500 if v == "up" else 500
+                    await self._page.mouse.move(before["x"], before["py"])
+                    await self._page.mouse.wheel(0, dy)
+                await asyncio.sleep(0.3)
+                after_y = await scroll_target.evaluate("(el) => el.scrollTop")
+                if (v not in ("top", "bottom")
+                        and abs(float(after_y) - float(before["y"])) < 1
+                        and not before["scrollable"]):
+                    raise DemoRecorderError(
+                        "page has no scrollable target — "
+                        "refusing to record an identical scroll screenshot"
+                    )
+            finally:
+                await scroll_target.dispose()
 
     def _safe_url_sync(self) -> str:
         """Get current URL without awaiting (for prompt building)."""
