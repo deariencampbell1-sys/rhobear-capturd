@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import concurrent.futures
+import inspect
 import json
 import logging
 import os
@@ -1817,6 +1818,11 @@ def run_async(coro: Any) -> Any:
             return _run_async_executor.submit(asyncio.run, coro).result()
         return loop.run_until_complete(coro)
     except RuntimeError:
+        # "No usable event loop" fallback — but NEVER re-run a coroutine that
+        # already started: its own RuntimeError (e.g. DemoExportError) must
+        # surface verbatim instead of a double-await mystery.
+        if inspect.getcoroutinestate(coro) != inspect.CORO_CREATED:
+            raise
         return asyncio.run(coro)
 
 

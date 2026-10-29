@@ -36,6 +36,152 @@ class DemoExportError(RuntimeError):
     """Raised when the video export cannot complete."""
 
 
+# ---------------------------------------------------------------------------
+# Mechanical frame inspection — a blank export must never become a video
+# ---------------------------------------------------------------------------
+
+
+def _decode_png_rgb(png: bytes) -> tuple[int, int, bytes]:
+    """Decode an 8-bit PNG into packed RGB bytes.
+
+    Uses Pillow when it is installed (C-fast) and otherwise a self-contained
+    stdlib decoder, so the blank-frame guard never depends on an optional
+    imaging stack.
+    """
+    try:
+        import io
+
+        from PIL import Image  # type: ignore
+
+        with Image.open(io.BytesIO(png)) as im:
+            width, height = im.width, im.height
+            rgb = im.convert("RGB").tobytes()
+        return width, height, rgb
+    except Exception:  # noqa: BLE001 - any failure falls back to stdlib
+        pass
+    return _decode_png_rgb_stdlib(png)
+
+
+def _decode_png_rgb_stdlib(png: bytes) -> tuple[int, int, bytes]:
+    """Minimal PNG reader: 8-bit grey/RGB/grey-alpha/RGBA, non-interlaced."""
+    import struct
+    import zlib
+
+    if not png or png[:8] != b"\x89PNG\r\n\x1a\n":
+        raise DemoExportError("not a PNG")
+    pos = 8
+    width = height = 0
+    bit_depth = color_type = interlace = -1
+    idat = bytearray()
+    while pos + 8 <= len(png):
+        (length,) = struct.unpack(">I", png[pos : pos + 4])
+        ctype = png[pos + 4 : pos + 8]
+        data = png[pos + 8 : pos + 8 + length]
+        pos += 12 + length
+        if ctype == b"IHDR":
+            width, height, bit_depth, color_type, _c, _f, interlace = struct.unpack(
+                ">IIBBBBB", data
+            )
+        elif ctype == b"IDAT":
+            idat += data
+        elif ctype == b"IEND":
+            break
+    if not width or not height:
+        raise DemoExportError("PNG missing IHDR")
+    if bit_depth != 8 or interlace != 0 or color_type not in (0, 2, 4, 6):
+        raise DemoExportError(
+            f"unsupported PNG (bit depth {bit_depth}, color type {color_type})"
+        )
+    channels = {0: 1, 2: 3, 4: 2, 6: 4}[color_type]
+    raw = zlib.decompress(bytes(idat))
+    stride = width * channels
+    out = bytearray(height * stride)
+    prev = bytearray(stride)
+    pos = 0
+    for y in range(height):
+        ftype = raw[pos]
+        pos += 1
+        line = bytearray(raw[pos : pos + stride])
+        pos += stride
+        if ftype == 1:  # Sub
+            for x in range(channels, stride):
+                line[x] = (line[x] + line[x - channels]) & 0xFF
+        elif ftype == 2:  # Up
+            for x in range(stride):
+                line[x] = (line[x] + prev[x]) & 0xFF
+        elif ftype == 3:  # Average
+            for x in range(stride):
+                a = line[x - channels] if x >= channels else 0
+                line[x] = (line[x] + ((a + prev[x]) >> 1)) & 0xFF
+        elif ftype == 4:  # Paeth
+            for x in range(stride):
+                a = line[x - channels] if x >= channels else 0
+                b = prev[x]
+                cc = prev[x - channels] if x >= channels else 0
+                p = a + b - cc
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - cc)
+                pred = a if (pa <= pb and pa <= pc) else (b if pb <= pc else cc)
+                line[x] = (line[x] + pred) & 0xFF
+        elif ftype != 0:
+            raise DemoExportError(f"unknown PNG filter {ftype}")
+        out[y * stride : (y + 1) * stride] = line
+        prev = line
+
+    rgb = bytearray(width * height * 3)
+    if color_type == 2:
+        rgb[:] = out
+    else:
+        i = j = 0
+        for _ in range(width * height):
+            if color_type == 0:  # grey
+                g = out[i]
+                rgb[j] = rgb[j + 1] = rgb[j + 2] = g
+                i += 1
+            elif color_type == 4:  # grey + alpha
+                g = out[i]
+                rgb[j] = rgb[j + 1] = rgb[j + 2] = g
+                i += 2
+            else:  # RGBA
+                rgb[j] = out[i]
+                rgb[j + 1] = out[i + 1]
+                rgb[j + 2] = out[i + 2]
+                i += 4
+            j += 3
+    return width, height, bytes(rgb)
+
+
+def _assert_frame_not_blank(png: bytes, index: int) -> None:
+    """Mechanical blank-frame guard — inspect pixels, not file existence.
+
+    Samples a ≤ 64x64 grid of the captured PNG; when it holds ≤ 2 distinct
+    RGB values AND a luma range of ≤ 2 the frame is blank or near-uniform
+    and is refused with a named error instead of being handed to ffmpeg.
+    """
+    width, height, rgb = _decode_png_rgb(png)
+    cols = min(64, max(1, width))
+    rows = min(64, max(1, height))
+    seen: set[tuple[int, int, int]] = set()
+    luma_lo = luma_hi = 0
+    for gy in range(rows):
+        y = min(height - 1, int((gy + 0.5) * height / rows))
+        row = y * width * 3
+        for gx in range(cols):
+            x = min(width - 1, int((gx + 0.5) * width / cols))
+            i = row + x * 3
+            px = (rgb[i], rgb[i + 1], rgb[i + 2])
+            seen.add(px)
+            luma = (77 * px[0] + 150 * px[1] + 29 * px[2]) >> 8
+            if len(seen) == 1 and not (luma_lo or luma_hi):
+                luma_lo = luma_hi = luma
+            else:
+                luma_lo = min(luma_lo, luma)
+                luma_hi = max(luma_hi, luma)
+            if len(seen) > 2 and (luma_hi - luma_lo) > 2:
+                return  # visibly non-uniform content — good frame
+    if len(seen) <= 2 and (luma_hi - luma_lo) <= 2:
+        raise DemoExportError(f"blank or near-uniform export frame at index {index}")
+
+
 def find_ffmpeg() -> str:
     """Locate an ffmpeg executable. PATH first, then the imageio-ffmpeg wheel."""
     exe = shutil.which("ffmpeg")
@@ -84,7 +230,10 @@ async def _capture_frames(
             "() => window.__demoExport && window.__demoViewer && window.__demoViewer.STATE.spec",
             timeout=15000,
         )
-        plan = await page.evaluate("() => window.__demoExport.prepare()")
+        try:
+            plan = await page.evaluate("() => window.__demoExport.prepare()")
+        except Exception as exc:  # noqa: BLE001 - named source errors surface verbatim
+            raise DemoExportError(str(exc)) from exc
         total_ms = float(plan["totalMs"])
         audio_plan = list(plan.get("audioPlan") or [])
         n_frames = max(1, int(total_ms / 1000.0 * fps))
@@ -95,8 +244,17 @@ async def _capture_frames(
 
         for i in range(n_frames):
             t = i * 1000.0 / fps
-            await page.evaluate("(t) => window.__demoExport.seek(t)", t)
+            try:
+                # exportSeek is async: it awaits decode() + one animation
+                # frame after every source index change, so this immediate
+                # screenshot can only capture painted pixels.
+                await page.evaluate(
+                    "async (t) => { await window.__demoExport.seek(t); }", t
+                )
+            except Exception as exc:  # noqa: BLE001 - named source errors surface
+                raise DemoExportError(str(exc)) from exc
             png = await page.screenshot(type="png")
+            _assert_frame_not_blank(png, i)
             (frames_dir / f"frame_{i:06d}.png").write_bytes(png)
             if i and i % (fps * 5) == 0:
                 logger.info("export: %d/%d frames", i, n_frames)
