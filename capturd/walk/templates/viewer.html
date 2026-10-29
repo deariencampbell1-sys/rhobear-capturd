@@ -1144,7 +1144,7 @@
     // targets hold wide at the fit transform. Always finite.
     function camFrameTarget(target, keyframeTarget, offset, level, fitOverride) {
       const fit = fitOverride || STATE.fit || computeFit();
-      const fallback = { scale: fit.scale, x: fit.x, y: fit.y };
+      const fallback = { scale: fit.scale, x: fit.x, y: fit.y, pad: 0, zoomLevel: 1 };
       try {
         const cam = camResolve(target, keyframeTarget, offset);
         const r = camLayerRect(cam.rect, cam.captureSpace);
@@ -1158,6 +1158,7 @@
         const x = fit.cw / 2 - lp.x * s;
         const y = fit.ch / 2 - lp.y * s;
         if (![s, x, y].every(Number.isFinite) || s <= 0) return fallback;
+        return { scale: s, x: x, y: y, pad: pad, zoomLevel: s / fit.scale };
         return { scale: s, x: x, y: y };
       } catch (err) {
         return fallback;
@@ -2072,6 +2073,7 @@
                                  goToStep, playTimeline, cancelSequence, initPanzoom,
                                  spotlightOn, spotlightOff, stepDwellMs,
                                  resolveCamera: camResolve, camRegion,
+                                 camLayerPoint,
                                  camFrame: camFrameTarget };
       } catch (err) {
         console.error('[demo-viewer]', err);
