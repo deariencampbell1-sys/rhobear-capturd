@@ -307,3 +307,134 @@ def test_camera_action_values_match_schema():
     expected = {"zoomTo", "panTo", "zoomToFit", "reset", "hold", "spotlightOn", "spotlightOff"}
     actual = {m.value for m in CameraAction}
     assert actual == expected, f"CameraAction: expected {expected}, got {actual}"
+
+
+# ---------------------------------------------------------------------------
+# W1-03-r1 — semantic camera timeline regressions
+# ---------------------------------------------------------------------------
+
+
+def test_suppressed_targets_hold_wide_and_result_targets_zoom():
+    """body / full-viewport / scrollbar-gutter / degenerate targets hold WIDE
+    (no zoomTo keyframe); result (dialog) and meaningful targets are framed."""
+    from capturd.walk.ai_pipeline import _deterministic_timeline
+
+    body = _make_step(0, "body", bounding_rect={"x": 0, "y": 0, "width": 1024, "height": 768})
+    modal = _make_step(1, "#modal", bounding_rect={"x": 200, "y": 150, "width": 624, "height": 468})
+    modal["interaction"]["target"]["role"] = "dialog"
+    gutter = _make_step(2, "html", bounding_rect={"x": 1010, "y": 0, "width": 14, "height": 768})
+    tiny_gone = _make_step(3, "#gone", bounding_rect={"x": 5, "y": 5, "width": 0, "height": 0})
+    cta = _make_step(4, "#cta", bounding_rect={"x": 400, "y": 300, "width": 200, "height": 80})
+
+    spec = _make_spec([body, modal, gutter, tiny_gone, cta])
+    timeline = _deterministic_timeline(spec)
+
+    def actions_of(i):
+        return [k["action"] for k in timeline if k["stepIndex"] == i]
+
+    for i in (0, 2, 3):  # body, scrollbar gutter, degenerate → hold wide
+        assert "zoomTo" not in actions_of(i), (
+            f"step {i} is a meaningless target but zooms: {actions_of(i)}"
+        )
+    for i in (1, 4):  # result + meaningful → framed
+        assert "zoomTo" in actions_of(i), f"step {i} should be framed: {actions_of(i)}"
+
+    modal_zoom = [k for k in timeline if k["stepIndex"] == 1 and k["action"] == "zoomTo"][0]
+    assert modal_zoom["zoomLevel"] > 1.0
+
+
+def test_full_page_steps_keep_page_coordinate_focus():
+    """Full-page captures keep their page-space coordinates (y can exceed the
+    viewport height) and stay associated with the step's source viewport."""
+    from capturd.walk.ai_pipeline import camera_focus
+
+    far = _make_step(0, "#far", bounding_rect={"x": 300, "y": 4200, "width": 300, "height": 120})
+    far["interaction"]["target"]["captureSpace"] = "full_page"
+    far["interaction"]["target"]["viewport"] = {"width": 1024, "height": 768,
+                                                "deviceScaleFactor": 1}
+    spec = _make_spec([far], viewport={"width": 1024, "height": 768})
+    timeline = _deterministic_timeline(spec)
+
+    zoom = [k for k in timeline if k["action"] == "zoomTo"]
+    assert zoom, "full-page step should still be framed"
+    kf = zoom[0]
+    focus = camera_focus(
+        far["interaction"]["target"],
+        keyframe_target=kf.get("target"),
+        offset=kf.get("offset"),
+    )
+    assert focus["captureSpace"] == "full_page"
+    assert focus["focus"]["y"] == pytest.approx(4260.0), (
+        "full-page focus must stay in page coordinates, not be clamped"
+    )
+
+
+def test_step_windows_agree_with_html_and_mp4_chapters(tmp_path):
+    """Export chapter windows must equal the HTML player's step windows and
+    the produced MP4's duration (chapter agreement HTML ↔ MP4)."""
+    import base64
+    import shutil
+    import subprocess
+
+    from playwright.sync_api import sync_playwright
+
+    from capturd.walk.exporter import export_video
+    from capturd.walk.viewer import render_viewer_to_file
+
+    fixtures = tmp_path / "fx"
+    fixtures.mkdir()
+    src_dir = __import__("pathlib").Path(__file__).resolve().parent / "fixtures" / "visual-regressions"
+    shots = []
+    for name in ("scroll-source-0.png", "scroll-source-1.png"):
+        p = fixtures / name
+        shutil.copy(src_dir / name, p)
+        shots.append(base64.b64encode(p.read_bytes()).decode("ascii"))
+
+    steps = [
+        _make_step(0, "#cta", bounding_rect={"x": 400, "y": 300, "width": 200, "height": 80}),
+        _make_step(1, "body", bounding_rect={"x": 0, "y": 0, "width": 1024, "height": 768}),
+    ]
+    for s, shot in zip(steps, shots):
+        s["screenshotBase64"] = shot
+    spec = _make_spec(steps, style="snappy", viewport={"width": 1024, "height": 768})
+
+    viewer = tmp_path / "viewer.html"
+    render_viewer_to_file(spec, viewer)
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1024, "height": 768})
+        page.goto(viewer.resolve().as_uri(), wait_until="domcontentloaded")
+        page.wait_for_function(
+            "() => window.__demoExport && window.__demoViewer && window.__demoViewer.STATE.spec",
+            timeout=15000,
+        )
+        plan = page.evaluate("() => window.__demoExport.prepare()")
+        html_windows = page.evaluate(
+            "() => [0, 1].map(i => window.__demoViewer.stepDwellMs(i) + 300)"
+        )
+        browser.close()
+
+    wins = plan["stepWindows"]
+    assert [w["tEnd"] - w["tStart"] for w in wins] == html_windows, (
+        "export chapter windows must equal the HTML player's step windows"
+    )
+    # Adjacent windows are contiguous and the tail closes the timeline.
+    assert wins[0]["tStart"] == 0
+    assert wins[1]["tStart"] == wins[0]["tEnd"]
+    assert plan["totalMs"] == wins[-1]["tEnd"] + 2000
+
+    out = tmp_path / "chapters.mp4"
+    export_video(spec, viewer, out, fmt="mp4", fps=8)
+    assert out.is_file()
+
+    ffprobe = shutil.which("ffprobe")
+    assert ffprobe, "ffprobe required for chapter agreement"
+    dur_s = float(subprocess.run(
+        [ffprobe, "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(out)],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip())
+    assert abs(dur_s * 1000 - plan["totalMs"]) <= 400, (
+        f"MP4 duration {dur_s}s disagrees with HTML chapters {plan['totalMs']}ms"
+    )

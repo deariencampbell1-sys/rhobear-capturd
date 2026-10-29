@@ -278,3 +278,112 @@ def test_classify_content_mode_dom() -> None:
 
     cm = ContentMetadata(hasCanvas=False, canvasAreaPct=0.0)
     assert _classify_content_mode(cm) == "dom"
+
+
+# ---------------------------------------------------------------------------
+# W1-03-r1 — semantic target metadata + scroll integrity
+# ---------------------------------------------------------------------------
+
+
+def _tmp_page(tmp_path: Path, body_html: str) -> str:
+    p = tmp_path / "page.html"
+    p.write_text(
+        "<!doctype html><html><head><meta charset='utf-8'><title>t</title>"
+        f"</head><body>{body_html}</body></html>",
+        encoding="utf-8",
+    )
+    return f"file://{p.resolve()}"
+
+
+async def _recording_session(url: str, tmp_path: Path, viewport=None):
+    from capturd.walk.recorder import DemoRecorder
+
+    rec = DemoRecorder(
+        session_id="w1-03-r1",
+        url=url,
+        name="W1-03-r1",
+        goal="semantic target metadata",
+        viewport=viewport or {"width": 1280, "height": 720},
+        output_dir=tmp_path / "demos" / "w1-03-r1",
+        headful=False,
+    )
+    await rec.start()
+    await asyncio.sleep(0.4)  # overlay install + first paint
+    return rec
+
+
+@pytest.mark.asyncio
+async def test_recorded_target_carries_semantic_metadata(tmp_path) -> None:
+    """Click-recorded targets carry role, source viewport, captureSpace and
+    region alongside the legacy selector/text/rect fields."""
+    url = _tmp_page(
+        tmp_path,
+        "<button id='go' style='margin:40px;width:220px;height:64px'>Go</button>",
+    )
+    rec = await _recording_session(url, tmp_path)
+    try:
+        await rec._act_async("click", "#go", None, None)
+    finally:
+        await rec._stop_async()
+
+    assert len(rec.spec.steps) >= 1
+    target = rec.spec.steps[-1].interaction.target
+    for key in ("selector", "tagName", "text", "boundingRect"):
+        assert key in target, f"legacy field {key} lost"
+    assert target["selector"] == "#go"
+    assert target["role"] in ("button", "Button"), target
+    assert target["viewport"] == {"width": 1280, "height": 720, "deviceScaleFactor": 1}
+    assert target["captureSpace"] == "viewport"
+    assert target["region"] == "meaningful", target
+
+
+@pytest.mark.asyncio
+async def test_scroll_refused_when_page_cannot_scroll(tmp_path) -> None:
+    """A page that cannot scroll refuses the scroll action instead of
+    recording identical screenshots — and nothing is recorded for it."""
+    from capturd.walk.recorder import DemoRecorderError
+
+    url = _tmp_page(tmp_path, "<p style='margin:20px'>no scroll here</p>")
+    rec = await _recording_session(url, tmp_path)
+    try:
+        with pytest.raises(DemoRecorderError):
+            await rec._act_async("scroll", None, "down", None)
+    finally:
+        await rec._stop_async()
+
+    assert len(rec.spec.steps) == 0, (
+        f"refused scroll must not record a step: {rec.spec.steps}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_consecutive_scroll_steps_have_different_screenshots(tmp_path) -> None:
+    """Two scrolls on a scrollable page yield two steps whose screenshots
+    differ — no identical consecutive scroll frames."""
+    url = _tmp_page(
+        tmp_path,
+        "<div style='height:400px;background:#cfe'>top</div>"
+        "<div style='height:400px;background:#efc'>mid</div>"
+        "<div style='height:400px;background:#fce'>bottom</div>",
+    )
+    rec = await _recording_session(url, tmp_path, viewport={"width": 800, "height": 400})
+    try:
+        await rec._act_async("scroll", None, "500", None)
+        await rec._act_async("scroll", None, "500", None)
+    finally:
+        await rec._stop_async()
+
+    steps = [s for s in rec.spec.steps if s.interaction.type == "scroll"]
+    assert len(steps) == 2, f"expected 2 scroll steps, got {rec.spec.steps}"
+    shots = []
+    for s in steps:
+        assert s.screenshotPath, f"scroll step missing screenshot: {s}"
+        shot = rec.output_dir.parent / s.screenshotPath
+        assert shot.is_file(), shot
+        shots.append(shot.read_bytes())
+    assert shots[0] != shots[1], (
+        "consecutive scroll steps recorded identical screenshots"
+    )
+    for s in steps:
+        assert s.interaction.target["captureSpace"] == "viewport"
+        assert s.interaction.target["region"] in ("body", "full_viewport")
