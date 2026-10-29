@@ -32,8 +32,21 @@ GIF_FPS = 12
 GIF_WIDTH = 960
 
 
-class DemoExportError(RuntimeError):
-    """Raised when the video export cannot complete."""
+class DemoForgeError(Exception):
+    """Base error for DemoForge operations.
+
+    Defined here (not in coordinator) so DemoExportError can subclass it;
+    ``capturd.walk.coordinator`` re-exports this same class.
+    """
+
+
+class DemoExportError(DemoForgeError, RuntimeError):
+    """Raised when the video export cannot complete.
+
+    A DemoForgeError, so every caller that catches DemoForgeError (CLI,
+    MCP server) also catches export failures; still a RuntimeError for
+    callers that relied on that base.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -465,6 +478,7 @@ def export_video(
 __all__ = [
     "DEFAULT_FPS",
     "DemoExportError",
+    "DemoForgeError",
     "export_video",
     "find_ffmpeg",
 ]

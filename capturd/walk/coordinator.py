@@ -43,7 +43,7 @@ from capturd.walk.ai_pipeline import (
     _llm_vision,
     _synthesize_one,
 )
-from capturd.walk.exporter import DemoExportError
+from capturd.walk.exporter import DemoExportError, DemoForgeError
 from capturd.walk.recorder import DemoManager, run_async
 
 logger = logging.getLogger(__name__)
@@ -77,10 +77,6 @@ def viewer_template_path() -> Path:
 # ---------------------------------------------------------------------------
 
 
-class DemoForgeError(Exception):
-    """Base error for DemoForge operations."""
-
-
 class DemoNotFound(DemoForgeError):
     pass
 
@@ -89,12 +85,11 @@ class DemoCorrupt(DemoForgeError):
     pass
 
 
-class DemoExportMissingSourceError(DemoForgeError, DemoExportError):
+class DemoExportMissingSourceError(DemoExportError):
     """A required export source is missing or unreadable.
 
-    Inherits BOTH error bases — the coordinator's ``DemoForgeError`` and the
-    exporter's ``DemoExportError`` — so this refusal is catchable under
-    either contract without changing every other DemoForge error.
+    DemoExportError is itself a DemoForgeError, so this refusal is catchable
+    under either contract.
     """
 
 
