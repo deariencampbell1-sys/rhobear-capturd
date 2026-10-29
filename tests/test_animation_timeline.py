@@ -346,7 +346,7 @@ def test_suppressed_targets_hold_wide_and_result_targets_zoom():
 def test_full_page_steps_keep_page_coordinate_focus():
     """Full-page captures keep their page-space coordinates (y can exceed the
     viewport height) and stay associated with the step's source viewport."""
-    from capturd.walk.ai_pipeline import camera_focus
+    from capturd.walk.ai_pipeline import _deterministic_timeline, camera_focus
 
     far = _make_step(0, "#far", bounding_rect={"x": 300, "y": 4200, "width": 300, "height": 120})
     far["interaction"]["target"]["captureSpace"] = "full_page"
@@ -422,7 +422,7 @@ def test_step_windows_agree_with_html_and_mp4_chapters(tmp_path):
     # Adjacent windows are contiguous and the tail closes the timeline.
     assert wins[0]["tStart"] == 0
     assert wins[1]["tStart"] == wins[0]["tEnd"]
-    assert plan["totalMs"] == wins[-1]["tEnd"] + 2000
+    assert plan["totalMs"] == wins[-1]["tEnd"] + 950  # TAIL
 
     out = tmp_path / "chapters.mp4"
     export_video(spec, viewer, out, fmt="mp4", fps=8)

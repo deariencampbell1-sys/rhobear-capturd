@@ -274,6 +274,7 @@ def test_second_scroll_frame_contains_source_pixels(tmp_path: Path) -> None:
     """Drive the REAL export capture path in Chromium and assert the frames
     around the second scroll step carry real source pixels."""
     from capturd.walk.exporter import _capture_frames
+    from capturd.walk.recorder import run_async
 
     spec = _build_spec()
     viewer = _render(tmp_path, spec)
@@ -296,8 +297,8 @@ def test_second_scroll_frame_contains_source_pixels(tmp_path: Path) -> None:
 
     frames_dir = tmp_path / "frames"
     frames_dir.mkdir()
-    n_frames, _dur, _audio = _capture_frames(
-        viewer, dict(VIEWPORT), frames_dir, FPS
+    n_frames, _dur, _audio = run_async(
+        _capture_frames(viewer, dict(VIEWPORT), frames_dir, FPS)
     )
     assert n_frames > i_result
 
