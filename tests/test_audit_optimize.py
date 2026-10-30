@@ -224,7 +224,8 @@ def test_optimize_apply_returns_copy_and_keeps_input_intact():
     assert out["applied"] is True and isinstance(out["spec"], dict)
     assert spec == original, "apply must never mutate the input spec"
     applied = out["spec"]
-    assert applied["steps"][0]["annotation"] == "Trailing spaces and! punctuation."
+    assert applied["steps"][0]["annotation"] == "Trailing spaces and!!! punctuation.", \
+        "r2: repeated punctuation is left alone; ends/space runs are still cleaned"
     cleanup = next(p for p in out["plan"] if p["action"] == "caption_cleanup")
     assert cleanup["before"] == original["steps"][0]["annotation"]
     assert cleanup["after"] == applied["steps"][0]["annotation"]
@@ -343,7 +344,7 @@ def test_mcp_optimize_apply_creates_new_draft_via_revisions(server, forge, store
     store = store_for("demo-o")
     draft = store.load_draft()
     assert draft is not None and draft != spec
-    assert draft["steps"][0]["annotation"] == "Trailing spaces and! punctuation."
+    assert draft["steps"][0]["annotation"] == "Trailing spaces and!!! punctuation."
     assert draft["aiAnnotations"]["animationTimeline"][-1]["duration"] == 3500
     assert hash_spec(draft) == res["draft"]["sha256"]
     assert (forge.demo_dir("demo-o") / "demo.json").read_bytes() == demo_bytes
@@ -381,7 +382,7 @@ def test_mcp_optimize_apply_on_unapproved_revision_forks_draft(server, forge, st
                 apply=True, revision_id=rec.id)
     assert res["applied"] is True and res["draft"]["sha256"]
     draft = store.load_draft()
-    assert draft["steps"][0]["annotation"] == "Trailing spaces and! punctuation."
+    assert draft["steps"][0]["annotation"] == "Trailing spaces and!!! punctuation."
     assert (store.revisions_dir / f"{rec.id}.json").read_bytes() == rev_bytes, \
         "the unapproved revision's frozen bytes stay identical too"
 
@@ -453,7 +454,8 @@ def test_optimize_r2_cleans_doubled_spaces_and_trailing_quote_only():
     assert entry["after"] == "Double spaces here"
     mixed = 'He said "hello"  "'
     applied = optimize_spec(_one_step_spec(mixed), apply=True)["spec"]
-    assert applied["steps"][0]["annotation"] == 'He said "hello'
+    assert applied["steps"][0]["annotation"] == 'He said "hello"', \
+        "the loose trailing quote is dropped; the interior quote stays"
 
 
 def test_optimize_r2_shorten_never_cuts_unspaced_text():

@@ -910,7 +910,7 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
         except DemoNotFound:
             raise ValueError(f"demo not found: {demo_id}")
         except DemoForgeError as exc:
-            raise ValueError(str(exc))
+            raise ValueError(str(exc)) from exc
         return {"ok": True, "mode": "alt-path", **result}
 
     # ---- W4: demo.stylize ------------------------------------------------
@@ -993,7 +993,7 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
         try:
             spec = forge.load_spec(demo_id)
         except DemoForgeError as exc:  # DemoNotFound message preserved
-            raise ValueError(str(exc))
+            raise ValueError(str(exc)) from exc
         return {"ok": True, **audit_spec(spec)}
 
     @mcp.tool(
@@ -1005,7 +1005,8 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
             "DRAFT in the demo's revision store — the live demo.json and every approved/published "
             "revision stay byte-identical; the draft awaits review. Never deletes steps or branches "
             "or replaces media; unsafe items surface as approval_required. Applying against an "
-            "approved revision is refused; a new draft is offered."
+            "approved revision is refused; a new draft is offered. apply refuses while a draft "
+            "already exists (pass overwrite=true to replace it; the existing bytes stay untouched)."
         ),
         timeout=30.0,
     )
@@ -1013,6 +1014,7 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
         demo_id: str,
         apply: bool = False,
         revision_id: str | None = None,
+        overwrite: bool = False,
     ) -> dict[str, Any]:
         from capturd.walk.optimize import optimize_spec
         from capturd.walk.revisions import RevisionError, RevisionStore
@@ -1034,7 +1036,9 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
             try:
                 spec = forge.load_spec(demo_id)
             except DemoForgeError as exc:  # DemoNotFound message preserved
-                raise ValueError(str(exc))
+                raise ValueError(str(exc)) from exc
+        if apply and not overwrite and store.load_draft() is not None:
+            raise ValueError("a draft already exists for this demo — pass overwrite=true to replace it")
         out = optimize_spec(spec, apply=apply)
         draft = store.save_draft(out["spec"]) if apply else None
         return {"ok": True, "plan": out["plan"], "safeCount": out["safe_count"],

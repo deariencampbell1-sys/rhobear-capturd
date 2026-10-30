@@ -21,6 +21,12 @@ _MAX_HOLD_KEYFRAME_MS = 3500
 _DWELL_FLOOR_MS = 1900
 
 
+def _int_ms(kf: dict) -> Optional[int]:
+    """Integer duration in ms, else None (a bad value is reported, not raised)."""
+    d = kf.get("duration")
+    return d if isinstance(d, int) and not isinstance(d, bool) else None
+
+
 def _finding(category: str, severity: str, message: str, **evidence: Any) -> dict:
     f = {"category": category, "severity": severity, "message": message}
     f.update({k: v for k, v in evidence.items() if v is not None})
@@ -35,8 +41,9 @@ def _timeline(spec: dict) -> list:
 def _step_dwell_ms(spec: dict, i: int) -> int:
     """Server-side mirror of the viewer's step-dwell floor logic."""
     step = (spec.get("steps") or [])[i]
-    timeline_ms = sum(int(kf.get("duration") or 500) for kf in _timeline(spec)
-                      if kf.get("stepIndex") == i)
+    timeline_ms = sum((d or 500) for kf in _timeline(spec)
+                      if kf.get("stepIndex") == i
+                      for d in (_int_ms(kf),) if d is not None)
     words = step.get("voiceoverWords")
     voice_ms = (int(words[-1].get("tEndMs") or 0) + 500 if words else
                 3000 if (step.get("voiceoverBase64") or step.get("voiceoverPath")) else 0)
@@ -65,6 +72,17 @@ def audit_spec(spec: dict) -> dict:
     tl = _timeline(spec)
 
     # ---- pacing --------------------------------------------------------
+    for kf in tl:  # malformed durations are reported as findings, never a crash
+        raw = kf.get("duration")
+        if raw is None or _int_ms(kf) is not None:
+            continue
+        idx = kf.get("stepIndex")
+        findings.append(_finding(
+            "pacing", "warn",
+            f"{kf.get('action')!r} keyframe has a non-integer duration ({raw!r}) — "
+            "the viewer cannot schedule it; fix the timeline value",
+            step_id=f"step-{idx}" if isinstance(idx, int) else "unknown",
+            duration=raw))
     if 0 < n < 3:
         findings.append(_finding("pacing", "warn",
             f"Only {n} steps — demos under 3 steps rarely carry a narrative", steps=n))
@@ -76,10 +94,10 @@ def audit_spec(spec: dict) -> dict:
                 step_id=f"step-{i}", dwell_ms=dwell))
         for kf in tl:
             if kf.get("stepIndex") == i and kf.get("action") == "hold" \
-                    and int(kf.get("duration") or 0) > _MAX_HOLD_KEYFRAME_MS:
+                    and (d := _int_ms(kf)) and d > _MAX_HOLD_KEYFRAME_MS:
                 findings.append(_finding("pacing", "info",
-                    f"Step {i + 1} has a {int(kf['duration']) / 1000:.1f}s hold keyframe — consider trimming",
-                    step_id=f"step-{i}", hold_ms=int(kf["duration"])))
+                    f"Step {i + 1} has a {d / 1000:.1f}s hold keyframe — consider trimming",
+                    step_id=f"step-{i}", hold_ms=d))
         if not any(kf.get("stepIndex") == i for kf in tl):
             findings.append(_finding("pacing", "info",
                 f"Step {i + 1} is fully static (no camera keyframes)", step_id=f"step-{i}"))

@@ -22,13 +22,13 @@ _HOLD_BUDGET_MS = 3500
 #: A trim never leaves a hold shorter than this — the plan reports the clamp.
 _HOLD_FLOOR_MS = 1000
 
-_WS_RUN = re.compile(r"\s{2,}")
-_DUP_PUNCT = re.compile(r"([.!?])\1{2,}")
-_TRAIL_QUOTE = re.compile(r"\s+[\"']+")
+_WS_RUN = re.compile(r"[ \t]{2,}")
+_TRAIL_QUOTE = re.compile(r"\s+[\"']+$")  # anchored to the END — interior quotes untouched
 
 
 def _shorten(text: str) -> str:
-    """Cut at the last sentence end inside the budget (never mid-word)."""
+    """Cut at the last sentence end inside the budget; never mid-word — with
+    no safe cut point the text is returned unchanged."""
     if len(text) <= _ANNOTATION_BUDGET:
         return text
     window = text[:_ANNOTATION_BUDGET]
@@ -38,12 +38,15 @@ def _shorten(text: str) -> str:
     if m and m.end() >= _ANNOTATION_BUDGET * 0.5:
         return text[: m.end()].rstrip()
     cut = window.rfind(" ")
-    return (text[: cut if cut > 0 else _ANNOTATION_BUDGET]).rstrip() + "…"
+    if cut <= 0:
+        return text  # no space to cut at — leave the text alone
+    return text[:cut].rstrip() + "…"
 
 
 def _clean_caption(text: str) -> str:
+    """Trim the ends, collapse space/tab runs, drop trailing loose quotes;
+    interior quotes, repeated punctuation and newlines are never rewritten."""
     t = _WS_RUN.sub(" ", text).strip()
-    t = _DUP_PUNCT.sub(r"\1", t)
     return _TRAIL_QUOTE.sub("", t)
 
 
