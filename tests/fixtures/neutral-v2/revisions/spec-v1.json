@@ -1,0 +1,14 @@
+{
+  "mode": "dom",
+  "name": "Neutral demo",
+  "steps": [
+    {
+      "annotation": "Open the dashboard.",
+      "index": 0
+    },
+    {
+      "annotation": "Choose the first project.",
+      "index": 1
+    }
+  ]
+}
