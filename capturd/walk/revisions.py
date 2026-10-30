@@ -304,9 +304,7 @@ class RevisionStore:
 
     def _set_pointer(self, kind: str, revision_id: str) -> str:
         with self._lock:
-            path = self._revision_path(revision_id)
-            if not path.is_file():
-                raise RevisionNotFound(revision_id)
+            self.read_bytes(revision_id)  # re-hash: never point at corrupt bytes
             pointers = self._load_pointers()
             pointers[kind] = revision_id
             _atomic_write(self.root / _POINTERS_NAME, canonical_bytes(pointers))
