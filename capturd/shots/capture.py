@@ -32,6 +32,7 @@ from weakref import WeakKeyDictionary
 from xml.etree import ElementTree
 
 from capturd._net import is_private_ip
+from capturd.engine import ArtifactTooLarge, check_artifact_size
 from capturd.shots.pathway_map import load_pathway_map
 
 
@@ -1488,6 +1489,13 @@ async def _dismiss_overlays(page: Any) -> None:
                 break
 
 
+async def _write_still(page: Any, path: str | Path, **kwargs: Any) -> int:
+    """The one still funnel: write the shot, enforce the artifact cap, return bytes."""
+    still = Path(path)
+    await page.screenshot(path=str(still), **kwargs)
+    return check_artifact_size(still)
+
+
 async def _sweep_states(page: Any, target: CaptureTarget, settings: dict[str, Any],
                         base_path: Path) -> list[dict[str, Any]]:
     """Click each mapped control, capture the state it opens, restore, and move on."""
@@ -1521,12 +1529,12 @@ async def _sweep_states(page: Any, target: CaptureTarget, settings: dict[str, An
                 seen.add(fingerprint)
                 name = f"{base_path.stem}--open--{_state_slug(control['label'])}{base_path.suffix}"
                 out = base_path.with_name(name)
-                await page.screenshot(path=str(out), **shot_kwargs)
+                still_bytes = await _write_still(page, path=out, **shot_kwargs)
                 shots.append({
                     "url": target.url, "state_id": target.state_id,
                     "viewport": target.viewport_id, "scheme": target.scheme,
                     "width": target.width, "height": target.height,
-                    "status": "ok", "file": out.name, "bytes": out.stat().st_size,
+                    "status": "ok", "file": out.name, "bytes": still_bytes,
                     "state": "open", "control": control["label"], "control_tag": control["tag"],
                 })
             # restore: Escape, then re-click, then reload as the last resort
@@ -1544,6 +1552,8 @@ async def _sweep_states(page: Any, target: CaptureTarget, settings: dict[str, An
                                 timeout=int(settings["timeout_ms"]))
                 await _settle_page(page, settings["wait_ms"])
                 await page.evaluate(_MAP_CONTROLS_JS)   # re-tag after reload
+        except ArtifactTooLarge:
+            raise
         except Exception:
             continue
     return shots
@@ -1690,8 +1700,7 @@ async def _capture_one(
                 allow_private_hosts=allow_private_hosts, allow_file_access=allow_file_access,
                 cache=navigation_cache,
             )
-            await page.screenshot(**screenshot_kwargs)
-            stat = path.stat()
+            still_bytes = await _write_still(page, **screenshot_kwargs)
             extra_states: list[dict[str, Any]] = []
             if settings.get("states"):
                 for state in await _sweep_states(page, target, settings, path):
@@ -1718,7 +1727,7 @@ async def _capture_one(
                 "height": target.height,
                 "status": "ok",
                 "file": path.name,
-                "bytes": stat.st_size,
+                "bytes": still_bytes,
                 "trigger_selector": target.trigger_selector,
                 "trigger_fired": trigger_fired,
                 "attempts": attempt,

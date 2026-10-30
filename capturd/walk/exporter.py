@@ -25,6 +25,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from capturd.engine import check_artifact_size
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_FPS = 30
@@ -471,6 +473,7 @@ def export_video(
 
     if not out_path.is_file() or out_path.stat().st_size == 0:
         raise DemoExportError(f"export produced no output at {out_path}")
+    check_artifact_size(out_path)
     logger.info("export complete: %s (%.1f KB)", out_path, out_path.stat().st_size / 1024)
     return out_path
 

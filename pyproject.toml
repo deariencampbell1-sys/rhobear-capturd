@@ -96,9 +96,10 @@ Source = "https://github.com/rhobear-ai/rhobear-capturd"
 Issues = "https://github.com/rhobear-ai/rhobear-capturd/issues"
 
 [tool.setuptools]
-packages = ["capturd", "capturd.shots", "capturd.walk", "capturd.mcp"]
+packages = ["capturd", "capturd.engine", "capturd.shots", "capturd.walk", "capturd.mcp"]
 
 [tool.setuptools.package-data]
+"capturd.engine" = ["manifest.json"]
 "capturd.walk" = ["templates/*.html"]
 
 [tool.pytest.ini_options]
