@@ -344,6 +344,45 @@ def test_published_bytes_are_identical_after_every_operation(
 
 
 # ---------------------------------------------------------------------------
+# Approve / publish re-hash the revision bytes (W2-05b-r2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("move", ["approve", "publish"])
+def test_approve_and_publish_refuse_corrupt_revision_bytes(
+    store: RevisionStore, spec_v1: dict, spec_v2: dict, move: str
+) -> None:
+    # Edge case 3: the pointer already sits on a good revision.
+    good = store.save_revision(spec_v1)
+    getattr(store, move)(good.id)
+    pointer_before = (
+        store.approved_revision_id() if move == "approve"
+        else store.published_revision_id()
+    )
+    assert pointer_before == good.id
+    pointers_file = store.root / "pointers.json"
+    pointers_before = pointers_file.read_bytes()
+
+    # Tamper with a different, saved revision's bytes.
+    corrupt = store.save_revision(spec_v2)
+    corrupt_path = store.revisions_dir / f"{corrupt.id}.json"
+    corrupt_path.write_bytes(canonical_bytes({"tampered": True}))
+
+    with pytest.raises(RevisionCorrupt) as excinfo:
+        getattr(store, move)(corrupt.id)
+    assert corrupt.id in str(excinfo.value)
+
+    # 2: after the refusal the pointer and the pointers file are untouched.
+    assert corrupt_path.read_bytes() == canonical_bytes({"tampered": True})
+    if move == "approve":
+        assert store.approved_revision_id() == pointer_before
+    else:
+        assert store.published_revision_id() == pointer_before
+    assert pointers_file.read_bytes() == pointers_before
+    assert [r.id for r in store.list_revisions()] == [corrupt.id, good.id]
+
+
+# ---------------------------------------------------------------------------
 # Draft and copy-to-new-draft rollback
 # ---------------------------------------------------------------------------
 
