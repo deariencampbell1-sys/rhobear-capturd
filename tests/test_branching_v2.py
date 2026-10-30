@@ -302,6 +302,117 @@ def test_empty_choices_refused_on_both_paths(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
+# Demo-data embed escape (W2-05a-r3)
+# ---------------------------------------------------------------------------
+
+
+BREAKOUT = "</script><script>window.__pwned=1</script>"
+
+
+def _escape_spec() -> dict:
+    """A spec whose choice label and step annotation carry the script-
+    breakout string — both are free text and both land in #demo-data."""
+    spec = json.loads(json.dumps(_fixture("spec_choices.json")))
+    step = spec["steps"][1]
+    step["annotation"] = "Note " + BREAKOUT
+    step["choices"][0]["label"] = "Run " + BREAKOUT
+    return spec
+
+
+def _pipeline_normalized(spec: dict) -> dict:
+    """The spec as render/export ship it: target metadata + choice
+    normalization applied (both run in place on the shipped copy)."""
+    from capturd.walk.viewer import propagate_target_metadata, validate_spec_choices
+
+    out = json.loads(json.dumps(spec))
+    propagate_target_metadata(out)
+    validate_spec_choices(out)
+    return out
+
+
+def test_render_and_export_escape_the_demo_data_embed(tmp_path: Path):
+    """A choice label or a step annotation holding
+    ``</script><script>window.__pwned=1</script>`` must not break out of the
+    ``#demo-data`` block at either sink — render_viewer AND export_demo.
+    Each output carries the same ``</script>`` count as the same spec
+    without the string, and never a live injected tag."""
+    from capturd.walk.viewer import render_viewer
+
+    spec = _escape_spec()
+    clean = json.loads(json.dumps(spec))
+    clean["steps"][1]["annotation"] = "Note safe"
+    clean["steps"][1]["choices"][0]["label"] = "Run safe"
+
+    html = render_viewer(json.loads(json.dumps(spec)))
+    html_clean = render_viewer(clean)
+    assert html.count("</script>") == html_clean.count("</script>"), (
+        "a free-text field broke out of the demo-data script block")
+    assert "<script>window.__pwned" not in html
+
+    forge = _fresh(tmp_path, "escape", spec)
+    forge.save_spec("escape-clean", clean)
+    out = forge.export_demo("escape", fmt="html").read_text(encoding="utf-8")
+    out_clean = forge.export_demo("escape-clean", fmt="html").read_text(
+        encoding="utf-8")
+    assert out.count("</script>") == out_clean.count("</script>"), (
+        "a free-text field broke out of the demo-data script block on export")
+    assert "<script>window.__pwned" not in out
+
+
+def test_embedded_spec_round_trips_intact():
+    """The escape changes bytes, not data: the ``#demo-data`` text, parsed
+    by ``json.loads``, equals the shipped spec with the breakout string,
+    ``<!--`` and ``<script`` intact (edge case 1). A spec with no ``<``
+    anywhere parses to exactly the spec too (edge case 2)."""
+    from capturd.walk.viewer import render_viewer
+
+    spec = _escape_spec()
+    spec["steps"][0]["annotation"] = "<!-- not a comment <script> trap"
+    embedded = _embedded_spec(render_viewer(json.loads(json.dumps(spec))))
+    assert embedded == _pipeline_normalized(spec)
+    assert BREAKOUT in embedded["steps"][1]["choices"][0]["label"]
+
+    plain = _fixture("spec_plain.json")
+    assert "<" not in json.dumps(plain)
+    assert _embedded_spec(render_viewer(json.loads(json.dumps(plain)))) \
+        == _pipeline_normalized(plain)
+
+
+@pytest.mark.slow
+def test_label_with_markup_shows_as_text(tmp_path: Path):
+    """In the booted viewer the breakout label renders as literal text, the
+    annotation names the choice point literally, and the injected script
+    never executes (window.__pwned stays unset)."""
+    from capturd.walk.viewer import render_viewer_to_file
+
+    out = tmp_path / "viewer_escape.html"
+    render_viewer_to_file(_escape_spec(), out)
+
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        pg = browser.new_page(viewport={"width": 1280, "height": 900})
+        pg.goto(out.as_uri())
+        pg.wait_for_function("window.__demoViewer && window.__capturdEvents")
+        pg.evaluate("window.__demoViewer.next()")
+        pg.wait_for_function("window.__demoViewer.STATE.index === 1",
+                             timeout=15000)
+        pg.wait_for_function(
+            "document.querySelectorAll('.choice-btn').length === 2",
+            timeout=5000)
+
+        assert pg.evaluate("window.__pwned") is None, \
+            "the breakout string executed as script in the viewer"
+        labels = [pg.locator(".choice-btn").nth(i).text_content()
+                  for i in range(2)]
+        assert "Run " + BREAKOUT in labels, labels
+        assert pg.evaluate(
+            "document.getElementById('choice-title').textContent"
+        ) == "Note " + BREAKOUT
+        browser.close()
+
+
+# ---------------------------------------------------------------------------
 # Coordinator
 # ---------------------------------------------------------------------------
 
@@ -551,6 +662,71 @@ def test_demo_param_out_of_range_destination_never_strands_viewer(tmp_path: Path
         pg.wait_for_function(
             "window.__capturdEvents.some(e => e.event === 'demo_complete')",
             timeout=20000)
+        browser.close()
+
+
+@pytest.mark.slow
+def test_self_loop_choice_is_dropped_at_runtime(tmp_path: Path):
+    """Finding 2 — the ``?demo=`` runtime path skips render-time validation.
+    A choice whose destination is its own step is refused by schema, render
+    and export, yet the runtime kept offering it: picking it re-enters the
+    choice step forever and demo_complete never fires. Every choice
+    targeting its own step must be dropped, the step acting as a terminal
+    one (edge case 3)."""
+    from capturd.walk.viewer import default_template_path
+
+    spec = json.loads(json.dumps(_fixture("spec_choices.json")))
+    last = len(spec["steps"]) - 1
+    spec["steps"][last]["choices"] = [
+        {"id": "loop_a", "label": "Loop A", "destination": last},
+        {"id": "loop_b", "label": "Loop B", "destination": last},
+    ]
+    spec_json = json.dumps(spec)
+
+    tpl = default_template_path().read_text(encoding="utf-8")
+    page_html = re.sub(
+        r'<script id="demo-data"[^>]*>.*?</script>',
+        lambda _m: '<script id="demo-data" type="application/json">\n  </script>',
+        tpl, count=1, flags=re.S,
+    )
+
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        pg = browser.new_page(viewport={"width": 1280, "height": 900})
+        pg.route("http://**", lambda route: route.abort())
+        pg.route("https://**", lambda route: route.abort())
+        pg.route("ws://**", lambda route: route.abort())
+
+        def _serve(route):
+            url = route.request.url.split("?")[0]
+            if url.endswith("/spec_selfloop.json"):
+                route.fulfill(body=spec_json, content_type="application/json")
+            elif url.endswith("/viewer.html"):
+                route.fulfill(body=page_html, content_type="text/html")
+            else:
+                route.fulfill(status=404, body="")
+
+        pg.route("http://demo.local/**", _serve)  # registered last → wins
+        pg.goto("http://demo.local/viewer.html?demo=spec_selfloop.json")
+        pg.wait_for_function("window.__demoViewer && window.__capturdEvents")
+        pg.evaluate("window.__demoViewer.next()")
+        pg.wait_for_function("window.__demoViewer.STATE.index === 1",
+                             timeout=15000)
+        pg.evaluate("window.__demoViewer.next()")
+        pg.wait_for_function("window.__demoViewer.STATE.index === 2",
+                             timeout=15000)
+        pg.wait_for_timeout(500)
+
+        assert pg.locator(".choice-btn").count() == 0, (
+            "the ?demo= runtime path offered a choice that re-enters its own "
+            "step — the viewer is stranded on the choice step")
+
+        # The run still reaches its natural end.
+        pg.evaluate("window.__demoViewer.play()")
+        pg.wait_for_function(
+            "window.__capturdEvents.some(e => e.event === 'demo_complete')",
+            timeout=25000)
         browser.close()
 
 

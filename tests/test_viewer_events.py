@@ -8,6 +8,7 @@ Covers:
 - boot emits demo_open + step_view(step-0) with the full payload shape
 - play/pause/resume emit demo_start (once) / viewer_pause / viewer_resume
 - navigation emits step_complete (departed step) + step_view / step_replay
+- goToStep past the end emits nothing; a valid move completes the step left
 - natural playback end emits demo_complete exactly once
 - branch/choice fields ride along when supplied
 - duplicate eventIds are deduped in the ring buffer, stream order preserved
@@ -197,6 +198,44 @@ def test_navigation_view_complete_replay(page):
     assert ("step_replay", "step-0") in seq, seq
     views0 = [s for s in seq if s == ("step_view", "step-0")]
     assert len(views0) == 1, seq
+
+
+@pytest.mark.slow
+def test_go_to_step_past_the_end_emits_nothing(tmp_path):
+    """Finding 3 — goToStep must not emit step_complete for a move that
+    never happens: a destination that clamps onto a missing step (the
+    runtime ``?demo=`` path can carry a null step) bails before the
+    departure event. A move to a valid step still completes the step left
+    exactly once (edge case 4)."""
+    from capturd.walk.viewer import render_viewer_to_file
+
+    spec = _spec()
+    spec["steps"].append(None)  # a runtime hole render never ships; ?demo= can
+    out = tmp_path / "viewer_step_hole.html"
+    render_viewer_to_file(spec, out)
+
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        pg = browser.new_page(viewport={"width": 1280, "height": 900})
+        pg.goto(out.as_uri())
+        pg.wait_for_function("window.__demoViewer && window.__capturdEvents")
+        baseline = _names(pg)
+        assert baseline == ["demo_open", "step_view"]
+
+        pg.evaluate("window.__demoViewer.goToStep(999)")
+        pg.wait_for_timeout(700)
+        assert _names(pg) == baseline, (
+            "goToStep past the end emitted an event for a move that never "
+            "happened")
+
+        # Edge case 4 — a valid move still completes the step left, once.
+        pg.evaluate("window.__demoViewer.goToStep(1)")
+        pg.wait_for_timeout(700)
+        completes = [(e["event"], e["stepId"]) for e in _events(pg)
+                     if e["event"] == "step_complete"]
+        assert completes == [("step_complete", "step-0")], completes
+        browser.close()
 
 
 @pytest.mark.slow
