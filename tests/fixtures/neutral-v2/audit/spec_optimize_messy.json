@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "id": "optimize-messy",
+  "name": "Optimize Messy Demo",
+  "goal": "A spec with messy captions and an over-long hold — the safe-optimization target",
+  "createdAt": "2026-10-30T00:00:00Z",
+  "viewport": {"width": 1024, "height": 768},
+  "startUrl": "https://example.test/",
+  "steps": [
+    {
+      "index": 0,
+      "timestamp": 0,
+      "pageUrl": "https://example.test/",
+      "pageTitle": "First",
+      "interaction": {
+        "type": "click",
+        "target": {
+          "selector": "#btn-0",
+          "tagName": "button",
+          "text": "First",
+          "boundingRect": {"x": 380, "y": 320, "width": 264, "height": 64}
+        },
+        "hotspot": {"xPct": 50, "yPct": 50}
+      },
+      "annotation": "Trailing   spaces   and!!! punctuation.  ",
+      "screenshotBase64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
+    },
+    {
+      "index": 1,
+      "timestamp": 1000,
+      "pageUrl": "https://example.test/setup",
+      "pageTitle": "Second",
+      "interaction": {
+        "type": "click",
+        "target": {
+          "selector": "#btn-1",
+          "tagName": "button",
+          "text": "Second",
+          "boundingRect": {"x": 300, "y": 400, "width": 200, "height": 60}
+        },
+        "hotspot": {"xPct": 50, "yPct": 50}
+      },
+      "annotation": "This is a very long annotation that rambles on and on. It keeps going far past the budget. Then it adds another full sentence here. And yet one more sentence after that one.",
+      "screenshotBase64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
+    }
+  ],
+  "aiAnnotations": {
+    "animationTimeline": [
+      {"stepIndex": 0, "action": "zoomTo", "target": "#btn-0", "duration": 800},
+      {"stepIndex": 1, "action": "hold", "duration": 8000}
+    ]
+  }
+}

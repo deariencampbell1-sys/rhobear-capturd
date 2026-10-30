@@ -1,0 +1,95 @@
+{
+  "version": 1,
+  "id": "audit-loop",
+  "name": "Audit Loop Demo",
+  "goal": "A spec whose middle step carries a choice that dead-ends at its own step",
+  "createdAt": "2026-10-30T00:00:00Z",
+  "viewport": {"width": 1024, "height": 768},
+  "startUrl": "https://example.test/",
+  "steps": [
+    {
+      "index": 0,
+      "timestamp": 0,
+      "pageUrl": "https://example.test/",
+      "pageTitle": "Intro",
+      "interaction": {
+        "type": "click",
+        "target": {
+          "selector": "#btn-0",
+          "tagName": "button",
+          "text": "Intro",
+          "boundingRect": {"x": 380, "y": 320, "width": 264, "height": 64}
+        },
+        "hotspot": {"xPct": 50, "yPct": 50}
+      },
+      "annotation": "Intro: welcome screen",
+      "screenshotBase64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
+    },
+    {
+      "index": 1,
+      "timestamp": 1000,
+      "pageUrl": "https://example.test/setup",
+      "pageTitle": "Setup",
+      "interaction": {
+        "type": "click",
+        "target": {
+          "selector": "#btn-1",
+          "tagName": "button",
+          "text": "Setup",
+          "boundingRect": {"x": 300, "y": 400, "width": 200, "height": 60}
+        },
+        "hotspot": {"xPct": 50, "yPct": 50}
+      },
+      "annotation": "Setup: configure the workspace",
+      "branchId": "loop-point",
+      "choices": [
+        {"id": "loop", "label": "Loop back here", "destination": 1}
+      ],
+      "screenshotBase64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
+    },
+    {
+      "index": 2,
+      "timestamp": 2000,
+      "pageUrl": "https://example.test/done",
+      "pageTitle": "Done",
+      "interaction": {
+        "type": "click",
+        "target": {
+          "selector": "#btn-2",
+          "tagName": "button",
+          "text": "Done",
+          "boundingRect": {"x": 500, "y": 200, "width": 180, "height": 48}
+        },
+        "hotspot": {"xPct": 50, "yPct": 50}
+      },
+      "annotation": "Done: the result",
+      "screenshotBase64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
+    },
+    {
+      "index": 3,
+      "timestamp": 3000,
+      "pageUrl": "https://example.test/next",
+      "pageTitle": "Next",
+      "interaction": {
+        "type": "click",
+        "target": {
+          "selector": "#btn-3",
+          "tagName": "button",
+          "text": "Next",
+          "boundingRect": {"x": 500, "y": 200, "width": 180, "height": 48}
+        },
+        "hotspot": {"xPct": 50, "yPct": 50}
+      },
+      "annotation": "Next: keep going",
+      "screenshotBase64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
+    }
+  ],
+  "aiAnnotations": {
+    "animationTimeline": [
+      {"stepIndex": 0, "action": "zoomTo", "target": "#btn-0", "duration": 800},
+      {"stepIndex": 1, "action": "zoomTo", "target": "#btn-1", "duration": 800},
+      {"stepIndex": 2, "action": "zoomTo", "target": "#btn-2", "duration": 800},
+      {"stepIndex": 3, "action": "zoomToFit", "duration": 800}
+    ]
+  }
+}

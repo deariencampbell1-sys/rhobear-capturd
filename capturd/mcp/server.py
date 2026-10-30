@@ -873,34 +873,45 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
             raise ValueError(str(exc))
         return {"ok": True, **result}
 
-    # ---- W4: demo.branch -------------------------------------------------
+    # ---- demo.branch — neutral viewer-choices mode (W2-05c) ----------------
 
     @mcp.tool(
         name="demo.branch",
         description=(
-            "Record an alternate path branching from atStep. altPath is a "
-            "list of DemoStep-shaped dicts representing the branched flow."
+            "Branch a demo from atStep. Two modes: (legacy) altPath records an alternate "
+            "DemoStep-shaped path for the editor; choices adds viewer-facing choice points — "
+            "each {id, label, destination} renders as a viewer button and jumps to the "
+            "destination (exactly the three neutral keys; extra fields are dropped). branchId "
+            "is the stable choice-point id hosts see on branch events. Pass exactly one of "
+            "altPath / choices."
         ),
         timeout=15.0,
     )
     async def demo_branch(
         demo_id: str,
         at_step: int,
-        alt_path: list[dict[str, Any]],
+        alt_path: list[dict[str, Any]] | None = None,
+        choices: list[dict[str, Any]] | None = None,
+        branch_id: str | None = None,
     ) -> dict[str, Any]:
         if not demo_id:
             raise ValueError("demoId is required")
         if not isinstance(at_step, int) or at_step < 0:
             raise ValueError("atStep must be a non-negative integer")
-        if not isinstance(alt_path, list):
-            raise ValueError("altPath must be a list")
+        if (alt_path is None) == (choices is None):
+            raise ValueError("pass exactly one of altPath or choices")
         try:
+            if choices is not None:
+                result = forge.add_choices(demo_id, at_step, choices, branch_id)
+                return {"ok": True, "mode": "viewer-choices", **result}
+            if not isinstance(alt_path, list):
+                raise ValueError("altPath must be a list")
             result = forge.add_branch(demo_id, at_step, alt_path)
         except DemoNotFound:
             raise ValueError(f"demo not found: {demo_id}")
         except DemoForgeError as exc:
-            raise ValueError(str(exc))
-        return {"ok": True, **result}
+            raise ValueError(str(exc)) from exc
+        return {"ok": True, "mode": "alt-path", **result}
 
     # ---- W4: demo.stylize ------------------------------------------------
 
@@ -962,6 +973,127 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
         except DemoForgeError as exc:
             raise ValueError(str(exc))
         return {"ok": True, **result}
+
+    # ---- W2-05c: neutral audit / optimize / revision adapters --------------
+
+    @mcp.tool(
+        name="demo.audit",
+        description=(
+            "Audit a demo: deterministic structural checks only (pacing, narration gaps, hotspot-"
+            "copy duplication, visual framing, mobile-safe crop, dead-end choice loops) with "
+            "severity-weighted category scores. Findings cite spec evidence; behavioral results "
+            "are never fabricated when no observed data exists. Suggestions only — nothing changes."
+        ),
+        timeout=30.0,
+    )
+    async def demo_audit(demo_id: str) -> dict[str, Any]:
+        from capturd.walk.audit import audit_spec
+        if not demo_id:
+            raise ValueError("demoId is required")
+        try:
+            spec = forge.load_spec(demo_id)
+        except DemoForgeError as exc:  # DemoNotFound message preserved
+            raise ValueError(str(exc)) from exc
+        return {"ok": True, **audit_spec(spec)}
+
+    @mcp.tool(
+        name="demo.optimize",
+        description=(
+            "Plan safe, reversible optimizations (caption whitespace cleanup, sentence-boundary "
+            "copy shortening, bounded HOLD trims). Dry-run by default: apply=False returns the "
+            "before/after plan and writes nothing. apply=True writes the optimized spec as a NEW "
+            "DRAFT in the demo's revision store — the live demo.json and every approved/published "
+            "revision stay byte-identical; the draft awaits review. Never deletes steps or branches "
+            "or replaces media; unsafe items surface as approval_required. Applying against an "
+            "approved revision is refused; a new draft is offered. apply refuses while a draft "
+            "already exists (pass overwrite=true to replace it; the existing bytes stay untouched)."
+        ),
+        timeout=30.0,
+    )
+    async def demo_optimize(
+        demo_id: str,
+        apply: bool = False,
+        revision_id: str | None = None,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        from capturd.walk.optimize import optimize_spec
+        from capturd.walk.revisions import RevisionError, RevisionStore
+
+        if not demo_id:
+            raise ValueError("demoId is required")
+        store = RevisionStore(forge.demo_dir(demo_id) / "revisions")
+        if revision_id is not None:
+            if apply and revision_id in (
+                    store.approved_revision_id(), store.published_revision_id()):
+                raise ValueError(
+                    f"revision {revision_id} is approved/published — optimize cannot apply "
+                    "against it; fork a new draft instead (restore it, then apply without revisionId)")
+            try:
+                spec = store.read(revision_id)  # hash-verified frozen bytes
+            except RevisionError as exc:
+                raise ValueError(str(exc)) from exc
+        else:
+            try:
+                spec = forge.load_spec(demo_id)
+            except DemoForgeError as exc:  # DemoNotFound message preserved
+                raise ValueError(str(exc)) from exc
+        try:
+            if apply and not overwrite and store.load_draft() is not None:
+                raise ValueError("a draft already exists for this demo — "
+                                 "pass overwrite=true to replace it")
+            out = optimize_spec(spec, apply=apply)
+            draft = store.save_draft(out["spec"]) if apply else None
+        except RevisionError as exc:
+            raise ValueError(str(exc)) from exc
+        return {"ok": True, "plan": out["plan"], "safeCount": out["safe_count"],
+                "applied": out["applied"], "draft": draft}
+
+    @mcp.tool(
+        name="demo.revision",
+        description=(
+            "Neutral immutable-revision surface for a demo (engine-local; no network, no publish, "
+            "no analytics): action='list' returns revisions newest-first with the approved/"
+            "published pointers; action='get' returns one revision's spec, re-hashed on every read; "
+            "action='save' freezes the current draft into a NEW immutable revision; action='approve' "
+            "points the local approved marker at a revision without rewriting bytes; action='restore' "
+            "copies old bytes into a fresh draft (history preserved)."
+        ),
+        timeout=15.0,
+    )
+    async def demo_revision(
+        demo_id: str,
+        action: str,
+        revision_id: str | None = None,
+    ) -> dict[str, Any]:
+        from capturd.walk.revisions import RevisionError, RevisionStore
+
+        if not demo_id:
+            raise ValueError("demoId is required")
+        if action not in ("list", "get", "save", "approve", "restore"):
+            raise ValueError(f"action must be one of list/get/save/approve/restore — got {action!r}")
+        store = RevisionStore(forge.demo_dir(demo_id) / "revisions")
+        try:
+            if action == "list":
+                return {"ok": True, "revisions": [
+                            {"id": r.id, "sha256": r.sha256, "seq": r.seq,
+                             "createdAt": r.created_at, "size": r.size}
+                            for r in store.list_revisions()],
+                        "approved": store.approved_revision_id(),
+                        "published": store.published_revision_id()}
+            if action == "save":
+                rec = store.save_revision()
+                return {"ok": True, "revision": {"id": rec.id, "sha256": rec.sha256,
+                                                 "seq": rec.seq}}
+            if not revision_id:
+                raise ValueError(f"action {action!r} requires revisionId")
+            if action == "get":
+                return {"ok": True, "revisionId": revision_id, "spec": store.read(revision_id)}
+            if action == "approve":
+                return {"ok": True, "approved": store.approve(revision_id)}
+            return {"ok": True, "restoredFrom": revision_id,
+                    **store.rollback_to(revision_id)}
+        except RevisionError as exc:
+            raise ValueError(str(exc)) from exc
 
     # ---- W4: capture.crawl -----------------------------------------------
 
