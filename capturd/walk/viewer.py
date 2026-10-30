@@ -28,7 +28,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from capturd.walk.schema import normalize_target
+from capturd.walk.schema import normalize_target, validate_choices
 
 
 _SCRIPT_BLOCK_RE = re.compile(
@@ -54,6 +54,21 @@ def propagate_target_metadata(spec: dict[str, Any]) -> dict[str, Any]:
         target = interaction.get("target") if isinstance(interaction, dict) else None
         if isinstance(target, dict):
             interaction["target"] = normalize_target(target, spec.get("viewport"))
+    return spec
+
+
+def validate_spec_choices(spec: dict[str, Any]) -> dict[str, Any]:
+    """Validate every step's choices before rendering (Branching V2).
+
+    Steps without ``choices`` (every old spec) pass through untouched. A
+    malformed choice list raises ``ValueError`` naming the offending field
+    instead of shipping a viewer whose buttons cannot work.
+    """
+    steps = spec.get("steps") or []
+    n = len(steps)
+    for idx, step in enumerate(steps):
+        if isinstance(step, dict) and step.get("choices") is not None:
+            validate_choices(step["choices"], n, step_index=idx)
     return spec
 
 
@@ -88,6 +103,7 @@ def render_viewer(
         raise ViewerRenderError(f"viewer template not found: {tpath}")
 
     spec = propagate_target_metadata(spec)
+    validate_spec_choices(spec)
 
     template = tpath.read_text(encoding="utf-8")
     if not _SCRIPT_BLOCK_RE.search(template):
@@ -118,6 +134,8 @@ def render_viewer_to_file(
 __all__ = [
     "ViewerRenderError",
     "default_template_path",
+    "propagate_target_metadata",
     "render_viewer",
     "render_viewer_to_file",
+    "validate_spec_choices",
 ]

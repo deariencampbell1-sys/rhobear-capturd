@@ -45,6 +45,7 @@ from capturd.walk.ai_pipeline import (
 )
 from capturd.walk.exporter import DemoExportError, DemoForgeError
 from capturd.walk.recorder import DemoManager, run_async
+from capturd.walk.schema import validate_choices
 
 logger = logging.getLogger(__name__)
 
@@ -457,6 +458,37 @@ class DemoForge:
         self.save_spec(demo_id, data)
         return {"atStep": at_step, "branchCount": len(branches)}
 
+    def add_choices(self, demo_id: str, at_step: int, choices: list[dict[str, Any]],
+                    branch_id: str | None = None) -> dict[str, Any]:
+        """Attach validated viewer-facing choice points to a step (Branching V2).
+
+        ``choices`` is validated + normalized by ``schema.validate_choices``:
+        stable id, human label, in-range destination, and no step whose
+        choices all point back at itself (a dead end with no exit).
+        ``branch_id`` is the stable choice-point id the host sees on branch
+        events. Demos without choices are untouched.
+        """
+        data = self.load_spec(demo_id)
+        steps = data.get("steps") or []
+        if at_step < 0 or at_step >= len(steps):
+            raise DemoForgeError(f"atStep {at_step} out of range (have {len(steps)} steps)")
+        try:
+            norm = validate_choices(choices, len(steps), step_index=at_step)
+        except ValueError as exc:
+            raise DemoForgeError(str(exc)) from exc
+        bid: str | None = None
+        if branch_id is not None:
+            bid = str(branch_id).strip()
+            if not bid or len(bid) > 64 or not all(c.isalnum() or c in "-_" for c in bid):
+                raise DemoForgeError(
+                    f"branchId invalid: {branch_id!r} (alnum, '-' and '_' only, max 64)")
+        steps[at_step]["choices"] = norm
+        if bid is not None:
+            steps[at_step]["branchId"] = bid
+        self.save_spec(demo_id, data)
+        return {"atStep": at_step, "branchId": steps[at_step].get("branchId"),
+                "choices": [c["id"] for c in norm]}
+
     # ------------------------------------------------------------------
     # Stylize (W4)
     # ------------------------------------------------------------------
@@ -587,9 +619,12 @@ class DemoForge:
         self._inline_screenshots(data, demo_id)
         # Carry the semantic target metadata into the embedded viewer so the
         # HTML export resolves the same camera as the recorder (W1-03-r1).
-        from capturd.walk.viewer import propagate_target_metadata
+        from capturd.walk.viewer import propagate_target_metadata, validate_spec_choices
 
         propagate_target_metadata(data)
+        # Refuse to ship a viewer with malformed choice points — the field
+        # is named instead (neutral Branching V2).
+        validate_spec_choices(data)
         if fmt in {"mp4", "gif"}:
             # A truthy screenshotPath is NOT proof of a source: after
             # _inline_screenshots, only screenshotBase64 (without a

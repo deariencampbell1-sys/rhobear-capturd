@@ -371,6 +371,57 @@ class DemoStep:
     voiceoverWords: list[dict] | None = None  # WordTimestamp[] as dicts
     cursorPath: list[dict] | None = None  # CursorPoint[] as dicts
 
+    # Branching V2 (neutral) — viewer-facing choice points. ``branchId`` is
+    # the stable id of the choice point; ``choices`` is what the VIEWER
+    # renders as buttons. Old specs carry neither, so they stay valid.
+    branchId: str | None = None           # stable choice-point id for host events
+    choices: list[dict] | None = None     # [{id, label, destination}]
+
+
+def validate_choices(choices: Any, step_count: int,
+                     step_index: int | None = None) -> list[dict]:
+    """Validate + normalize a viewer-facing choice list (Branching V2).
+
+    Each choice needs a stable ``id`` (the key host events reference), a
+    human ``label`` and an integer ``destination`` step index in range.
+    Exactly those three keys survive normalization — no personalization,
+    CTA/tracking or analytics-name fields are carried here. When
+    ``step_index`` (the step the choices attach to) is known, a set whose
+    every destination points back at that step is refused as a dead end.
+
+    Raises ``ValueError`` naming the offending field; callers turn that
+    into tool/render errors. Returns the normalized list (bounded lengths).
+    """
+    if not isinstance(choices, list) or not choices:
+        raise ValueError("choices: must be a non-empty list")
+    if len(choices) > 12:
+        raise ValueError("choices: too many choices (max 12 per step)")
+    out: list[dict] = []
+    seen_ids: set[str] = set()
+    for ch in choices:
+        if not isinstance(ch, dict):
+            raise ValueError("choices: each choice must be an object")
+        cid = str(ch.get("id") or "").strip()
+        if not cid or len(cid) > 64 or not all(c.isalnum() or c in "-_" for c in cid):
+            raise ValueError(f"choice id invalid: {cid!r} (alnum, '-' and '_' only)")
+        if cid in seen_ids:
+            raise ValueError(f"duplicate choice id: {cid}")
+        seen_ids.add(cid)
+        label = str(ch.get("label") or "").strip()
+        if not label or len(label) > 120:
+            raise ValueError(f"choice {cid}: label required (max 120 chars)")
+        dest = ch.get("destination")
+        if isinstance(dest, bool) or not isinstance(dest, int) \
+                or not (0 <= dest < step_count):
+            raise ValueError(
+                f"choice {cid}: destination must be a step index in [0,{step_count})")
+        out.append({"id": cid, "label": label, "destination": dest})
+    if step_index is not None and all(c["destination"] == step_index for c in out):
+        raise ValueError(
+            f"choice {out[0]['id']}: destination {step_index} points at its own "
+            "step with no other exit (field: destination)")
+    return out
+
 
 @dataclass
 class DemoSpec:
@@ -417,4 +468,6 @@ __all__ = [
     # Step + spec
     "DemoStep",
     "DemoSpec",
+    # Branching V2 (neutral)
+    "validate_choices",
 ]

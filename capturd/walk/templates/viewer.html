@@ -275,6 +275,40 @@
     #empty-state h1 { margin: 0; font-size: 18px; color: #e8eaed; font-weight: 600; }
     #empty-state p  { margin: 0; font-size: 13px; max-width: 480px; line-height: 1.5; }
     #empty-state code { background: rgba(255,255,255,0.08); padding: 2px 6px; border-radius: 4px; }
+
+    /* Branching V2 — viewer-facing choice points */
+    #choice-overlay {
+      display: none;
+      position: absolute; inset: 0; z-index: 40;
+      align-items: center; justify-content: center;
+      background: rgba(10, 11, 14, 0.62);
+      backdrop-filter: blur(2px);
+    }
+    #choice-overlay.visible { display: flex; }
+    #choice-panel {
+      display: flex; flex-direction: column; gap: 12px; align-items: stretch;
+      max-width: min(480px, 86vw); padding: 24px;
+      background: rgba(21, 23, 25, 0.92);
+      border: 1px solid rgba(255,255,255,0.12); border-radius: 14px;
+      box-shadow: 0 18px 60px rgba(0,0,0,0.55);
+    }
+    #choice-title { margin: 0 0 4px; font-size: 16px; font-weight: 600; color: #e8eaed; text-align: center; }
+    .choice-btn {
+      appearance: none; border: 1px solid rgba(255,255,255,0.16);
+      background: rgba(255,255,255,0.06); color: #e8eaed;
+      font: inherit; font-size: 14px; font-weight: 500;
+      padding: 12px 18px; border-radius: 10px; cursor: pointer;
+      text-align: center;
+      transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
+    }
+    .choice-btn:hover, .choice-btn:focus-visible {
+      background: rgba(242,194,48,0.16); border-color: #f2c230; outline: none;
+    }
+    .choice-btn:active { transform: scale(0.985); }
+    @media (prefers-reduced-motion: reduce) {
+      .choice-btn { transition: none; }
+      .choice-btn:active { transform: none; }
+    }
   </style>
 </head>
 <body>
@@ -300,6 +334,13 @@
       <div id="empty-state" role="alert">
         <h1>No demo loaded</h1>
         <p>Embed a DemoSpec JSON in <code>&lt;script id="demo-data"&gt;</code> or load this page with <code>?demo=demo.json</code>.</p>
+      </div>
+
+      <div id="choice-overlay" role="dialog" aria-modal="true" aria-label="Choose a path">
+        <div id="choice-panel">
+          <h2 id="choice-title"></h2>
+          <div id="choice-buttons"></div>
+        </div>
       </div>
     </div>
 
@@ -488,6 +529,107 @@
     const $empty          = document.getElementById('empty-state');
     const $panzoomLayer   = document.getElementById('panzoom-layer');
     const $spotlight      = document.getElementById('spotlight-overlay');
+
+    // ----------------------------------------------------------------
+    //  Viewer event contract — `capturd:event` (local, offline)
+    //
+    //  Normalized LOCAL events only: a CustomEvent on `window` plus the
+    //  bounded `window.__capturdEvents` ring buffer for hosts and tests.
+    //  Nothing here opens a socket or sends data anywhere — with nobody
+    //  listening the contract is a no-op and the self-contained viewer
+    //  stays fully functional offline. Every payload carries an
+    //  `eventId`; recording the same id twice is dropped (first
+    //  wins, the rest of the stream keeps its order).
+    // ----------------------------------------------------------------
+    const EVENT_VOCABULARY = [
+      'demo_open', 'demo_start',
+      'step_view', 'step_complete', 'step_replay',
+      'branch_view', 'branch_select',
+      'demo_complete', 'demo_exit',
+      'viewer_pause', 'viewer_resume',
+    ];
+
+    const TELEMETRY = {
+      sessionId: null,
+      t0: 0,
+      started: false,        // demo_start fired (first play)
+      opened: false,         // demo_open fired
+      completedFired: false, // demo_complete fires once per session
+      enteredSteps: {},      // stepIndex -> true (entered at least once)
+    };
+
+    function _deviceClass() {
+      try {
+        const coarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+        return (coarse || (window.innerWidth || 0) < 500) ? 'mobile' : 'desktop';
+      } catch (_) { return 'desktop'; }
+    }
+
+    // Append an already-built payload to the local ring buffer. A duplicate
+    // eventId is dropped — first occurrence wins, order is preserved.
+    function recordEvent(payload) {
+      if (!payload || typeof payload !== 'object') return null;
+      if (EVENT_VOCABULARY.indexOf(payload.event) === -1) return null;
+      if (typeof payload.eventId !== 'string' || !payload.eventId) return null;
+      if (STATE.exportMode) return null;  // deterministic export renderer owns the DOM
+      if (!Array.isArray(window.__capturdEvents)) window.__capturdEvents = [];
+      const buf = window.__capturdEvents;
+      for (let i = 0; i < buf.length; i++) {
+        if (buf[i] && buf[i].eventId === payload.eventId) return null;  // duplicate id
+      }
+      if (buf.length >= 500) buf.shift();
+      buf.push(payload);
+      return payload;
+    }
+
+    function emitEvent(name, extra) {
+      if (EVENT_VOCABULARY.indexOf(name) === -1) return null;  // vocabulary guard
+      if (STATE.exportMode) return null;  // deterministic export renderer owns the DOM
+      if (!TELEMETRY.sessionId) {
+        TELEMETRY.sessionId = (window.crypto && window.crypto.randomUUID)
+          ? window.crypto.randomUUID()
+          : 's-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+        TELEMETRY.t0 = Date.now();
+      }
+      const spec = STATE.spec || {};
+      const payload = {
+        event: name,
+        demoId: spec.id || null,
+        versionId: spec.version != null ? spec.version : 1,
+        sessionId: TELEMETRY.sessionId,
+        stepId: (extra && extra.stepIndex != null) ? ('step-' + extra.stepIndex) : null,
+        branchId: (extra && extra.branchId) || null,
+        elapsedMs: Date.now() - TELEMETRY.t0,
+        timestamp: new Date().toISOString(),
+        device: {
+          deviceClass: _deviceClass(),
+          viewportW: window.innerWidth || null,
+          viewportH: window.innerHeight || null,
+          reducedMotion: !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches),
+        },
+      };
+      if (extra && extra.choiceId != null) payload.choiceId = extra.choiceId;
+      payload.eventId = [TELEMETRY.sessionId, name, payload.stepId || '',
+                         payload.branchId || '', payload.choiceId || '',
+                         payload.timestamp].join('|');
+      if (!recordEvent(payload)) return null;  // duplicate id — dropped, not dispatched
+      try { window.dispatchEvent(new CustomEvent('capturd:event', { detail: payload })); } catch (_) {}
+      return payload;
+    }
+
+    function _markStepEntered(i) {
+      const wasEntered = !!TELEMETRY.enteredSteps[i];
+      TELEMETRY.enteredSteps[i] = true;
+      return wasEntered;
+    }
+
+    function _stepDeparted(i) {
+      if (TELEMETRY.enteredSteps[i]) emitEvent('step_complete', { stepIndex: i });
+    }
+
+    // Exit signal — a local event only; what a host does with it is the
+    // host's decision.
+    window.addEventListener('pagehide', function () { emitEvent('demo_exit'); });
 
     // ----------------------------------------------------------------
     //  Loading the DemoSpec
@@ -1230,6 +1372,47 @@
     }
 
     // ----------------------------------------------------------------
+    //  Branching V2 — viewer-facing choice points
+    // ----------------------------------------------------------------
+    const $choiceOverlay = document.getElementById('choice-overlay');
+    const $choiceTitle   = document.getElementById('choice-title');
+    const $choiceButtons = document.getElementById('choice-buttons');
+
+    function hideChoices() {
+      $choiceOverlay.classList.remove('visible');
+      $choiceButtons.innerHTML = '';
+    }
+
+    function showChoices(step) {
+      const choices = Array.isArray(step.choices) ? step.choices : [];
+      if (!choices.length) { hideChoices(); return; }
+      $choiceTitle.textContent = step.annotation || 'Choose a path';
+      $choiceButtons.innerHTML = '';
+      choices.forEach((ch) => {
+        const b = document.createElement('button');
+        b.className = 'choice-btn';
+        b.type = 'button';
+        b.textContent = ch.label || ch.id;
+        b.setAttribute('aria-label', ch.label || ch.id);
+        b.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          // Event contract: the viewer picked a path.
+          emitEvent('branch_select', {
+            stepIndex: STATE.index,
+            branchId: step.branchId || null,
+            choiceId: ch.id,
+          });
+          hideChoices();
+          goToStep(ch.destination, 1, true);
+        });
+        $choiceButtons.appendChild(b);
+      });
+      $choiceOverlay.classList.add('visible');
+      const first = $choiceButtons.querySelector('button');
+      if (first) { try { first.focus({ preventScroll: true }); } catch (_) {} }
+    }
+
+    // ----------------------------------------------------------------
     //  Step state machine
     // ----------------------------------------------------------------
     function clampIndex(i) {
@@ -1272,6 +1455,9 @@
       STATE.phase = 'transitioning';
       STATE.direction = direction;
 
+      // Event contract: actually leaving a previously-entered step = complete.
+      if (next !== STATE.index) _stepDeparted(STATE.index);
+
       const prevStep = STATE.spec.steps[STATE.index] || null;
       const newStep  = STATE.spec.steps[next] || null;
       if (!newStep) { STATE.phase = 'active'; return; }
@@ -1311,10 +1497,23 @@
           STATE.index = next;
           updateInfo(newStep);
           STATE.phase = 'active';
+          // Event contract: entering an already-entered step is a replay.
+          const replayed = _markStepEntered(next);
+          emitEvent(replayed ? 'step_replay' : 'step_view', { stepIndex: next });
+          const hasChoices = Array.isArray(newStep.choices) && newStep.choices.length > 0;
+          if (hasChoices) {
+            emitEvent('branch_view', { stepIndex: next, branchId: newStep.branchId || null });
+          }
           // Fire the animation timeline for this step
           playTimeline(next);
-          // Single auto-advance scheduler: paced by the step's real length.
-          if (STATE.isPlaying) scheduleAutoAdvance(stepDwellMs(next));
+          if (hasChoices) {
+            // A choice step waits for the viewer — no auto-advance.
+            showChoices(newStep);
+          } else {
+            hideChoices();
+            // Single auto-advance scheduler: paced by the step's real length.
+            if (STATE.isPlaying) scheduleAutoAdvance(stepDwellMs(next));
+          }
         }, TRANSITION_MS);
       }, TRANSITION_MS);
     }
@@ -1331,6 +1530,11 @@
         if (!STATE.isPlaying) return;
         const last = STATE.spec.steps.length - 1;
         if (STATE.index >= last) {
+          // Event contract: natural playback end = demo_complete (once).
+          if (!TELEMETRY.completedFired) {
+            TELEMETRY.completedFired = true;
+            emitEvent('demo_complete', { stepIndex: last });
+          }
           pause();
           return;
         }
@@ -1340,8 +1544,12 @@
 
     function play() {
       if (!STATE.spec || STATE.spec.steps.length === 0) return;
+      const wasPlaying = STATE.isPlaying;
       const last = STATE.spec.steps.length - 1;
       STATE.isPlaying = true;
+      // Event contract: first play starts the demo; later plays resume it.
+      if (!TELEMETRY.started) { TELEMETRY.started = true; emitEvent('demo_start'); }
+      else if (!wasPlaying) emitEvent('viewer_resume');
       $btnPlay.innerHTML = '&#10074;&#10074;&#xFE0E;';  // pause icon
       $btnPlay.setAttribute('aria-label', 'Pause');
       // Re-enter the current step (or restart from 0 at the end) so voiceover,
@@ -1351,6 +1559,8 @@
     }
 
     function pause() {
+      // Event contract: pausing an actually-playing demo.
+      if (STATE.isPlaying) emitEvent('viewer_pause');
       STATE.isPlaying = false;
       clearTimeout(STATE.autoPlayTimeout);
       stopVoiceover();
@@ -2100,6 +2310,15 @@
         // and manual navigation work from a fresh load.
         STATE.phase = 'active';
 
+        // Event contract: the demo opened; its first step is visible.
+        if (!TELEMETRY.opened) { TELEMETRY.opened = true; emitEvent('demo_open'); }
+        _markStepEntered(0);
+        emitEvent('step_view', { stepIndex: 0 });
+        if (Array.isArray(first.choices) && first.choices.length) {
+          emitEvent('branch_view', { stepIndex: 0, branchId: first.branchId || null });
+          showChoices(first);
+        }
+
         // Play timeline for step 0 on initial load
         playTimeline(0);
 
@@ -2112,7 +2331,8 @@
                                  spotlightOn, spotlightOff, stepDwellMs,
                                  resolveCamera: camResolve, camRegion,
                                  camLayerPoint,
-                                 camFrame: camFrameTarget };
+                                 camFrame: camFrameTarget,
+                                 emitEvent, recordEvent };
       } catch (err) {
         console.error('[demo-viewer]', err);
         $empty.classList.add('visible');
