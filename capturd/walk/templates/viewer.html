@@ -1392,17 +1392,21 @@
     }
 
     // ``?demo=`` specs never passed render-time validation — drop any
-    // choice list holding an unreachable destination before it can offer a
-    // dead pick that re-enters the choice step forever (render and export
-    // refuse such a spec outright; the runtime path keeps serving).
+    // choice that cannot be offered: a destination outside the demo (a
+    // dead pick that can never happen) or back at this very step (a pick
+    // that re-enters the choice step forever). Render and export refuse
+    // such a spec outright; the runtime path keeps serving, so a step
+    // whose choices are all undeliverable simply acts as a terminal one.
     function dropUnreachableChoices(spec) {
       const n = spec.steps.length;
-      spec.steps.forEach((st) => {
+      spec.steps.forEach((st, stepIndex) => {
         if (!st || !Array.isArray(st.choices)) return;
-        const reachable = st.choices.length > 0 && st.choices.every(
+        const live = st.choices.filter(
           (c) => c && Number.isInteger(c.destination)
-                     && c.destination >= 0 && c.destination < n);
-        if (!reachable) delete st.choices;
+                     && c.destination >= 0 && c.destination < n
+                     && c.destination !== stepIndex);
+        if (live.length) st.choices = live;
+        else delete st.choices;
       });
     }
 
@@ -1482,12 +1486,14 @@
       STATE.phase = 'transitioning';
       STATE.direction = direction;
 
-      // Event contract: actually leaving a previously-entered step = complete.
-      if (next !== STATE.index) _stepDeparted(STATE.index);
-
       const prevStep = STATE.spec.steps[STATE.index] || null;
       const newStep  = STATE.spec.steps[next] || null;
+      // A move that never happens must not complete the step it leaves —
+      // bail before the departure event when the destination doesn't exist.
       if (!newStep) { STATE.phase = 'active'; return; }
+
+      // Event contract: actually leaving a previously-entered step = complete.
+      if (next !== STATE.index) _stepDeparted(STATE.index);
 
       // Resolve the FROM and TO pixel positions in viewport coordinates.
       const fromXY = STATE.cursorStart || positionHotspot(prevStep) || { x: 0, y: 0 };

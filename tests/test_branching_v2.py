@@ -675,7 +675,7 @@ def test_self_loop_choice_is_dropped_at_runtime(tmp_path: Path):
     one (edge case 3)."""
     from capturd.walk.viewer import default_template_path
 
-    spec = json.loads(json.dumps(_fixture("spec_choices.json")))
+    spec = json.loads(json.dumps(_fixture("spec_plain.json")))
     last = len(spec["steps"]) - 1
     spec["steps"][last]["choices"] = [
         {"id": "loop_a", "label": "Loop A", "destination": last},

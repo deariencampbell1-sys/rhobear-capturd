@@ -621,6 +621,7 @@ class DemoForge:
         # HTML export resolves the same camera as the recorder (W1-03-r1).
         from capturd.walk.viewer import (
             ViewerRenderError,
+            embed_json,
             propagate_target_metadata,
             validate_spec_choices,
         )
@@ -652,7 +653,7 @@ class DemoForge:
         template = self.viewer_template.read_text(encoding="utf-8")
         if not _SCRIPT_BLOCK_RE.search(template):
             raise DemoForgeError("viewer template missing <script id=\"demo-data\"> block")
-        spec_json = json.dumps(data, indent=2)
+        spec_json = embed_json(data)
         new_block = f'<script id="demo-data" type="application/json">\n{spec_json}\n  </script>'
         # IMPORTANT: pass the replacement through a lambda so ``re.sub`` does
         # NOT interpret backslash escapes (``\1``, ``\g<name>``, etc.) inside

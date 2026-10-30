@@ -45,6 +45,16 @@ class ViewerRenderError(RuntimeError):
     """Raised when the template is missing or malformed."""
 
 
+def embed_json(obj: Any) -> str:
+    """Serialize *obj* for safe embedding in the ``#demo-data`` block.
+
+    Every ``<`` becomes ``\\u003c`` so no free-text field (a choice label,
+    a step annotation) can end the ``<script>`` block early or inject a
+    live tag — ``</script>``, ``<script>`` and ``<!--`` all lose their HTML
+    meaning, while ``json.loads`` still returns the identical data. Both
+    sinks (``render_viewer`` and ``DemoForge.export_demo``) share it.
+    """
+    return json.dumps(obj, indent=2).replace("<", "\\u003c")
 def propagate_target_metadata(spec: dict[str, Any]) -> dict[str, Any]:
     """Normalize every step's ``interaction.target`` for the semantic camera.
 
@@ -125,7 +135,7 @@ def render_viewer(
             'viewer template missing <script id="demo-data"> placeholder block'
         )
 
-    spec_json = json.dumps(spec, indent=2)
+    spec_json = embed_json(spec)
     new_block = (
         f'<script id="demo-data" type="application/json">\n{spec_json}\n  </script>'
     )
@@ -148,6 +158,7 @@ def render_viewer_to_file(
 __all__ = [
     "ViewerRenderError",
     "default_template_path",
+    "embed_json",
     "propagate_target_metadata",
     "render_viewer",
     "render_viewer_to_file",
