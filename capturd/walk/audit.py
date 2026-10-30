@@ -38,14 +38,28 @@ def _timeline(spec: dict) -> list:
     return tl if isinstance(tl, list) else []
 
 
-def _step_dwell_ms(spec: dict, i: int) -> int:
+def _words_dwell_ms(words: Any) -> tuple[Optional[int], Optional[str]]:
+    """Guarded ``voiceoverWords`` branch: ``(voice_ms, None)`` when absent, empty
+    or well-formed; ``(None, reason)`` when malformed — reported as a finding,
+    never raised. Dwell = the last word's ``tEndMs`` + the 500ms tail."""
+    if words is None or words == []:
+        return None, None
+    if not isinstance(words, list):
+        return None, f"not a list of word dicts ({type(words).__name__})"
+    for w in words:
+        t = w.get("tEndMs") if isinstance(w, dict) else None
+        if not isinstance(t, int) or isinstance(t, bool) or t < 0:
+            return None, f"word without a non-negative integer tEndMs: {w!r}"
+    return int(words[-1]["tEndMs"]) + 500, None
+
+
+def _step_dwell_ms(spec: dict, i: int, words_ms: Optional[int]) -> int:
     """Server-side mirror of the viewer's step-dwell floor logic."""
     step = (spec.get("steps") or [])[i]
     timeline_ms = sum((d or 500) for kf in _timeline(spec)
                       if kf.get("stepIndex") == i
                       for d in (_int_ms(kf),) if d is not None)
-    words = step.get("voiceoverWords")
-    voice_ms = (int(words[-1].get("tEndMs") or 0) + 500 if words else
+    voice_ms = (words_ms if words_ms is not None else
                 3000 if (step.get("voiceoverBase64") or step.get("voiceoverPath")) else 0)
     return max(_DWELL_FLOOR_MS, timeline_ms + 300, voice_ms + 350)
 
@@ -87,7 +101,13 @@ def audit_spec(spec: dict) -> dict:
         findings.append(_finding("pacing", "warn",
             f"Only {n} steps — demos under 3 steps rarely carry a narrative", steps=n))
     for i, step in enumerate(steps):
-        dwell = _step_dwell_ms(spec, i)
+        words_ms, bad_words = _words_dwell_ms(step.get("voiceoverWords"))
+        if bad_words:
+            findings.append(_finding("narration", "warn",
+                f"Step {i + 1} has malformed voiceoverWords ({bad_words}) — the viewer "
+                "cannot schedule narration from it; fix the word timings",
+                step_id=f"step-{i}"))
+        dwell = _step_dwell_ms(spec, i, words_ms)
         if dwell > _MAX_STEP_DWELL_MS:
             findings.append(_finding("pacing", "warn",
                 f"Step {i + 1} holds for {dwell / 1000:.1f}s — long static holds lose attention",

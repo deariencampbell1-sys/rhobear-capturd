@@ -93,7 +93,8 @@ def optimize_spec(spec: dict, *, apply: bool = False,
             target = max(raw_target, _HOLD_FLOOR_MS)
             if target >= kf["duration"]:
                 continue  # nothing safe to trim
-            plan.append({"step_id": f"step-{kf.get('stepIndex')}",
+            idx = kf.get("stepIndex")
+            plan.append({"step_id": f"step-{idx}" if isinstance(idx, int) else "unknown",
                          "action": "pause_trim", "before": kf["duration"],
                          "after": target, "safe": True,
                          "clamped": raw_target < _HOLD_FLOOR_MS})

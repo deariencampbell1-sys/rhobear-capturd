@@ -1031,16 +1031,20 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
             try:
                 spec = store.read(revision_id)  # hash-verified frozen bytes
             except RevisionError as exc:
-                raise ValueError(str(exc))
+                raise ValueError(str(exc)) from exc
         else:
             try:
                 spec = forge.load_spec(demo_id)
             except DemoForgeError as exc:  # DemoNotFound message preserved
                 raise ValueError(str(exc)) from exc
-        if apply and not overwrite and store.load_draft() is not None:
-            raise ValueError("a draft already exists for this demo — pass overwrite=true to replace it")
-        out = optimize_spec(spec, apply=apply)
-        draft = store.save_draft(out["spec"]) if apply else None
+        try:
+            if apply and not overwrite and store.load_draft() is not None:
+                raise ValueError("a draft already exists for this demo — "
+                                 "pass overwrite=true to replace it")
+            out = optimize_spec(spec, apply=apply)
+            draft = store.save_draft(out["spec"]) if apply else None
+        except RevisionError as exc:
+            raise ValueError(str(exc)) from exc
         return {"ok": True, "plan": out["plan"], "safeCount": out["safe_count"],
                 "applied": out["applied"], "draft": draft}
 
@@ -1089,7 +1093,7 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
             return {"ok": True, "restoredFrom": revision_id,
                     **store.rollback_to(revision_id)}
         except RevisionError as exc:
-            raise ValueError(str(exc))
+            raise ValueError(str(exc)) from exc
 
     # ---- W4: capture.crawl -----------------------------------------------
 
