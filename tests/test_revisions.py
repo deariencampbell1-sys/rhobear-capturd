@@ -371,7 +371,7 @@ def test_corrupt_draft_is_reported_not_silently_used(
     store: RevisionStore, spec_v1: dict
 ) -> None:
     store.save_draft(spec_v1)
-    (store.root / "draft.json").write_bytes(b"{not json", encoding="utf-8")
+    (store.root / "draft.json").write_bytes(b"{not json")
     with pytest.raises(RevisionCorrupt):
         store.load_draft()
 
