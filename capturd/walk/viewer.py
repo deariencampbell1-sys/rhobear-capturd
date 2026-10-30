@@ -19,6 +19,10 @@ Design notes:
 This module is the authoritative renderer. ``DemoForge.export_demo`` has its
 own copy of the substitution for now (see coordinator.py); W1/W2 workers may
 consolidate on this function.
+
+Refusals on this path (missing template, malformed choices) are always
+``ViewerRenderError``; the export boundary re-types them as
+``DemoExportError`` (see coordinator.py).
 """
 
 from __future__ import annotations
@@ -28,7 +32,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from capturd.walk.schema import normalize_target
+from capturd.walk.schema import normalize_target, validate_choices
 
 
 _SCRIPT_BLOCK_RE = re.compile(
@@ -41,6 +45,16 @@ class ViewerRenderError(RuntimeError):
     """Raised when the template is missing or malformed."""
 
 
+def embed_json(obj: Any) -> str:
+    """Serialize *obj* for safe embedding in the ``#demo-data`` block.
+
+    Every ``<`` becomes ``\\u003c`` so no free-text field (a choice label,
+    a step annotation) can end the ``<script>`` block early or inject a
+    live tag — ``</script>``, ``<script>`` and ``<!--`` all lose their HTML
+    meaning, while ``json.loads`` still returns the identical data. Both
+    sinks (``render_viewer`` and ``DemoForge.export_demo``) share it.
+    """
+    return json.dumps(obj, indent=2).replace("<", "\\u003c")
 def propagate_target_metadata(spec: dict[str, Any]) -> dict[str, Any]:
     """Normalize every step's ``interaction.target`` for the semantic camera.
 
@@ -54,6 +68,31 @@ def propagate_target_metadata(spec: dict[str, Any]) -> dict[str, Any]:
         target = interaction.get("target") if isinstance(interaction, dict) else None
         if isinstance(target, dict):
             interaction["target"] = normalize_target(target, spec.get("viewport"))
+    return spec
+
+
+def validate_spec_choices(spec: dict[str, Any]) -> dict[str, Any]:
+    """Validate and normalize every step's choices before rendering
+    (Branching V2).
+
+    Steps without ``choices`` (every old spec) pass through untouched. A
+    malformed choice list — including an empty one — raises
+    ``ViewerRenderError`` carrying ``schema.validate_choices``' message
+    naming the offending field, instead of shipping a viewer whose buttons
+    cannot work. The normalized list (exactly ``id`` / ``label`` /
+    ``destination``) is written back into the step, so any key
+    ``validate_choices`` strips (CTA / tracking / analytics-shaped fields)
+    never reaches the embedded ``#demo-data`` payload of a render or an
+    export. The spec is modified in place and returned.
+    """
+    steps = spec.get("steps") or []
+    n = len(steps)
+    for idx, step in enumerate(steps):
+        if isinstance(step, dict) and step.get("choices") is not None:
+            try:
+                step["choices"] = validate_choices(step["choices"], n, step_index=idx)
+            except ValueError as exc:
+                raise ViewerRenderError(str(exc)) from exc
     return spec
 
 
@@ -88,6 +127,7 @@ def render_viewer(
         raise ViewerRenderError(f"viewer template not found: {tpath}")
 
     spec = propagate_target_metadata(spec)
+    validate_spec_choices(spec)
 
     template = tpath.read_text(encoding="utf-8")
     if not _SCRIPT_BLOCK_RE.search(template):
@@ -95,7 +135,7 @@ def render_viewer(
             'viewer template missing <script id="demo-data"> placeholder block'
         )
 
-    spec_json = json.dumps(spec, indent=2)
+    spec_json = embed_json(spec)
     new_block = (
         f'<script id="demo-data" type="application/json">\n{spec_json}\n  </script>'
     )
@@ -118,6 +158,9 @@ def render_viewer_to_file(
 __all__ = [
     "ViewerRenderError",
     "default_template_path",
+    "embed_json",
+    "propagate_target_metadata",
     "render_viewer",
     "render_viewer_to_file",
+    "validate_spec_choices",
 ]

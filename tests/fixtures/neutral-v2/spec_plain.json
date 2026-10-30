@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "id": "neutral-plain",
+  "name": "Neutral Plain Demo",
+  "goal": "An old-style three-step spec with no choice points",
+  "createdAt": "2026-10-30T00:00:00Z",
+  "viewport": {"width": 1024, "height": 768},
+  "startUrl": "https://example.test/",
+  "steps": [
+    {
+      "index": 0,
+      "timestamp": 0,
+      "pageUrl": "https://example.test/",
+      "pageTitle": "First",
+      "interaction": {
+        "type": "click",
+        "target": {
+          "selector": "#btn-0",
+          "tagName": "button",
+          "text": "First",
+          "boundingRect": {"x": 380, "y": 320, "width": 264, "height": 64}
+        },
+        "hotspot": {"xPct": 50, "yPct": 50}
+      },
+      "annotation": "Step one: open the app",
+      "screenshotBase64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
+    },
+    {
+      "index": 1,
+      "timestamp": 1000,
+      "pageUrl": "https://example.test/setup",
+      "pageTitle": "Second",
+      "interaction": {
+        "type": "click",
+        "target": {
+          "selector": "#btn-1",
+          "tagName": "button",
+          "text": "Second",
+          "boundingRect": {"x": 300, "y": 400, "width": 200, "height": 60}
+        },
+        "hotspot": {"xPct": 50, "yPct": 50}
+      },
+      "annotation": "Step two: fill the form",
+      "screenshotBase64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
+    },
+    {
+      "index": 2,
+      "timestamp": 2000,
+      "pageUrl": "https://example.test/done",
+      "pageTitle": "Third",
+      "interaction": {
+        "type": "click",
+        "target": {
+          "selector": "#btn-2",
+          "tagName": "button",
+          "text": "Third",
+          "boundingRect": {"x": 500, "y": 200, "width": 180, "height": 48}
+        },
+        "hotspot": {"xPct": 50, "yPct": 50}
+      },
+      "annotation": "Step three: see the result",
+      "screenshotBase64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
+    }
+  ]
+}
