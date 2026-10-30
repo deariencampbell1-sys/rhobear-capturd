@@ -619,12 +619,21 @@ class DemoForge:
         self._inline_screenshots(data, demo_id)
         # Carry the semantic target metadata into the embedded viewer so the
         # HTML export resolves the same camera as the recorder (W1-03-r1).
-        from capturd.walk.viewer import propagate_target_metadata, validate_spec_choices
+        from capturd.walk.viewer import (
+            ViewerRenderError,
+            propagate_target_metadata,
+            validate_spec_choices,
+        )
 
         propagate_target_metadata(data)
         # Refuse to ship a viewer with malformed choice points — the field
-        # is named instead (neutral Branching V2).
-        validate_spec_choices(data)
+        # is named instead (neutral Branching V2). The viewer's refusal is
+        # re-typed at this boundary as DemoExportError, the error every
+        # other export refusal raises.
+        try:
+            validate_spec_choices(data)
+        except ViewerRenderError as exc:
+            raise DemoExportError(str(exc)) from exc
         if fmt in {"mp4", "gif"}:
             # A truthy screenshotPath is NOT proof of a source: after
             # _inline_screenshots, only screenshotBase64 (without a
@@ -657,7 +666,10 @@ class DemoForge:
         if fmt == "html":
             return html_path
 
-        from capturd.walk.exporter import DemoExportError, export_video
+        # DemoExportError itself comes from the module-level import — a
+        # second local binding here would shadow it for the whole function
+        # (the refusal above raises it too).
+        from capturd.walk.exporter import export_video
 
         out_path = self.demo_dir(demo_id) / f"walkthrough.{fmt}"
         try:

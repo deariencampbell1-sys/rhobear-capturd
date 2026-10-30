@@ -628,8 +628,16 @@
     }
 
     // Exit signal — a local event only; what a host does with it is the
-    // host's decision.
-    window.addEventListener('pagehide', function () { emitEvent('demo_exit'); });
+    // host's decision. One demo_exit per page show: a second pagehide
+    // without an intervening pageshow (bfcache double fire) never records
+    // twice, and the page show arms the next hide.
+    let exitArmed = true;
+    window.addEventListener('pagehide', function () {
+      if (!exitArmed) return;
+      exitArmed = false;
+      emitEvent('demo_exit');
+    });
+    window.addEventListener('pageshow', function () { exitArmed = true; });
 
     // ----------------------------------------------------------------
     //  Loading the DemoSpec
@@ -1383,6 +1391,21 @@
       $choiceButtons.innerHTML = '';
     }
 
+    // ``?demo=`` specs never passed render-time validation — drop any
+    // choice list holding an unreachable destination before it can offer a
+    // dead pick that re-enters the choice step forever (render and export
+    // refuse such a spec outright; the runtime path keeps serving).
+    function dropUnreachableChoices(spec) {
+      const n = spec.steps.length;
+      spec.steps.forEach((st) => {
+        if (!st || !Array.isArray(st.choices)) return;
+        const reachable = st.choices.length > 0 && st.choices.every(
+          (c) => c && Number.isInteger(c.destination)
+                     && c.destination >= 0 && c.destination < n);
+        if (!reachable) delete st.choices;
+      });
+    }
+
     function showChoices(step) {
       const choices = Array.isArray(step.choices) ? step.choices : [];
       if (!choices.length) { hideChoices(); return; }
@@ -1396,6 +1419,10 @@
         b.setAttribute('aria-label', ch.label || ch.id);
         b.addEventListener('click', (ev) => {
           ev.stopPropagation();
+          // Re-entrancy guard: a pick landing while goToStep is
+          // mid-transition would be recorded while goToStep refuses it —
+          // an ignored pick must never reach the event stream.
+          if (STATE.phase !== 'active') return;
           // Event contract: the viewer picked a path.
           emitEvent('branch_select', {
             stepIndex: STATE.index,
@@ -2273,6 +2300,7 @@
         if (!spec || !Array.isArray(spec.steps)) {
           throw new Error('DemoSpec is missing a `steps` array.');
         }
+        dropUnreachableChoices(spec);
         STATE.spec = spec;
 
         if (spec.steps.length === 0) {

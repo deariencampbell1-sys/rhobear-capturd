@@ -19,6 +19,10 @@ Design notes:
 This module is the authoritative renderer. ``DemoForge.export_demo`` has its
 own copy of the substitution for now (see coordinator.py); W1/W2 workers may
 consolidate on this function.
+
+Refusals on this path (missing template, malformed choices) are always
+``ViewerRenderError``; the export boundary re-types them as
+``DemoExportError`` (see coordinator.py).
 """
 
 from __future__ import annotations
@@ -58,17 +62,27 @@ def propagate_target_metadata(spec: dict[str, Any]) -> dict[str, Any]:
 
 
 def validate_spec_choices(spec: dict[str, Any]) -> dict[str, Any]:
-    """Validate every step's choices before rendering (Branching V2).
+    """Validate and normalize every step's choices before rendering
+    (Branching V2).
 
     Steps without ``choices`` (every old spec) pass through untouched. A
-    malformed choice list raises ``ValueError`` naming the offending field
-    instead of shipping a viewer whose buttons cannot work.
+    malformed choice list — including an empty one — raises
+    ``ViewerRenderError`` carrying ``schema.validate_choices``' message
+    naming the offending field, instead of shipping a viewer whose buttons
+    cannot work. The normalized list (exactly ``id`` / ``label`` /
+    ``destination``) is written back into the step, so any key
+    ``validate_choices`` strips (CTA / tracking / analytics-shaped fields)
+    never reaches the embedded ``#demo-data`` payload of a render or an
+    export. The spec is modified in place and returned.
     """
     steps = spec.get("steps") or []
     n = len(steps)
     for idx, step in enumerate(steps):
         if isinstance(step, dict) and step.get("choices") is not None:
-            validate_choices(step["choices"], n, step_index=idx)
+            try:
+                step["choices"] = validate_choices(step["choices"], n, step_index=idx)
+            except ValueError as exc:
+                raise ViewerRenderError(str(exc)) from exc
     return spec
 
 
