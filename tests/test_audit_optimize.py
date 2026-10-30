@@ -422,6 +422,131 @@ def test_mcp_revision_lifecycle(server, forge, store_for):
 
 
 # ---------------------------------------------------------------------------
+# W2-05c-r2 — safe means safe: captions, shorten, draft overwrite, audit input
+# ---------------------------------------------------------------------------
+
+
+def _one_step_spec(annotation) -> dict:
+    return {"version": 1, "id": "x", "steps": [{"annotation": annotation}]}
+
+
+def test_optimize_r2_interior_quotes_punctuation_newlines_untouched():
+    """The quote rule anchors to the caption's END: interior quotes are never
+    eaten, repeated punctuation is never rewritten, newlines are kept."""
+    for text in ('He said "hello" to me', "the 'quoted' word",
+                 "Wait...", "Yes!!! Really", "line one\n\nline two"):
+        out = optimize_spec(_one_step_spec(text))
+        assert out["plan"] == [], f"dry run must propose nothing for {text!r}"
+        applied = optimize_spec(_one_step_spec(text), apply=True)["spec"]
+        assert applied["steps"][0]["annotation"] == text, \
+            f"apply rewrote the caption {text!r}"
+
+
+def test_optimize_r2_cleans_doubled_spaces_and_trailing_quote_only():
+    """The safe cleanup is ends-trim, space/tab runs, and the trailing-quote
+    rule — nothing else. Edge case 4: with an interior quote plus a trailing
+    one, only the trailing rule applies."""
+    text = "Double  spaces   here "
+    out = optimize_spec(_one_step_spec(text))
+    entry = next(p for p in out["plan"] if p["action"] == "caption_cleanup")
+    assert entry["safe"] is True and entry["before"] == text
+    assert entry["after"] == "Double spaces here"
+    mixed = 'He said "hello"  "'
+    applied = optimize_spec(_one_step_spec(mixed), apply=True)["spec"]
+    assert applied["steps"][0]["annotation"] == 'He said "hello'
+
+
+def test_optimize_r2_shorten_never_cuts_unspaced_text():
+    """No space in the budget window ⇒ no safe cut ⇒ text unchanged and no
+    change proposed."""
+    text = "x" * 200
+    out = optimize_spec(_one_step_spec(text))
+    assert out["plan"] == []
+    applied = optimize_spec(_one_step_spec(text), apply=True)["spec"]
+    assert applied["steps"][0]["annotation"] == text
+
+
+def test_optimize_r2_caption_of_only_quotes_is_not_emptied():
+    """Edge case 1: a caption that is only quotes is left as written."""
+    out = optimize_spec(_one_step_spec('"'), apply=True)
+    assert out["plan"] == []
+    assert out["spec"]["steps"][0]["annotation"] == '"'
+
+
+def test_mcp_optimize_apply_refuses_to_clobber_existing_draft(server, forge, store_for):
+    """Fix r2: apply=True refuses with a named error while a draft exists,
+    unless overwrite=True; the existing draft bytes stay as they were."""
+    spec = _fixture("spec_optimize_messy.json")
+    forge.save_spec("demo-d", spec)
+    first = _call(server, "demo.optimize", demo_id="demo-d", apply=True)
+    assert first["applied"] is True, "first apply with no draft still saves"
+    store = store_for("demo-d")
+    draft_path = store.root / "draft.json"
+    saved = draft_path.read_bytes()
+    refused = _call_error(server, "demo.optimize", demo_id="demo-d", apply=True)
+    assert "already exists" in refused and "overwrite" in refused
+    assert draft_path.read_bytes() == saved, "refusal must leave draft bytes intact"
+    spec2 = copy.deepcopy(spec)
+    spec2["steps"][0]["annotation"] = "Different   text  "
+    forge.save_spec("demo-d", spec2)
+    second = _call(server, "demo.optimize", demo_id="demo-d",
+                   apply=True, overwrite=True)
+    assert second["applied"] is True and second["draft"]["sha256"]
+    assert store.load_draft()["steps"][0]["annotation"] == "Different text"
+
+
+def test_audit_r2_malformed_duration_is_a_finding_never_a_crash():
+    """A non-integer duration is reported as a finding and the audit finishes;
+    a hold with no stepIndex is reported under the step id 'unknown', never
+    'step-None'; null / negative / float durations never raise."""
+    spec = _fixture("spec_audit_clean.json")
+    tl = spec["aiAnnotations"]["animationTimeline"]
+    tl.append({"action": "hold", "stepIndex": 0, "duration": "800ms"})
+    hit = [f for f in audit_spec(spec)["findings"] if f.get("duration") == "800ms"]
+    assert hit and hit[0]["category"] == "pacing" and hit[0]["step_id"] == "step-0"
+    spec["aiAnnotations"]["animationTimeline"] = tl + [
+        {"action": "hold", "duration": "800ms"}]
+    findings = audit_spec(spec)["findings"]
+    unknown = [f for f in findings if f.get("step_id") == "unknown"]
+    assert unknown and all(f["category"] == "pacing" for f in unknown)
+    assert not any(f.get("step_id") == "step-None" for f in findings)
+    for bad in (None, -800, 800.5):
+        spec["aiAnnotations"]["animationTimeline"] = [
+            {"action": "hold", "stepIndex": 0, "duration": bad}]
+        audit_spec(spec)  # must not raise
+
+
+def test_mcp_branch_branch_id_reaches_choice_point_bad_id_refused(server, forge):
+    """A supplied branchId is stored on the choice point; a bad id is a named
+    ValueError that writes nothing."""
+    forge.save_spec("demo-b", _fixture("spec_audit_clean.json"))
+    res = _call(server, "demo.branch", demo_id="demo-b", at_step=1,
+                choices=[{"id": "a", "label": "A", "destination": 2}],
+                branch_id="host_path_1")
+    assert res["ok"] is True and res["branchId"] == "host_path_1"
+    stored = forge.load_spec("demo-b")["steps"][1]
+    assert stored["branchId"] == "host_path_1"
+    assert stored["choices"] == [{"id": "a", "label": "A", "destination": 2}]
+    before = (forge.demo_dir("demo-b") / "demo.json").read_bytes()
+    bad = _call_error(server, "demo.branch", demo_id="demo-b", at_step=1,
+                      choices=[{"id": "a", "label": "A", "destination": 2}],
+                      branch_id="not valid!")
+    assert "branchId" in bad and "invalid" in bad
+    assert (forge.demo_dir("demo-b") / "demo.json").read_bytes() == before, \
+        "a refused branchId must not write"
+
+
+def test_mcp_branch_alt_path_mode_adds_branch(server, forge):
+    forge.save_spec("demo-p", _fixture("spec_audit_clean.json"))
+    res = _call(server, "demo.branch", demo_id="demo-p", at_step=0,
+                alt_path=[{"index": 9, "annotation": "alt path step"}])
+    assert res["ok"] is True and res["mode"] == "alt-path"
+    assert res["branchCount"] == 1
+    stored = forge.load_spec("demo-p")["steps"][0]["branches"]
+    assert stored and stored[-1] == [{"index": 9, "annotation": "alt path step"}]
+
+
+# ---------------------------------------------------------------------------
 # Source scan — no excluded layer was introduced
 # ---------------------------------------------------------------------------
 
