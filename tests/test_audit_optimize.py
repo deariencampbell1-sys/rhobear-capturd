@@ -38,7 +38,7 @@ from fastmcp.exceptions import ToolError
 
 from capturd.walk.audit import audit_spec
 from capturd.walk.optimize import optimize_spec
-from capturd.walk.revisions import RevisionStore, hash_spec
+from capturd.walk.revisions import RevisionError, RevisionStore, hash_spec
 
 FIXTURES = Path(__file__).parent / "fixtures" / "neutral-v2" / "audit"
 PRODUCT = Path(__file__).resolve().parents[1]
@@ -546,6 +546,96 @@ def test_mcp_branch_alt_path_mode_adds_branch(server, forge):
     assert res["branchCount"] == 1
     stored = forge.load_spec("demo-p")["steps"][0]["branches"]
     assert stored and stored[-1] == [{"index": 9, "annotation": "alt path step"}]
+
+
+# ---------------------------------------------------------------------------
+# W2-05c-r3 — audit never crashes on voiceoverWords; optimize/store errors named
+# ---------------------------------------------------------------------------
+
+
+def _words_spec(words) -> dict:
+    return {"version": 1, "id": "x",
+            "steps": [{"annotation": "Step", "voiceoverWords": words}]}
+
+
+def test_audit_r3_malformed_voiceover_words_is_a_finding_never_a_crash():
+    """Fix r3: the voiceoverWords dwell branch is guarded — a value that is not
+    a list of dicts with a non-negative integer tEndMs is exactly one finding
+    and the audit finishes; nothing raises."""
+    for bad in ([{"tEndMs": "1.2s"}], ["text"], {"a": 1}):
+        a = audit_spec(_words_spec(bad))
+        hits = [f for f in a["findings"] if f["category"] == "narration"
+                and f.get("step_id") == "step-0" and "voiceoverWords" in f["message"]]
+        assert len(hits) == 1, f"malformed words {bad!r} must yield one finding"
+        assert hits[0]["severity"] == "warn"
+    # edge cases: an empty list is fine; null and negative tEndMs are findings;
+    # a valid last word never excuses malformed earlier ones
+    empty = audit_spec(_words_spec([]))
+    assert not any("voiceoverWords" in f["message"] for f in empty["findings"])
+    for bad in ([{"tEndMs": None}], [{"tEndMs": -5}]):
+        a = audit_spec(_words_spec(bad))
+        assert any("voiceoverWords" in f["message"] for f in a["findings"])
+    late = audit_spec(_words_spec([{"x": 1}, {"tEndMs": 100}]))
+    assert any("voiceoverWords" in f["message"] for f in late["findings"])
+
+
+def test_audit_r3_valid_words_and_base64_only_dwell_unchanged():
+    """Valid words still drive dwell from the last tEndMs (+500ms tail); a
+    voiceoverBase64-only step dwells exactly as before the guard existed."""
+    spec = _words_spec([{"tEndMs": 9000}])
+    long = [f for f in audit_spec(spec)["findings"] if isinstance(f.get("dwell_ms"), int)]
+    assert long and long[0]["dwell_ms"] == 9850, "last word's tEndMs + 500ms tail"
+    base = _words_spec(None)
+    base["steps"][0]["voiceoverBase64"] = "data:audio/mp3;base64,AAAA"
+    a = audit_spec(base)
+    assert not any("voiceoverWords" in f["message"] for f in a["findings"])
+    assert not any(isinstance(f.get("dwell_ms"), int) for f in a["findings"])
+
+
+def test_optimize_r3_pause_trim_without_step_index_reports_unknown():
+    """A pause trim on a hold keyframe with no stepIndex reports the step id
+    'unknown', mirroring audit.py — never 'step-None'."""
+    spec = {"version": 1, "id": "x", "steps": [{"annotation": "Hold"}],
+            "aiAnnotations": {"animationTimeline": [{"action": "hold", "duration": 8000}]}}
+    trim = next(p for p in optimize_spec(spec)["plan"] if p["action"] == "pause_trim")
+    assert trim["step_id"] == "unknown"
+
+
+def test_mcp_optimize_r3_corrupted_draft_is_a_named_valueerror(server, forge, store_for):
+    """Fix r3: load_draft sits inside the RevisionError mapping — a malformed
+    draft.json surfaces as a named ValueError, never a bare RevisionError."""
+    forge.save_spec("demo-c", _fixture("spec_optimize_messy.json"))
+    store = store_for("demo-c")
+    store.root.mkdir(parents=True, exist_ok=True)
+    (store.root / "draft.json").write_bytes(b"{oops")
+    tool = asyncio.run(server.get_tool("demo.optimize"))
+    with pytest.raises(ValueError, match="draft.json") as excinfo:
+        asyncio.run(tool.fn(demo_id="demo-c", apply=True))
+    assert isinstance(excinfo.value.__cause__, RevisionError)
+    assert "draft.json" in _call_error(server, "demo.optimize", demo_id="demo-c", apply=True)
+
+
+def test_mcp_optimize_r3_apply_refused_on_published_revision(server, forge, store_for):
+    """Fix r3: the apply refusal fires on the published pointer too — the
+    published half of the approved/published check runs."""
+    spec = _fixture("spec_optimize_messy.json")
+    forge.save_spec("demo-pub", spec)
+    store = store_for("demo-pub")
+    rec = store.save_revision(spec)
+    store.publish(rec.id)
+    err = _call_error(server, "demo.optimize", demo_id="demo-pub",
+                      apply=True, revision_id=rec.id)
+    assert "published" in err and "draft" in err
+
+
+def test_mcp_revision_r3_approve_and_restore_unknown_id_named_valueerror(server, forge):
+    """approve/restore with an unknown id are named ValueErrors, same as get."""
+    forge.save_spec("demo-u", _fixture("spec_audit_clean.json"))
+    ghost = "rv_999999_" + "0" * 64
+    for action in ("approve", "restore"):
+        err = _call_error(server, "demo.revision", demo_id="demo-u",
+                          action=action, revision_id=ghost)
+        assert "not found" in err and ghost in err
 
 
 # ---------------------------------------------------------------------------
