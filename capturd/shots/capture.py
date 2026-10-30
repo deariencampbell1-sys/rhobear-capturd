@@ -1493,7 +1493,11 @@ async def _write_still(page: Any, path: str | Path, **kwargs: Any) -> int:
     """The one still funnel: write the shot, enforce the artifact cap, return bytes."""
     still = Path(path)
     await page.screenshot(path=str(still), **kwargs)
-    return check_artifact_size(still)
+    try:
+        return check_artifact_size(still)
+    except ArtifactTooLarge:
+        still.unlink(missing_ok=True)  # an over-cap still never stays on disk
+        raise
 
 
 async def _sweep_states(page: Any, target: CaptureTarget, settings: dict[str, Any],
@@ -1552,8 +1556,17 @@ async def _sweep_states(page: Any, target: CaptureTarget, settings: dict[str, An
                                 timeout=int(settings["timeout_ms"]))
                 await _settle_page(page, settings["wait_ms"])
                 await page.evaluate(_MAP_CONTROLS_JS)   # re-tag after reload
-        except ArtifactTooLarge:
-            raise
+        except ArtifactTooLarge as exc:
+            # An over-cap state is recorded; the page is not aborted.
+            shots.append({
+                "url": target.url, "state_id": target.state_id,
+                "viewport": target.viewport_id, "scheme": target.scheme,
+                "width": target.width, "height": target.height,
+                "status": "failed", "error": "artifact_too_large",
+                "bytes": exc.size, "cap": exc.cap,
+                "state": "open", "control": control["label"], "control_tag": control["tag"],
+            })
+            continue
         except Exception:
             continue
     return shots
@@ -1625,6 +1638,7 @@ async def _capture_one(
     started = time.perf_counter()
     attempts = max(1, int(settings.get("retries", DEFAULT_RETRIES)) + 1)
     last_error = ""
+    too_large: dict[str, int] | None = None
     if navigation_cache is None:
         navigation_cache = {}
     if allow_file_access is None:
@@ -1733,6 +1747,11 @@ async def _capture_one(
                 "attempts": attempt,
                 "elapsed_ms": int((time.perf_counter() - started) * 1000),
             }
+        except ArtifactTooLarge as exc:
+            # The size cannot change on a second attempt — end the attempts now.
+            last_error = "artifact_too_large"
+            too_large = {"bytes": exc.size, "cap": exc.cap}
+            break
         except Exception as exc:
             if page_errors:
                 selected_error = page_errors[0]
@@ -1765,7 +1784,8 @@ async def _capture_one(
         "height": target.height,
         "status": "failed",
         "error": last_error,
-        "attempts": attempts,
+        "attempts": attempt,
+        **(too_large or {}),
         "elapsed_ms": int((time.perf_counter() - started) * 1000),
     }
 

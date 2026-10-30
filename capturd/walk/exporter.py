@@ -25,7 +25,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from capturd.engine import check_artifact_size
+from capturd.engine import ArtifactTooLarge, check_artifact_size
 
 logger = logging.getLogger(__name__)
 
@@ -473,7 +473,15 @@ def export_video(
 
     if not out_path.is_file() or out_path.stat().st_size == 0:
         raise DemoExportError(f"export produced no output at {out_path}")
-    check_artifact_size(out_path)
+    try:
+        check_artifact_size(out_path)
+    except ArtifactTooLarge as exc:
+        # Refuse as DemoExportError so coordinator.export_demo's boundary maps
+        # it; the measured size and the cap ride along for the caller.
+        refused = DemoExportError(str(exc))
+        refused.size = exc.size
+        refused.cap = exc.cap
+        raise refused from exc
     logger.info("export complete: %s (%.1f KB)", out_path, out_path.stat().st_size / 1024)
     return out_path
 

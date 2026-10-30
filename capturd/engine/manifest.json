@@ -14,7 +14,8 @@
   "artifactKinds": [
     "image/png",
     "image/jpeg",
-    "video/mp4"
+    "video/mp4",
+    "image/gif"
   ],
   "capabilities": [
     {
@@ -28,6 +29,7 @@
         {"name": "stills", "type": "image", "required": true}
       ],
       "params": {
+        "formats": "png | jpeg",
         "viewports": "desktop | tablet | mobile",
         "schemes": "light | dark",
         "states": "also capture the states opened by mapped page controls"
