@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "id": "neutral-bad-choices",
+  "name": "Neutral Bad Choices Demo",
+  "goal": "A spec whose choice destination is out of range — render must refuse it",
+  "createdAt": "2026-10-30T00:00:00Z",
+  "viewport": {"width": 1024, "height": 768},
+  "startUrl": "https://example.test/",
+  "steps": [
+    {
+      "index": 0,
+      "timestamp": 0,
+      "pageUrl": "https://example.test/",
+      "pageTitle": "First",
+      "interaction": {
+        "type": "click",
+        "target": {
+          "selector": "#btn-0",
+          "tagName": "button",
+          "text": "First",
+          "boundingRect": {"x": 380, "y": 320, "width": 264, "height": 64}
+        },
+        "hotspot": {"xPct": 50, "yPct": 50}
+      },
+      "annotation": "Step one",
+      "screenshotBase64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
+    },
+    {
+      "index": 1,
+      "timestamp": 1000,
+      "pageUrl": "https://example.test/choose",
+      "pageTitle": "Choose",
+      "interaction": {
+        "type": "click",
+        "target": {
+          "selector": "#btn-1",
+          "tagName": "button",
+          "text": "Choose",
+          "boundingRect": {"x": 300, "y": 400, "width": 200, "height": 60}
+        },
+        "hotspot": {"xPct": 50, "yPct": 50}
+      },
+      "annotation": "This one points nowhere",
+      "branchId": "broken-q",
+      "choices": [
+        {"id": "nowhere", "label": "Nowhere", "destination": 99}
+      ],
+      "screenshotBase64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
+    }
+  ]
+}
