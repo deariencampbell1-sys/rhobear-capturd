@@ -216,6 +216,47 @@ def test_demo_complete_fires_once_at_natural_end(page):
 
 
 # ---------------------------------------------------------------------------
+# Exit signal (pagehide)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+def test_pagehide_emits_demo_exit_once(page):
+    """One pagehide → exactly one demo_exit with the vocabulary payload;
+    a second pagehide without an intervening pageshow (bfcache double fire)
+    never records a second exit for the same hide — and a real page show
+    arms the next one (one demo_exit per page show)."""
+    page.evaluate("window.dispatchEvent(new Event('pagehide'))")
+    exits = [e for e in _events(page) if e["event"] == "demo_exit"]
+    assert len(exits) == 1, [e["event"] for e in _events(page)]
+    ev = exits[0]
+    assert set(ev) == BOOT_PAYLOAD_KEYS, sorted(ev)
+    assert ev["demoId"] == "neutral-plain"
+    assert ev["versionId"] == 1
+    assert ev["stepId"] is None
+    assert ev["branchId"] is None
+    assert "choiceId" not in ev
+    assert isinstance(ev["eventId"], str) and ev["eventId"]
+    assert isinstance(ev["sessionId"], str) and len(ev["sessionId"]) >= 8
+    assert isinstance(ev["elapsedMs"], int) and ev["elapsedMs"] >= 0
+    assert "T" in ev["timestamp"]
+    assert ev["device"]["deviceClass"] in ("mobile", "desktop")
+
+    # Edge case 4 — pagehide fired twice for one page show: still one exit.
+    page.wait_for_timeout(5)  # cross a wall-clock ms so dedupe can't hide it
+    page.evaluate("window.dispatchEvent(new Event('pagehide'))")
+    exits = [e for e in _events(page) if e["event"] == "demo_exit"]
+    assert len(exits) == 1, [e["event"] for e in _events(page)]
+
+    # ...and a real page show arms the next hide: one exit per page show.
+    page.evaluate("window.dispatchEvent(new Event('pageshow'))")
+    page.wait_for_timeout(5)
+    page.evaluate("window.dispatchEvent(new Event('pagehide'))")
+    exits = [e for e in _events(page) if e["event"] == "demo_exit"]
+    assert len(exits) == 2, [e["event"] for e in _events(page)]
+
+
+# ---------------------------------------------------------------------------
 # Dedup — a stream with duplicate eventIds
 # ---------------------------------------------------------------------------
 

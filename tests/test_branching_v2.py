@@ -179,17 +179,126 @@ def test_plain_spec_renders_unchanged_without_choices():
 
 
 def test_malformed_choices_fail_render_safely():
-    from capturd.walk.viewer import render_viewer
+    from capturd.walk.viewer import ViewerRenderError, render_viewer
 
-    with pytest.raises(ValueError) as exc:
+    with pytest.raises(ViewerRenderError) as exc:
         render_viewer(_fixture("spec_bad_choices.json"))
     assert "destination" in str(exc.value)
 
     dead = _fixture("spec_choices.json")
     dead["steps"][1]["choices"] = [{"id": "loop", "label": "Loop", "destination": 1}]
-    with pytest.raises(ValueError) as exc:
+    with pytest.raises(ViewerRenderError) as exc:
         render_viewer(dead)
     assert "destination" in str(exc.value)
+
+
+def test_viewer_refusal_raises_viewer_render_error():
+    """Finding 4 — every refusal on the render path is a ViewerRenderError,
+    never a bare ValueError (not even as a base class)."""
+    from capturd.walk.viewer import ViewerRenderError, render_viewer
+
+    with pytest.raises(ViewerRenderError) as exc:
+        render_viewer(_fixture("spec_bad_choices.json"))
+    assert not isinstance(exc.value, ValueError)
+    assert "destination" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# Render / export refusals and personalization stripping (W2-05a-r2)
+# ---------------------------------------------------------------------------
+
+
+PERSONALIZATION_KEYS = ("analyticsName", "variable", "ctaId")
+
+
+def _assert_no_personalization(embedded: dict) -> None:
+    """The embedded #demo-data payload carries no excluded key anywhere."""
+    blob = json.dumps(embedded)
+    for key in PERSONALIZATION_KEYS:
+        assert key not in blob, f"#demo-data leaked {key}: {blob[:400]}"
+    for step in embedded["steps"]:
+        for ch in step.get("choices") or []:
+            assert set(ch) == {"id", "label", "destination"}
+
+
+def _strip_personalization(spec: dict) -> dict:
+    clean = json.loads(json.dumps(spec))
+    for step in clean["steps"]:
+        for ch in step.get("choices") or []:
+            for key in PERSONALIZATION_KEYS:
+                ch.pop(key, None)
+    return clean
+
+
+def _fresh(tmp_path: Path, name: str, spec: dict):
+    from capturd.walk.coordinator import DemoForge
+
+    forge = DemoForge(demos_dir=tmp_path / "demos")
+    forge.save_spec(name, spec)
+    return forge
+
+
+def test_export_refuses_malformed_choices_with_demo_export_error(tmp_path: Path):
+    """Finding 1/4 — export_demo refuses a spec with malformed choices with
+    a DemoExportError carrying the viewer's message, and writes no file
+    (edge case 5: a refusal never leaves a half-written export behind)."""
+    from capturd.walk.exporter import DemoExportError
+
+    forge = _fresh(tmp_path, "bad-choices", _fixture("spec_bad_choices.json"))
+    with pytest.raises(DemoExportError) as exc:
+        forge.export_demo("bad-choices", fmt="html")
+    assert "destination" in str(exc.value)
+    assert not (forge.demo_dir("bad-choices") / "export.html").exists()
+
+
+def test_render_and_export_strip_personalization_keys(tmp_path: Path):
+    """Finding 3 — the normalization that strips analyticsName/variable/ctaId
+    runs on render AND export, so a hand-authored spec cannot carry them into
+    #demo-data. With the keys present the output is byte-identical to the
+    output without them (edge case 1: keys stripped, everything else
+    untouched)."""
+    from capturd.walk.viewer import render_viewer
+
+    dirty = _fixture("spec_personalization.json")
+    clean = _strip_personalization(dirty)
+
+    html_dirty = render_viewer(json.loads(json.dumps(dirty)))
+    html_clean = render_viewer(json.loads(json.dumps(clean)))
+    assert html_dirty == html_clean, "extra keys changed the render bytes"
+    _assert_no_personalization(_embedded_spec(html_dirty))
+
+    forge = _fresh(tmp_path, "persona", clean)
+    out_clean = forge.export_demo("persona", fmt="html").read_bytes()
+    forge.save_spec("persona", dirty)
+    out_dirty = forge.export_demo("persona", fmt="html").read_bytes()
+    assert out_dirty == out_clean, "extra keys changed the export bytes"
+    _assert_no_personalization(
+        _embedded_spec(out_dirty.decode("utf-8")))
+
+
+def test_empty_choices_refused_on_both_paths(tmp_path: Path):
+    """Finding 5 — ``choices: []`` is refused by schema.validate_choices and
+    by render and export alike, always with schema's exact message."""
+    from capturd.walk.exporter import DemoExportError
+    from capturd.walk.viewer import ViewerRenderError, render_viewer
+
+    message = "choices: must be a non-empty list"
+    with pytest.raises(ValueError) as exc:
+        validate_choices([], step_count=3, step_index=1)
+    assert str(exc.value) == message
+
+    spec = _fixture("spec_choices.json")
+    spec["steps"][1]["choices"] = []
+
+    with pytest.raises(ViewerRenderError) as rex:
+        render_viewer(json.loads(json.dumps(spec)))
+    assert str(rex.value) == message
+
+    forge = _fresh(tmp_path, "empty-choices", spec)
+    with pytest.raises(DemoExportError) as eex:
+        forge.export_demo("empty-choices", fmt="html")
+    assert str(eex.value) == message
+    assert not (forge.demo_dir("empty-choices") / "export.html").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -383,6 +492,102 @@ def test_viewer_choice_screen_waits_selects_and_jumps(choice_viewer_html: Path):
         assert pg.evaluate("window.__demoViewer.STATE.index") == 2
         assert not pg.evaluate(
             "document.getElementById('choice-overlay').classList.contains('visible')")
+        browser.close()
+
+
+@pytest.mark.slow
+def test_demo_param_out_of_range_destination_never_strands_viewer(tmp_path: Path):
+    """Finding 6 — the ``?demo=`` runtime path skips render-time validation.
+    A choice whose destination cannot exist must never be offered: clicking
+    it re-enters the choice step forever and the viewer can never finish.
+    Served over loopback-intercepted http (no real network) — the harness
+    empties #demo-data so loadDemoSpec falls back to ``?demo=``."""
+    from capturd.walk.viewer import default_template_path
+
+    tpl = default_template_path().read_text(encoding="utf-8")
+    page_html = re.sub(
+        r'<script id="demo-data"[^>]*>.*?</script>',
+        lambda _m: '<script id="demo-data" type="application/json">\n  </script>',
+        tpl, count=1, flags=re.S,
+    )
+    spec_json = (FIXTURES / "spec_bad_choices.json").read_text(encoding="utf-8")
+
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        pg = browser.new_page(viewport={"width": 1280, "height": 900})
+        pg.route("http://**", lambda route: route.abort())
+        pg.route("https://**", lambda route: route.abort())
+        pg.route("ws://**", lambda route: route.abort())
+
+        def _serve(route):
+            url = route.request.url.split("?")[0]
+            if url.endswith("/spec_bad_choices.json"):
+                route.fulfill(body=spec_json, content_type="application/json")
+            elif url.endswith("/viewer.html"):
+                route.fulfill(body=page_html, content_type="text/html")
+            else:
+                route.fulfill(status=404, body="")
+
+        pg.route("http://demo.local/**", _serve)  # registered last → wins
+        pg.goto("http://demo.local/viewer.html?demo=spec_bad_choices.json")
+        pg.wait_for_function("window.__demoViewer && window.__capturdEvents")
+        pg.evaluate("window.__demoViewer.next()")
+        pg.wait_for_function("window.__demoViewer.STATE.index === 1",
+                             timeout=15000)
+        pg.wait_for_timeout(500)
+
+        # If the dead pick (destination 99 on a 2-step spec) is offered,
+        # clicking it must not start the strand cycle.
+        if pg.locator(".choice-btn").count():
+            pg.locator(".choice-btn").first.click()
+            pg.wait_for_timeout(700)
+        assert pg.locator(".choice-btn").count() == 0, (
+            "the ?demo= runtime path offered a choice with an unreachable "
+            "destination — the viewer is stranded on the choice step")
+
+        # Whatever happens, the run must still reach its natural end.
+        pg.evaluate("window.__demoViewer.play()")
+        pg.wait_for_function(
+            "window.__capturdEvents.some(e => e.event === 'demo_complete')",
+            timeout=20000)
+        browser.close()
+
+
+@pytest.mark.slow
+def test_choice_pick_during_transition_is_not_recorded(choice_viewer_html: Path):
+    """Finding 7 — the showChoices click handler has a re-entrancy window:
+    a pick landing while goToStep is mid-transition emits branch_select and
+    destroys the overlay, but goToStep refuses the navigation. An ignored
+    pick must never be recorded."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        pg = browser.new_page(viewport={"width": 1280, "height": 900})
+        pg.goto(choice_viewer_html.as_uri())
+        pg.wait_for_function("window.__demoViewer && window.__capturdEvents")
+        pg.evaluate("window.__demoViewer.next()")
+        pg.wait_for_function("window.__demoViewer.STATE.index === 1",
+                             timeout=15000)
+        pg.wait_for_function("document.querySelectorAll('.choice-btn').length === 2")
+
+        phase = pg.evaluate(
+            """() => {
+              const V = window.__demoViewer;
+              V.next();                       // phase → 'transitioning'
+              const during = V.STATE.phase;
+              document.querySelector('.choice-btn').click();
+              return during;
+            }""")
+        assert phase == "transitioning", f"window closed unexpectedly: {phase}"
+
+        pg.wait_for_function("window.__demoViewer.STATE.index === 2",
+                             timeout=15000)
+        pg.wait_for_timeout(400)
+        sels = [e for e in pg.evaluate("window.__capturdEvents")
+                if e["event"] == "branch_select"]
+        assert sels == [], f"a mid-transition pick was recorded: {sels}"
         browser.close()
 
 
