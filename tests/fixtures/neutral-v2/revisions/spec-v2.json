@@ -1,0 +1,18 @@
+{
+  "mode": "dom",
+  "name": "Neutral demo",
+  "steps": [
+    {
+      "annotation": "Open the dashboard.",
+      "index": 0
+    },
+    {
+      "annotation": "Choose the starred project.",
+      "index": 1
+    },
+    {
+      "annotation": "Share the project.",
+      "index": 2
+    }
+  ]
+}
