@@ -101,7 +101,8 @@ def test_max_artifact_bytes_limit_equals_the_code_constant():
     assert engine.load_manifest()["limits"]["maxArtifactBytes"] == engine.MAX_ARTIFACT_BYTES
 
 
-def test_manifest_found_from_installed_package_not_only_source_tree(tmp_path, monkeypatch):
+def test_manifest_loads_from_the_package_regardless_of_cwd(tmp_path, monkeypatch):
+    """F102: a checkout has no installed copy; what this proves is cwd-independence."""
     monkeypatch.chdir(tmp_path)  # cwd independence: the file ships with the package
     packaged = importlib.resources.files("capturd.engine").joinpath("manifest.json")
     assert packaged.is_file()
@@ -117,14 +118,23 @@ def test_load_manifest_twice_is_equal_and_mutation_isolated():
     assert engine.load_manifest() == second, "a caller's copy leaked into the next load"
 
 
+def _write_bad_manifest(tmp_path, monkeypatch, payload) -> None:
+    """Write a manifest payload and point ``load_manifest`` at the file.
+
+    F98: a ``str`` payload is raw text here, so a JSON string never reaches
+    the type branch — the fix JSON-encodes values and keeps raw text explicit.
+    """
+    path = tmp_path / "manifest.json"
+    path.write_text(payload if isinstance(payload, str) else json.dumps(payload),
+                    encoding="utf-8")
+    monkeypatch.setattr(engine, "_MANIFEST_PATH", path)
+
+
 def test_corrupt_packaged_manifest_raises_a_named_error(tmp_path, monkeypatch):
     good = engine.load_manifest()
 
     def bad(payload) -> None:
-        path = tmp_path / "manifest.json"
-        path.write_text(payload if isinstance(payload, str) else json.dumps(payload),
-                        encoding="utf-8")
-        monkeypatch.setattr(engine, "_MANIFEST_PATH", path)
+        _write_bad_manifest(tmp_path, monkeypatch, payload)
         with pytest.raises(engine.ManifestError):
             engine.load_manifest()
 
@@ -138,6 +148,24 @@ def test_corrupt_packaged_manifest_raises_a_named_error(tmp_path, monkeypatch):
     mistyped = dict(good)
     mistyped["capabilities"] = "not-a-list"
     bad(mistyped)                                       # one required key of the wrong type
+
+
+@pytest.mark.parametrize(
+    "payload",
+    ["just a string", None, True, 0],
+    ids=["json-string", "json-null", "json-true", "json-zero"],
+)
+def test_a_json_string_payload_is_refused_by_the_type_branch(tmp_path, monkeypatch, payload):
+    """F98: valid JSON that is not an object must reach the type branch.
+
+    A bare ``just a string`` is not JSON, so ``json.loads`` refuses it before
+    ``load_manifest``'s ``not isinstance(manifest, dict)`` branch is reached;
+    the helper must JSON-encode the payload instead.
+    """
+    _write_bad_manifest(tmp_path, monkeypatch, payload)
+    with pytest.raises(engine.ManifestError, match="not a JSON object") as exc:
+        engine.load_manifest()
+    assert "unreadable" not in str(exc.value), "the parser refused it, not the type branch"
 
 
 def test_load_manifest_refuses_a_bool_integer_field():
@@ -155,24 +183,48 @@ def test_engine_version_matches_pyproject():
     assert engine.load_manifest()["engineVersion"] == pyproject["project"]["version"]
 
 
-def test_dev_extra_declares_build():
-    """The wheel test runs `python -m build`, so the dev extra must declare it."""
-    pyproject = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    dev = pyproject["project"]["optional-dependencies"]["dev"]
-    assert any(str(entry).startswith("build") for entry in dev), dev
-
-
 def _requirement_name(entry: object) -> str:
     """The requirement's name: everything up to the first version-specifier character."""
     match = re.match(r"[A-Za-z0-9._-]+", str(entry).strip())
     return match.group(0) if match else ""
 
 
-def test_dev_extra_declares_setuptools_and_wheel():
-    """r6 item 3: a --no-isolation wheel build needs the backend importable from dev alone."""
+def _requirement_floor(entry: object) -> tuple[int, ...]:
+    """The ``>=`` floor of a requirement, as a version tuple (() when unpinned)."""
+    match = re.search(r">=\s*([0-9]+(?:\.[0-9]+)*)", str(entry))
+    return tuple(int(part) for part in match.group(1).split(".")) if match else ()
+
+
+def _is_build_requirement(entry: object) -> bool:
+    """F105: the dev extra names the ``build`` distribution, never a lookalike."""
+    return str(entry).strip().startswith("build")
+
+
+def test_the_dev_extra_matches_build_exactly():
+    """F105: ``build`` is matched as a distribution, never by bare prefix.
+
+    ``build-tools`` and ``buildout`` are the explicit negatives."""
     pyproject = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     dev = pyproject["project"]["optional-dependencies"]["dev"]
-    assert {"build", "setuptools", "wheel"} <= {_requirement_name(entry) for entry in dev}, dev
+    assert any(_is_build_requirement(entry) for entry in dev), dev
+    assert not _is_build_requirement("build-tools>=1")
+    assert not _is_build_requirement("buildout==1.2")
+
+
+def test_dev_extra_declares_setuptools_and_wheel():
+    """r6 item 3 / F108: a --no-isolation wheel build must pin its backend.
+
+    A bare ``setuptools`` lets a green wheel run say nothing about the backend;
+    the dev floors must be at least the floors in ``[build-system].requires``."""
+    pyproject = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    dev = {_requirement_name(entry): str(entry).strip()
+           for entry in pyproject["project"]["optional-dependencies"]["dev"]}
+    build = {_requirement_name(entry): str(entry).strip()
+             for entry in pyproject["build-system"]["requires"]}
+    assert {"build", "setuptools", "wheel"} <= set(dev), dev
+    assert _requirement_floor(build["setuptools"]), "[build-system] must pin setuptools"
+    assert _requirement_floor(dev["setuptools"]) >= _requirement_floor(build["setuptools"]), dev
+    assert _requirement_floor(dev["wheel"]), dev["wheel"]
 
 
 def test_max_active_jobs_per_account_matches_the_render_budget():
@@ -188,10 +240,70 @@ def test_service_default_ignores_a_stray_env(monkeypatch):
     assert value == engine.load_manifest()["limits"]["maxActiveJobsPerAccount"]
 
 
+_CONFIG_PATH = PROJECT_ROOT / "service" / "app" / "config.py"
+
+
+def _function_source(source: str, name: str) -> str:
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            segment = ast.get_source_segment(source, node)
+            assert segment is not None
+            return segment
+    raise AssertionError(f"function {name!r} not found")
+
+
+def _render_max_concurrent_env_name(source: str | None = None) -> str:
+    """F104: the env var ``service/app/config.py`` reads for the render budget.
+
+    Derived from the source so a rename of ``RENDER_MAX_CONCURRENT`` (or its
+    env var) cannot leave the stray-env test asserting a name config.py no
+    longer honors — the derivation raises loudly instead.
+    """
+    text = source if source is not None else _CONFIG_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(text)
+    for node in tree.body:
+        if not (isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "RENDER_MAX_CONCURRENT"
+                        for t in node.targets)):
+            continue
+        for inner in ast.walk(node.value):
+            if (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)
+                    and inner.func.id == "_env" and inner.args):
+                first = inner.args[0]
+                if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                    return first.value
+        raise AssertionError(
+            "RENDER_MAX_CONCURRENT must be assigned from _env(<literal>, ...) in config.py")
+    raise AssertionError("service/app/config.py no longer defines RENDER_MAX_CONCURRENT")
+
+
+def test_the_env_var_name_comes_from_config(monkeypatch):
+    """F104: the stray-env test must derive the env var name from config.py.
+
+    A hardcoded literal goes vacuous the day config.py renames the variable;
+    the derivation must also fail loudly on an in-memory rename."""
+    source = Path(__file__).read_text(encoding="utf-8")
+    stray_test = _function_source(source, "test_service_default_ignores_a_stray_env")
+    assert "CAPTURD_RENDER_MAX_CONCURRENT" not in stray_test, (
+        "a hardcoded name makes the stray-env test vacuous on rename")
+    assert "_render_max_concurrent_env_name()" in stray_test
+
+    name = _render_max_concurrent_env_name()
+    monkeypatch.setenv(name, "99")
+    assert _service_render_max_concurrent() != 99
+    assert _service_render_max_concurrent() == \
+        engine.load_manifest()["limits"]["maxActiveJobsPerAccount"]
+
+    renamed = _CONFIG_PATH.read_text(encoding="utf-8").replace(
+        "RENDER_MAX_CONCURRENT", "RENDER_CONCURRENCY")
+    with pytest.raises(AssertionError, match="RENDER_MAX_CONCURRENT"):
+        _render_max_concurrent_env_name(source=renamed)
+
+
 def _service_render_max_concurrent() -> int:
     """Read service/app/config.py's RENDER_MAX_CONCURRENT default (read only, never edit)."""
-    config_path = PROJECT_ROOT / "service" / "app" / "config.py"
-    spec = importlib.util.spec_from_file_location("capturd_service_config_readonly", config_path)
+    spec = importlib.util.spec_from_file_location("capturd_service_config_readonly", _CONFIG_PATH)
     module = importlib.util.module_from_spec(spec)
     with pytest.MonkeyPatch.context() as env:
         env.delenv("CAPTURD_RENDER_MAX_CONCURRENT", raising=False)
@@ -248,6 +360,30 @@ def test_the_published_wheel_carries_a_loadable_manifest(tmp_path):
     manifest = engine.load_manifest(packaged)
     assert manifest["engine"] == "capturd"
     assert manifest["limits"]["maxArtifactBytes"] == engine.MAX_ARTIFACT_BYTES
+
+
+def _repo_build_artifacts() -> list[str]:
+    return [name for name in ("build", "capturd.egg-info")
+            if (PROJECT_ROOT / name).exists()]
+
+
+def test_the_wheel_test_removes_its_egg_info():
+    """F100: running the packaging test must not leave artifacts in the repo tree.
+
+    The real wheel test runs in a subprocess so this check is meaningful even
+    when selected alone."""
+    before = _repo_build_artifacts()
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         "tests/engine/test_manifest.py::test_the_published_wheel_carries_a_loadable_manifest"],
+        cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=600,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    after = _repo_build_artifacts()
+    assert after == before, (
+        "the packaging test added artifacts to the repo tree: "
+        f"{sorted(set(after) - set(before))}")
+    assert not after, f"repository tree is not clean after the wheel test: {after}"
 
 
 # ---------------------------------------------------------------------------
