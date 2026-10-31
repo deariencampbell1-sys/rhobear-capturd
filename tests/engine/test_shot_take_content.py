@@ -11,6 +11,14 @@ plane today — it is implemented nowhere here and deliberately not tested.
 All five modules are pure: no disk, clock, randomness, environment, network,
 logging or global state; a function returns a new dict and never mutates its
 input. `test_modules_stay_pure` holds that line with `ast`.
+
+Round 2 (W3-06c-r2 fix list): the §2 paths and refusals are written out as
+literal calls so no test mirrors the production table; an ambiguous take set
+is a caller error (`AmbiguousTakeSet`), the mutators validate what they
+return, an `approved` take carries no revocation, `reject` demands a reason,
+`approve` demands a real `at`, the registry shares nothing it returns,
+stray `included` entries and non-canonical text (`NaN`, `Infinity`) are
+refused, and `transition` refuses a non-string target.
 """
 
 from __future__ import annotations
@@ -43,19 +51,6 @@ CONTENT_MODULES = ("takes.py", "approval.py", "shots.py", "artifacts.py", "persi
 #: level-1 relative imports inside capturd.engine. Nothing else may appear.
 _ALLOWED_IMPORTS = {"__future__", "typing", "json"}
 _BANNED_IMPORTS = {"os", "pathlib", "time", "datetime", "random", "uuid", "logging", "socket"}
-
-#: §2, exactly. `approved` never appears: entering or leaving it is
-#: approval.py's alone. `failed` is terminal.
-_ALLOWED_TRANSITIONS = {
-    ("draft", "ready"),
-    ("draft", "failed"),
-    ("draft", "unresolved"),
-    ("ready", "failed"),
-    ("ready", "unresolved"),
-    ("unresolved", "ready"),  # reconcile (§2)
-    ("unresolved", "failed"),
-}
-
 
 def make_take(state="ready", shot=0, take=0, **overrides):
     """A §3-shaped take record; `approved` carries who and when."""
@@ -98,17 +93,62 @@ def test_states_are_the_closed_five():
     assert len(set(STATES)) == 5
 
 
-@pytest.mark.parametrize("frm,to", [(f, t) for f in STATES for t in STATES],
-                         ids=lambda value: str(value))
-def test_transition_table(frm, to):
-    record = make_take(state=frm)
-    if (frm, to) in _ALLOWED_TRANSITIONS:
-        moved = transition(record, to)
-        assert moved["state"] == to
-        assert record["state"] == frm  # the input is never mutated
-    else:
+def test_section_2_paths():
+    """Every §2 path, written out as literal calls — no table is copied here.
+
+    A copy of the production table proves nothing (r1: deleting
+    `("draft", "ready")` from both stayed green), so each legal move is a
+    literal call and the refusals live in `test_section_2_refusals`.
+    """
+    # draft → ready → approve → revoke → ready: the review loop.
+    record = make_take(state="draft", shot=0, take=0)
+    ready = transition(record, "ready")
+    assert ready["state"] == "ready"
+    approved = approval.approve(ready, by="Niobe", at=APPROVED_AT, source_revision=REVISION)
+    assert approved["state"] == "approved"
+    revoked = approval.revoke(approved, by="Morpheus", at=REVOKED_AT, reason="camera drifted")
+    assert revoked["state"] == "ready"
+    assert revoked["revokedReason"] == "camera drifted"
+    assert record["state"] == "draft"  # the input is never mutated
+    # draft → failed
+    assert transition(make_take(state="draft", shot=1, take=0), "failed")["state"] == "failed"
+    # draft → unresolved → ready: the reconcile path (§2).
+    unresolved = transition(make_take(state="draft", shot=2, take=0), "unresolved")
+    assert transition(unresolved, "ready")["state"] == "ready"
+    # unresolved → failed
+    assert transition(make_take(state="unresolved", shot=3, take=0), "failed")["state"] == "failed"
+    # ready → failed
+    assert transition(make_take(state="ready", shot=4, take=0), "failed")["state"] == "failed"
+    # ready → unresolved
+    assert transition(make_take(state="ready", shot=5, take=0), "unresolved")["state"] == "unresolved"
+
+
+def test_section_2_refusals():
+    """Every refused move, written out as a literal list — no shared table.
+
+    Staying put is refused; entering or leaving `approved` is approval.py's
+    alone; terminal `failed` moves nowhere; `draft` is never re-entered.
+    """
+    refused = [
+        ("draft", "draft"), ("draft", "approved"),
+        ("ready", "draft"), ("ready", "ready"), ("ready", "approved"),
+        ("approved", "draft"), ("approved", "ready"), ("approved", "approved"),
+        ("approved", "failed"), ("approved", "unresolved"),
+        ("failed", "draft"), ("failed", "ready"), ("failed", "approved"),
+        ("failed", "failed"), ("failed", "unresolved"),
+        ("unresolved", "draft"), ("unresolved", "unresolved"), ("unresolved", "approved"),
+    ]
+    for frm, to in refused:
         with pytest.raises(TakeError):
-            transition(record, to)
+            transition(make_take(state=frm, shot=0, take=0), to)
+
+
+def test_transition_refuses_a_non_string_target():
+    record = make_take(state="ready", shot=0, take=0)
+    for bad_to in (["ready"], {"to": "ready"}, None, 3):  # unhashable included
+        with pytest.raises(TakeError):
+            transition(record, bad_to)
+    assert record["state"] == "ready"  # nothing moved, nothing raised raw TypeError
 
 
 # --------------------------------------------------------------------------- /
@@ -131,6 +171,21 @@ def test_approve_binds_named_human_and_revision():
     assert approved["approvedBy"] == "Niobe"
     assert approved["approvedAt"] == APPROVED_AT
     assert record == original  # approve returned a new dict
+
+
+def test_approve_refuses_a_blank_or_non_string_time():
+    """Apollo HIGH (E-1031-060031-e22f): the `at` refusal gets its own test.
+
+    The refusal itself is r1 code; this pins it so a blank or non-string
+    `approvedAt` can never slip back in.
+    """
+    record = make_take(state="ready", shot=0, take=0)
+    for bad_at in ("", "   ", "\t\n", 5, None):
+        with pytest.raises(ApprovalError):
+            approval.approve(record, by="Niobe", at=bad_at, source_revision=REVISION)
+    assert record["state"] == "ready"  # nothing moved
+    approved = approval.approve(record, by="Niobe", at=APPROVED_AT, source_revision=REVISION)
+    assert approved["approvedAt"] == APPROVED_AT  # a valid time still approves
 
 
 # --------------------------------------------------------------------------- /
@@ -167,7 +222,39 @@ def test_revoke_records_reason_and_time():
     assert again["revokedReason"] is None
     assert again["approvedBy"] == "Niobe"
     assert again["approvedAt"] == APPROVED_AT_2
+    assert validate_take(again) == again  # edge case 3: re-approval validates
     assert export_blocked([0], [again], {0: 0}, {(0, 0)}) == []
+
+
+def test_reject_requires_a_real_reason():
+    """A blank or non-string `reason` is refused: an empty `rejectedReason`
+    is not null, so it would block the export forever (§6)."""
+    record = make_take(state="ready", shot=0, take=0)
+    for bad_reason in ("", "   ", "\t", 7, None):
+        with pytest.raises(ApprovalError):
+            approval.reject(record, reason=bad_reason)
+    assert record["state"] == "ready" and record["rejectedReason"] is None
+    # Edge case 2: on a take that is not ready the state error still comes first.
+    for bad_reason in ("", "   ", None):
+        with pytest.raises(ApprovalError) as exc:
+            approval.reject(make_take(state="draft", shot=0, take=0), reason=bad_reason)
+        assert "ready take" in str(exc.value)  # the state refusal, not the reason
+    rejected = approval.reject(record, reason="caption wrong")
+    assert rejected["rejectedReason"] == "caption wrong"
+    assert validate_take(rejected) == rejected
+
+
+def test_mutators_validate_what_they_return():
+    """`approve`, `revoke` and `reject` return through `validate_take`, as
+    `_new_take` does: a record with an extra key never comes back clean."""
+    extra_ready = {**make_take(state="ready", shot=0, take=0), "surprise": 1}
+    extra_approved = {**make_take(state="approved", shot=0, take=0), "surprise": 1}
+    with pytest.raises(TakeError):
+        approval.approve(extra_ready, by="Niobe", at=APPROVED_AT, source_revision=REVISION)
+    with pytest.raises(TakeError):
+        approval.revoke(extra_approved, by="Morpheus", at=REVOKED_AT, reason="camera drifted")
+    with pytest.raises(TakeError):
+        approval.reject(extra_ready, reason="caption wrong")
 
 
 # --------------------------------------------------------------------------- /
@@ -333,7 +420,58 @@ def test_rejected_take_blocks_export():
 
 
 # --------------------------------------------------------------------------- /
-# 8. Persistence: canonical text both ways, keyed by jobId/shotIndex/takeIndex
+# 8. An ambiguous take set is a caller error, never a silent pick
+
+
+def test_ambiguous_take_set_refused():
+    """Two records sharing a `(shotIndex, takeIndex)` of two ints refuse.
+
+    The pair does not identify a take (`jobId` + `attemptId` do), so picking
+    one silently would let the other vanish from every verdict. A blocked
+    state never raises; an ambiguous set does, naming the pair.
+    """
+    first = make_take(state="ready", shot=2, take=1)
+    second = make_take(state="approved", shot=2, take=1, jobId="job_2", attemptId="att_b")
+    assert first["jobId"] != second["jobId"]
+    for take_set in ([first, second], [second, first]):  # either list order
+        with pytest.raises(takes.AmbiguousTakeSet) as exc:
+            export_blocked([2], take_set, {2: 1}, set())
+        assert "(shotIndex=2, takeIndex=1)" in str(exc.value)  # it names the pair
+        assert isinstance(exc.value, TakeError)  # an AmbiguousTakeSet is a TakeError
+    assert issubclass(takes.AmbiguousTakeSet, TakeError)
+    # Two identical records are just as ambiguous.
+    with pytest.raises(takes.AmbiguousTakeSet):
+        export_blocked([2], [first, copy.deepcopy(first)], {2: 1}, set())
+    # Edge case 1: the set itself is wrong — it refuses even when the pair is
+    # neither selected nor included.
+    with pytest.raises(takes.AmbiguousTakeSet):
+        export_blocked([9], [first, second], {}, set())
+
+
+# --------------------------------------------------------------------------- /
+# 9. A stray `included` entry blocks; it never raises
+
+
+def test_export_blocked_stray_included_entries_block_and_never_raise():
+    """An `included` entry that is not a two-item pair becomes an
+    `included_not_approved` block with null indexes and a plain need —
+    never IndexError, never TypeError."""
+    approved = make_take(state="approved", shot=0, take=0)
+    for stray in ([1], [], None, 3, [1, 2, 3]):
+        blocks = export_blocked([0], [approved], {0: 0}, [stray])
+        assert codes_of(blocks) == ["included_not_approved"], stray
+        assert blocks[0]["shotIndex"] is None
+        assert blocks[0]["takeIndex"] is None
+        assert blocks[0]["needed"] == "each included entry to be a (shotIndex, takeIndex) pair"
+    # A real pair still clears, and a real missing pair still blocks by name.
+    assert export_blocked([0], [approved], {0: 0}, [(0, 0)]) == []
+    blocks = export_blocked([0], [approved], {0: 0}, [(0, 1)])
+    assert [(b["code"], b["shotIndex"], b["takeIndex"]) for b in blocks] == \
+        [("included_not_approved", 0, 1)]
+
+
+# --------------------------------------------------------------------------- /
+# 10. Persistence: canonical text both ways, keyed by jobId/shotIndex/takeIndex
 
 
 def test_persistence_round_trip_and_key():
@@ -355,10 +493,36 @@ def test_persistence_round_trip_and_key():
         persistence.loads("not json")
     with pytest.raises(TakeError):
         persistence.loads("[1, 2]")
+    # Edge case 4: a valid record round-trips byte for byte.
+    approved = make_take(state="approved", shot=3, take=2)
+    assert persistence.loads(persistence.dumps(approved)) == approved
+    assert persistence.dumps(persistence.loads(persistence.dumps(approved))) == \
+        persistence.dumps(approved)
+
+
+def test_persistence_refuses_unserialisable_records():
+    """`key` validates first; `dumps` is strict; `loads` refuses NaN/Infinity."""
+    base = make_take(state="ready", shot=0, take=0)
+    with pytest.raises(TakeError):  # a bad record is TakeError, never KeyError
+        persistence.key({k: v for k, v in base.items() if k != "jobId"})
+    with pytest.raises(TakeError):
+        persistence.key({**base, "surprise": 1})
+    with pytest.raises(TakeError):
+        persistence.key(["not", "a", "dict"])
+    with pytest.raises(TakeError):  # a set has no canonical JSON text
+        persistence.dumps({**base, "direction": {"camera": {"semantic"}}})
+    with pytest.raises(TakeError):  # NaN is refused on the way out (allow_nan=False)
+        persistence.dumps({**base, "durationMs": float("nan")})
+    with pytest.raises(TakeError):  # and NaN / Infinity are refused on the way in
+        persistence.loads(persistence.dumps(base).replace(
+            '"durationMs":4820', '"durationMs":NaN'))
+    with pytest.raises(TakeError):
+        persistence.loads(persistence.dumps(base).replace(
+            '"durationMs":4820', '"durationMs":Infinity'))
 
 
 # --------------------------------------------------------------------------- /
-# 9. The artifact registry: one id, one revision, forever
+# 11. The artifact registry: one id, one revision, forever
 
 
 def test_artifact_registry_conflict():
@@ -373,8 +537,31 @@ def test_artifact_registry_conflict():
     assert set(grown) == {"art_1", "art_2"}
 
 
+def test_registry_result_shares_nothing_and_refuses_corrupt_entries():
+    """A returned registry shares no per-artifact dict with the input, on
+    either path; a known id mapped to `None` or a non-mapping is refused."""
+    registry = artifacts.register({}, artifact_id="art_1", revision="rev-1", kind="image/png")
+    # The new-id path: changing the result must not touch the input.
+    grown = artifacts.register(registry, artifact_id="art_2", revision="rev-2", kind="video/mp4")
+    grown["art_2"]["kind"] = "text/plain"
+    grown["art_1"]["kind"] = "text/plain"
+    assert registry["art_1"] == {"revision": "rev-1", "kind": "image/png"}
+    # The same-revision path copies too.
+    again = artifacts.register(grown, artifact_id="art_2", revision="rev-2", kind="video/mp4")
+    again["art_1"]["kind"] = "application/pdf"
+    again["art_2"]["revision"] = "rev-9"
+    assert grown["art_1"] == {"revision": "rev-1", "kind": "text/plain"}
+    assert grown["art_2"] == {"revision": "rev-2", "kind": "text/plain"}
+    # A corrupt known entry is an ArtifactError, never an AttributeError and
+    # never a silent re-registration.
+    for corrupt in (None, "rev-1", ["rev-1"], 7):
+        with pytest.raises(ArtifactError):
+            artifacts.register({"art_x": corrupt}, artifact_id="art_x",
+                               revision="rev-1", kind="image/png")
+
+
 # --------------------------------------------------------------------------- /
-# Validate refusals (§3 shape), including the revision edge cases
+# 12. Validate refusals (§3 shape), including the revision edge cases
 
 
 def test_validate_refuses_bad_records():
@@ -404,8 +591,27 @@ def test_validate_refuses_bad_records():
         validate_take(["not", "a", "dict"])
 
 
+def test_an_approved_take_carries_no_revocation():
+    """A1: `approved` with any `revoked*` field set is a TakeError — approval
+    clears revocations, so both at once is a contradiction. The wider rule
+    "revoked implies ready" is deliberately NOT written: a revoked `ready`
+    take may legally move to `failed` or `unresolved` by transition, keeping
+    its history (§2)."""
+    approved = approval.approve(make_take(state="ready", shot=0, take=0), by="Niobe",
+                                at=APPROVED_AT, source_revision=REVISION)
+    for field in ("revokedBy", "revokedAt", "revokedReason"):
+        with pytest.raises(TakeError):
+            validate_take({**approved, field: "history"})
+    # The legal move the wider rule would break: revoke, then transition on.
+    revoked = approval.revoke(approved, by="Morpheus", at=REVOKED_AT, reason="camera drifted")
+    moved = transition(revoked, "failed")
+    assert moved["state"] == "failed"
+    assert moved["revokedBy"] == "Morpheus"  # the history is kept
+    assert validate_take(moved) == moved
+
+
 # --------------------------------------------------------------------------- /
-# 10. The five modules stay pure: allowlisted imports, no I/O, no clocks
+# 13. The five modules stay pure: allowlisted imports, no I/O, no clocks
 
 
 def test_modules_stay_pure():
