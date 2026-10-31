@@ -6,9 +6,11 @@ end-to-end today except the owner's payment credentials (see billing.py / config
 """
 from __future__ import annotations
 
+import copy
 import socket
 import sys
 from contextlib import asynccontextmanager
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -22,7 +24,9 @@ sys.path.insert(0, str(SERVICE_DIR))
 from app import auth, billing, config, store            # noqa: E402
 from app._http import read_json                          # noqa: E402
 from app.auth import current_user, require_user          # noqa: E402
+from capturd import engine as capturd_engine             # noqa: E402
 from capturd._net import is_private_ip                   # noqa: E402
+from capturd.engine import ManifestError, load_manifest  # noqa: E402
 from render_worker import CostCap, JobSpec, run_job       # noqa: E402
 
 # the Director scout lives in the rig; add it to path. Same env var + default as
@@ -94,6 +98,34 @@ def _reject_private_url(url: str) -> None:
             )
 
 
+# ── engine contract (W3-06d) ─────────────────────────────────────────────
+# The same object the MCP surface serves, from the same loader: the manifest
+# is read through ``capturd.engine.load_manifest`` only. ``_MANIFEST_BYTES``
+# is the loader's own ``data`` seam (None = the packaged file). The parse is
+# cached per distinct payload, so the file is read once per process.
+
+_MANIFEST_BYTES: bytes | None = None  # test seam: load_manifest(data=...)
+
+
+@lru_cache(maxsize=None)
+def _manifest_for(data: bytes | None) -> dict:
+    return load_manifest(data)
+
+
+def engine_contract() -> dict:
+    """The engine's own contract: full manifest, contract version, file path.
+
+    The path is the engine module's own ``_MANIFEST_PATH``, so it cannot
+    drift from the file the loader reads.
+    """
+    manifest = copy.deepcopy(_manifest_for(_MANIFEST_BYTES))
+    return {
+        "manifest": manifest,
+        "contractVersion": manifest["contractVersion"],
+        "manifestPath": str(capturd_engine._MANIFEST_PATH),
+    }
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     store.init()
@@ -108,7 +140,14 @@ app.include_router(billing.router)
 
 @app.get("/healthz")
 async def healthz():
-    return {"ok": True, **config.status()}
+    # A manifest that fails validation is reported in the contract field; it
+    # must never take the health answer down — a service that cannot say why
+    # it is unhealthy is worse than one that says so plainly.
+    try:
+        contract = engine_contract()
+    except ManifestError as exc:
+        contract = {"ok": False, "error": type(exc).__name__, "detail": str(exc)}
+    return {"ok": True, **config.status(), "engine_contract": contract}
 
 
 @app.get("/api/me")

@@ -51,16 +51,20 @@ Or, from inside pi, attach it as an MCP server via the standard
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import socket
 import sys
 import threading
 import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from capturd import engine as capturd_engine
 from capturd._net import is_private_ip
+from capturd.engine import load_manifest
 from fastmcp import FastMCP
 
 from capturd.pro import is_pro, checkout_url, PRO_CONFIG
@@ -73,6 +77,38 @@ from capturd.walk.coordinator import (
 )
 
 logger = logging.getLogger("capturd.mcp.server")
+
+
+# ── engine contract (W3-06d) ───────────────────────────────────────────────
+# The manifest is the single source of truth for engine id, engine version,
+# contract version and artifact kinds. Both surfaces serve it through the one
+# loader (``capturd.engine.load_manifest``); ``_MANIFEST_BYTES`` is the loader's
+# own ``data`` seam — None reads the packaged file, bytes are parsed directly
+# (tests hand in a manifest without touching disk). The parse is cached per
+# distinct payload, so the packaged file is read once per process.
+
+_MANIFEST_BYTES: bytes | None = None  # test seam: load_manifest(data=...)
+
+
+@lru_cache(maxsize=None)
+def _manifest_for(data: bytes | None) -> dict[str, Any]:
+    return load_manifest(data)
+
+
+def engine_contract() -> dict[str, Any]:
+    """The engine's own contract: full manifest, contract version, file path.
+
+    Loaded once per process and returned as a fresh copy; a manifest that
+    fails validation raises ``capturd.engine.ManifestError`` — never a
+    partial or empty answer. The path is the engine module's own
+    ``_MANIFEST_PATH``, so it cannot drift from the file the loader reads.
+    """
+    manifest = copy.deepcopy(_manifest_for(_MANIFEST_BYTES))
+    return {
+        "manifest": manifest,
+        "contractVersion": manifest["contractVersion"],
+        "manifestPath": str(capturd_engine._MANIFEST_PATH),
+    }
 
 
 # ── SSRF guard ─────────────────────────────────────────────────────────────
@@ -1183,6 +1219,22 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
             "count": job["total"],
             "status": job["status"],
         }
+
+    # ---- W3-06d: engine.contract ------------------------------------------
+
+    @mcp.tool(
+        name="engine.contract",
+        description=(
+            "Report the engine's own contract: the full engine manifest exactly "
+            "as capturd.engine.load_manifest() reads it, its contract version, "
+            "and the manifest path it was read from. Read-only, takes no "
+            "arguments, and is never Pro-gated — it describes the engine, it "
+            "does not perform work."
+        ),
+        timeout=15.0,
+    )
+    async def engine_contract_tool() -> dict[str, Any]:
+        return engine_contract()
 
     # Stash the forge on the server so tests / integration helpers can grab
     # it without rebuilding the server from scratch.
