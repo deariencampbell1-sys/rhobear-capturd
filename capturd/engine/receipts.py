@@ -19,9 +19,11 @@ REQUIRED_FIELDS = ("operationId", "attemptId", "accountId", "product", "priceVer
                    "units", "customerDebitUsd", "state", "occurredAt")
 STATES = ("reserved", "settled", "released", "unresolved", "reversed")
 COVERAGE_KIND = "launch_mcp_unmetered"
-_IDENTITY = re.compile(r".{1,512}")
+# The frozen JS `^.{1,512}$`: its `.` excludes all four line terminators, while
+# Python's excludes only `\n`, so they are named here.
+_IDENTITY = re.compile("[^\n\r\u2028\u2029]{1,512}")
 _TIMESTAMP = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
-                        r"(\.[0-9]{3}(?:[0-9]{3})?)?(Z|[+-][0-9]{2}:[0-9]{2})$")
+                        r"(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$")
 _MONEY = re.compile(r"[0-9]+(?:\.[0-9]+)?")
 _MOVES = {("reserved", "settle"): "settled", ("reserved", "release"): "released",
           ("settled", "reverse"): "reversed"}
@@ -40,7 +42,7 @@ def is_identity(value: Any) -> bool:
     """The one identity rule: a 1-512 character string, never empty.
 
     The window is the pinned `^.{1,512}$` (matched whole, no newline mode), so
-    an identity containing a newline stays outside it. Do not widen this to
+    an identity containing any line terminator stays outside it. Do not widen this to
     `[\\s\\S]` or add DOTALL; the rule is frozen.
     """
     return isinstance(value, str) and _IDENTITY.fullmatch(value) is not None
@@ -49,17 +51,19 @@ def is_identity(value: Any) -> bool:
 def _instant(value: Any, field: str) -> datetime.datetime:
     """The schema's ISO-8601 timestamp with an offset, parsed as a real instant.
 
-    The fractional second is pinned to the two widths the minimum supported
-    runtime (`requires-python >= 3.10`) parses — exactly three or six digits —
-    so a timestamp is accepted or refused the same way on every interpreter.
-    Runtimes from 3.11 on would parse any width, which is why the rule lives
-    in the pattern rather than in the interpreter.
+    Any fraction the frozen schema admits is accepted; it is normalised to six
+    digits before parsing, so a timestamp is judged the same way on every
+    interpreter (`requires-python >= 3.10`).
     """
     if not isinstance(value, str) or _TIMESTAMP.fullmatch(value) is None:
         raise ReceiptError(f"{field} is not an ISO-8601 timestamp with an offset")
     try:
-        # `Z` is the one spelling `fromisoformat` before 3.11 does not accept.
-        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        # `fromisoformat` before 3.11 takes neither `Z` nor every fraction width,
+        # so the fraction is normalised to six digits and `Z` is spelled out.
+        # Past six digits it truncates: the validated value itself is unchanged.
+        normal = re.sub(r"\.([0-9]+)",
+                        lambda m: f".{m.group(1).ljust(6, chr(48))[:6]}", value, count=1)
+        return datetime.datetime.fromisoformat(normal.replace("Z", "+00:00"))
     except ValueError as exc:
         raise ReceiptError(f"{field} is not a real instant: {value!r}") from exc
 
