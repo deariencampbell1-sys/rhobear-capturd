@@ -38,3 +38,23 @@ def _offline_test_dns(monkeypatch):
 
     monkeypatch.setattr("capturd.shots.capture._getaddrinfo", resolve)
     return resolve
+
+
+@pytest.fixture
+def app_main(monkeypatch):
+    """The hosted service app imported for one test, not at module import.
+
+    ``service/`` is not on ``sys.path`` for a bare ``python -m pytest`` run,
+    and a test module must not insert into ``sys.path`` at import time —
+    import order is process-wide, so another module can be shadowed for the
+    rest of the session. ``monkeypatch.syspath_prepend`` scopes the insert to
+    the requesting test and restores it afterwards; the imported module stays
+    in ``sys.modules`` for later tests.
+    """
+    from pathlib import Path
+
+    service = Path(__file__).resolve().parent.parent / "service"
+    monkeypatch.syspath_prepend(str(service))
+    import app.main as main
+
+    return main

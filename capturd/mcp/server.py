@@ -61,6 +61,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from capturd._net import is_private_ip
+from capturd.engine.contract import engine_contract
 from fastmcp import FastMCP
 
 from capturd.pro import is_pro, checkout_url, PRO_CONFIG
@@ -1183,6 +1184,27 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
             "count": job["total"],
             "status": job["status"],
         }
+
+    # ---- W3-06d: engine.contract ------------------------------------------
+
+    @mcp.tool(
+        name="engine.contract",
+        description=(
+            "Report the engine's own contract: the full engine manifest exactly "
+            "as capturd.engine.load_manifest() reads it, its contract version, "
+            "and the manifest path it was read from. Read-only, takes no "
+            "arguments, and is never Pro-gated — it describes the engine, it "
+            "does not perform work."
+        ),
+        timeout=15.0,
+    )
+    async def engine_contract_tool() -> dict[str, Any]:
+        # One implementation for both surfaces: capturd.engine.contract.
+        # The tool passes include_path=True — an operator asking for the
+        # contract is who the manifest's filesystem path is for. The path
+        # itself comes from capturd.engine.manifest_path, the loader's own
+        # file, so it can never drift from what was read.
+        return engine_contract(include_path=True)
 
     # Stash the forge on the server so tests / integration helpers can grab
     # it without rebuilding the server from scratch.

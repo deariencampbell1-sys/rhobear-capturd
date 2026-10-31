@@ -23,6 +23,7 @@ from app import auth, billing, config, store            # noqa: E402
 from app._http import read_json                          # noqa: E402
 from app.auth import current_user, require_user          # noqa: E402
 from capturd._net import is_private_ip                   # noqa: E402
+from capturd.engine.contract import engine_contract      # noqa: E402
 from render_worker import CostCap, JobSpec, run_job       # noqa: E402
 
 # the Director scout lives in the rig; add it to path. Same env var + default as
@@ -94,6 +95,13 @@ def _reject_private_url(url: str) -> None:
             )
 
 
+# ── engine contract (W3-06d) ─────────────────────────────────────────────
+# The one implementation lives in ``capturd.engine.contract``; the manifest is
+# read only through ``capturd.engine.load_manifest`` there. The public answer
+# carries version metadata only — never the server's filesystem path, which
+# stays on the operator-scoped MCP tool.
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     store.init()
@@ -108,7 +116,12 @@ app.include_router(billing.router)
 
 @app.get("/healthz")
 async def healthz():
-    return {"ok": True, **config.status()}
+    # The contract carries its own success/failure shape (ok, error, detail),
+    # so a manifest that fails validation is reported in the field instead of
+    # taking the health answer down. The contract is the shared implementation
+    # and never carries the server's filesystem path — that lives on the
+    # operator-scoped MCP tool, sourced from the loader's own manifest path.
+    return {"ok": True, **config.status(), "engine_contract": engine_contract()}
 
 
 @app.get("/api/me")

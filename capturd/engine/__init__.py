@@ -57,6 +57,16 @@ def load_manifest(data: bytes | None = None) -> dict[str, Any]:
     return manifest
 
 
+def manifest_path() -> Path:
+    """The file :func:`load_manifest` reads, as a path — never re-derived.
+
+    Public so callers that must report *where* the manifest came from ask the
+    loader itself instead of rebuilding the path from ``__file__`` or
+    reaching into this module's private state.
+    """
+    return _MANIFEST_PATH
+
+
 def check_artifact_size(path: str | Path) -> int:
     """Return the file's byte count; refuse anything over MAX_ARTIFACT_BYTES.
 
