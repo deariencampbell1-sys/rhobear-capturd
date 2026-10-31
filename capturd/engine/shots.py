@@ -123,15 +123,22 @@ def export_blocked(shot_indexes, takes, selection, included):
     `shot_indexes` are the demo's shots; `takes` the complete take set for
     the job tree (ruling C); `selection` maps shot index to take index
     (ruling B); `included` the `(shotIndex, takeIndex)` pairs in the package.
-    Every matching clause reports, not only the first; a blocked state never
-    raises; each block names the shot, the take and what is needed. An
-    ambiguous take set — two records sharing a `(shotIndex, takeIndex)` of
-    two ints — is a caller error and raises `AmbiguousTakeSet`; it is never
-    silently picked from. An `included` entry that is not a two-item pair
-    becomes an `included_not_approved` block with null indexes.
+    Every matching clause reports, not only the first; each block names the
+    shot, the take and what is needed. A blocked state never raises.
+
+    An invalid or ambiguous *set* is a caller error and does: every record
+    is validated by `validate_take` before the list is sorted or indexed —
+    so a non-dict entry is `TakeError`, never `AttributeError`, and a null
+    `approvedBy` on an `approved` take is refused, never trusted to clear
+    the gate — then two valid records sharing a `(shotIndex, takeIndex)` of
+    two ints raise `AmbiguousTakeSet`; a malformed record is reported as
+    malformed, not as an ambiguity. It is never silently picked from. An
+    `included` entry that is not a two-item pair becomes an
+    `included_not_approved` block with null indexes.
     """
     shot_list = list(shot_indexes)
-    take_list = sorted(takes, key=_take_order)
+    validated = [validate_take(record) for record in takes]
+    take_list = sorted(validated, key=_take_order)
     ambiguous = _ambiguous_pair(take_list)
     if ambiguous is not None:
         raise AmbiguousTakeSet(
