@@ -475,15 +475,20 @@ def export_video(
                 audio_clips.append((clip, at_ms))
             _encode_mp4(ffmpeg, frames_dir, fps, duration_s, out_path, audio_clips)
 
-    if not out_path.is_file() or out_path.stat().st_size == 0:
-        raise DemoExportError(f"export produced no output at {out_path}")
+    # The existence check and the size read are one mapped step: a file that
+    # vanishes between them is refused, never leaked as a bare OSError, and
+    # the single size read is the one the completion log carries.
     try:
-        check_artifact_size(out_path)
+        if not out_path.is_file():
+            raise DemoExportError(f"export produced no output at {out_path}")
+        out_size = check_artifact_size(out_path)
+        if out_size == 0:
+            raise DemoExportError(f"export produced no output at {out_path}")
     except ArtifactTooLarge as exc:
         raise DemoExportError(str(exc), size=exc.size, cap=exc.cap) from exc
     except OSError as exc:
         raise DemoExportError(f"export output unreadable at {out_path}: {exc}") from exc
-    logger.info("export complete: %s (%.1f KB)", out_path, out_path.stat().st_size / 1024)
+    logger.info("export complete: %s (%.1f KB)", out_path, out_size / 1024)
     return out_path
 
 

@@ -1498,6 +1498,11 @@ async def _write_still(page: Any, path: str | Path, **kwargs: Any) -> int:
     except ArtifactTooLarge:
         still.unlink(missing_ok=True)  # an over-cap still never stays on disk
         raise
+    except OSError as exc:
+        # A still that vanished or cannot be read back is refused, not leaked:
+        # unlink the partial bytes and raise the module's typed refusal.
+        still.unlink(missing_ok=True)
+        raise RestedCaptureError(f"still unreadable at {still}: {exc}") from exc
 
 
 async def _restore_after_open(page, el, baseline, base_url, settings):
@@ -1569,6 +1574,21 @@ async def _sweep_states(page: Any, target: CaptureTarget, settings: dict[str, An
                 "status": "failed", "error": "artifact_too_large",
                 "file": None,
                 "bytes": exc.size, "cap": exc.cap,
+                "state": "open", "control": control["label"], "control_tag": control["tag"],
+            })
+            try:
+                await _restore_after_open(page, el, baseline, base_url, settings)
+            except Exception:
+                pass  # the record stands; the next control runs as the generic path does
+            continue
+        except RestedCaptureError as exc:
+            # A still that vanished mid-read is a real failure, not "nothing to
+            # see": record it and restore before the next control.
+            shots.append({
+                "url": target.url, "state_id": target.state_id,
+                "viewport": target.viewport_id, "scheme": target.scheme,
+                "width": target.width, "height": target.height,
+                "status": "failed", "error": str(exc), "file": None,
                 "state": "open", "control": control["label"], "control_tag": control["tag"],
             })
             try:
@@ -1723,7 +1743,13 @@ async def _capture_one(
                 allow_private_hosts=allow_private_hosts, allow_file_access=allow_file_access,
                 cache=navigation_cache,
             )
-            still_bytes = await _write_still(page, **screenshot_kwargs)
+            try:
+                still_bytes = await _write_still(page, **screenshot_kwargs)
+            except RestedCaptureError as exc:
+                # A still that will not come back on a retry ends the attempts
+                # now; the refusal is recorded like any other capture failure.
+                last_error = _redact_outward_error(str(exc), settings)
+                break
             extra_states: list[dict[str, Any]] = []
             if settings.get("states"):
                 for state in await _sweep_states(page, target, settings, path):
