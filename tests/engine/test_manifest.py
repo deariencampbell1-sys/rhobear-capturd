@@ -527,7 +527,7 @@ def _overcap_sweep_page(*, controls, sizes, escape_restores=True, escape_raises=
     elements: dict[str, SimpleNamespace] = {}
 
     def locator(selector: str) -> SimpleNamespace:
-        key = selector.rsplit("=", 1)[-1]
+        key = selector.rsplit("=", 1)[-1].rstrip("]")
         if key not in elements:
             el = SimpleNamespace(count=AsyncMock(return_value=1), is_visible=AsyncMock(return_value=True))
 
@@ -552,6 +552,12 @@ def _overcap_sweep_page(*, controls, sizes, escape_restores=True, escape_raises=
         return fingerprint[0]
 
     page.evaluate.side_effect = evaluate
+
+    async def goto(url, **kwargs):
+        if order is not None:
+            order.append("goto")
+
+    page.goto.side_effect = goto
 
     async def press(key):
         if escape_raises:

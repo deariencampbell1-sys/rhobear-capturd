@@ -1500,6 +1500,24 @@ async def _write_still(page: Any, path: str | Path, **kwargs: Any) -> int:
         raise
 
 
+async def _restore_after_open(page, el, baseline, base_url, settings):
+    """Return the page to its baseline: Escape, then re-click, then reload as the last resort."""
+    await page.keyboard.press("Escape")
+    await page.wait_for_timeout(250)
+    if await page.evaluate(_FINGERPRINT_JS) != baseline:
+        try:
+            if await el.count() and await el.is_visible():
+                await el.click(timeout=1500)
+                await page.wait_for_timeout(250)
+        except Exception:
+            pass
+    if page.url != base_url or await page.evaluate(_FINGERPRINT_JS) != baseline:
+        await page.goto(base_url, wait_until="domcontentloaded",
+                        timeout=int(settings["timeout_ms"]))
+        await _settle_page(page, settings["wait_ms"])
+        await page.evaluate(_MAP_CONTROLS_JS)   # re-tag after reload
+
+
 async def _sweep_states(page: Any, target: CaptureTarget, settings: dict[str, Any],
                         base_path: Path) -> list[dict[str, Any]]:
     """Click each mapped control, capture the state it opens, restore, and move on."""
@@ -1541,21 +1559,7 @@ async def _sweep_states(page: Any, target: CaptureTarget, settings: dict[str, An
                     "status": "ok", "file": out.name, "bytes": still_bytes,
                     "state": "open", "control": control["label"], "control_tag": control["tag"],
                 })
-            # restore: Escape, then re-click, then reload as the last resort
-            await page.keyboard.press("Escape")
-            await page.wait_for_timeout(250)
-            if await page.evaluate(_FINGERPRINT_JS) != baseline:
-                try:
-                    if await el.count() and await el.is_visible():
-                        await el.click(timeout=1500)
-                        await page.wait_for_timeout(250)
-                except Exception:
-                    pass
-            if page.url != base_url or await page.evaluate(_FINGERPRINT_JS) != baseline:
-                await page.goto(base_url, wait_until="domcontentloaded",
-                                timeout=int(settings["timeout_ms"]))
-                await _settle_page(page, settings["wait_ms"])
-                await page.evaluate(_MAP_CONTROLS_JS)   # re-tag after reload
+            await _restore_after_open(page, el, baseline, base_url, settings)
         except ArtifactTooLarge as exc:
             # An over-cap state is recorded; the page is not aborted.
             shots.append({
@@ -1563,9 +1567,14 @@ async def _sweep_states(page: Any, target: CaptureTarget, settings: dict[str, An
                 "viewport": target.viewport_id, "scheme": target.scheme,
                 "width": target.width, "height": target.height,
                 "status": "failed", "error": "artifact_too_large",
+                "file": None,
                 "bytes": exc.size, "cap": exc.cap,
                 "state": "open", "control": control["label"], "control_tag": control["tag"],
             })
+            try:
+                await _restore_after_open(page, el, baseline, base_url, settings)
+            except Exception:
+                pass  # the record stands; the next control runs as the generic path does
             continue
         except Exception:
             continue
