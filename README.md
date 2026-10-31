@@ -61,7 +61,7 @@ demo.zoom       demo.pan         demo.hold                # camera
 demo.spotlight  demo.overlay                              # composition
 demo.reorder    demo.trim        demo.branch              # structure
 demo.stylize    demo.regenerate                           # restyle
-engine.contract                                           # manifest + contract version (also /healthz engine_contract)
+engine.contract                                           # manifest + contract version; manifest path from the engine loader (also /healthz engine_contract)
 ```
 
 Editing is the API. The agent IS the editor. No GUI editor as v1.

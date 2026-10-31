@@ -1201,7 +1201,9 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
     async def engine_contract_tool() -> dict[str, Any]:
         # One implementation for both surfaces: capturd.engine.contract.
         # The tool passes include_path=True — an operator asking for the
-        # contract is who the manifest's filesystem path is for.
+        # contract is who the manifest's filesystem path is for. The path
+        # itself comes from capturd.engine.manifest_path, the loader's own
+        # file, so it can never drift from what was read.
         return engine_contract(include_path=True)
 
     # Stash the forge on the server so tests / integration helpers can grab

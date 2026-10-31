@@ -120,7 +120,7 @@ async def healthz():
     # so a manifest that fails validation is reported in the field instead of
     # taking the health answer down. The contract is the shared implementation
     # and never carries the server's filesystem path — that lives on the
-    # operator-scoped MCP tool.
+    # operator-scoped MCP tool, sourced from the loader's own manifest path.
     return {"ok": True, **config.status(), "engine_contract": engine_contract()}
 
 
