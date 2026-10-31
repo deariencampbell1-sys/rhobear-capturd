@@ -90,7 +90,7 @@ def _new_take(previous, *, take_index, job_id, attempt_id, direction,
 
 
 def _is_index(value):
-    return isinstance(value, int) and not isinstance(value, bool)
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def _ambiguous_pair(take_list):
