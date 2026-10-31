@@ -18,13 +18,20 @@ class ArtifactError(ValueError):
 
 
 def _copied(value: Any) -> Any:
-    """A copy of `value` sharing no mapping with it, at any depth."""
+    """A copy of `value` sharing no mutable container with it, at any depth.
+
+    Mappings, lists and tuples recurse; a `set` or `frozenset` is rebuilt as
+    its own concrete type, so a registry entry can carry one without input
+    and output aliasing the same object.
+    """
     if isinstance(value, Mapping):
         return {key: _copied(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_copied(item) for item in value]
     if isinstance(value, tuple):
         return tuple(_copied(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return type(value)(_copied(item) for item in value)
     return value
 
 
