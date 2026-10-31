@@ -1,6 +1,6 @@
 """W3-06a — the engine manifest is packaged, truthful, and the cap is real.
 
-Everything here is driven by the briefs (W3-06a-r1..r4): the packaged manifest
+Everything here is driven by the briefs (W3-06a-r1..r5): the packaged manifest
 carries every ADOPTION.md field, `load_manifest` refuses incomplete manifests,
 `check_artifact_size` enforces `MAX_ARTIFACT_BYTES` on the exporter's size step
 and on the one still funnel in `capturd/shots/capture.py`, no `page.screenshot`
@@ -139,14 +139,39 @@ def test_corrupt_packaged_manifest_raises_a_named_error(tmp_path, monkeypatch):
     bad(mistyped)                                       # one required key of the wrong type
 
 
+def test_load_manifest_refuses_a_bool_integer_field():
+    """JSON true is not an integer: no required key is a bool (r5 item 3)."""
+    good = engine.load_manifest()
+    data = json.dumps({**good, "schemaVersion": True}).encode("utf-8")
+    with pytest.raises(engine.ManifestError, match="schemaVersion"):
+        engine.load_manifest(data)
+    assert engine.load_manifest(json.dumps({**good, "schemaVersion": 1}).encode("utf-8"))[
+        "schemaVersion"] == 1, "the integer 1 still loads"
+
+
 def test_engine_version_matches_pyproject():
     pyproject = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert engine.load_manifest()["engineVersion"] == pyproject["project"]["version"]
 
 
+def test_dev_extra_declares_build():
+    """The wheel test runs `python -m build`, so the dev extra must declare it."""
+    pyproject = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    dev = pyproject["project"]["optional-dependencies"]["dev"]
+    assert any(str(entry).startswith("build") for entry in dev), dev
+
+
 def test_max_active_jobs_per_account_matches_the_render_budget():
     assert engine.load_manifest()["limits"]["maxActiveJobsPerAccount"] \
         == _service_render_max_concurrent()
+
+
+def test_service_default_ignores_a_stray_env(monkeypatch):
+    """A stray CAPTURD_RENDER_MAX_CONCURRENT must not leak into the default read."""
+    monkeypatch.setenv("CAPTURD_RENDER_MAX_CONCURRENT", "99")
+    value = _service_render_max_concurrent()
+    assert value != 99
+    assert value == engine.load_manifest()["limits"]["maxActiveJobsPerAccount"]
 
 
 def _service_render_max_concurrent() -> int:
@@ -274,6 +299,19 @@ def test_export_under_the_cap_still_succeeds(tmp_path, monkeypatch):
     assert out.is_file() and out.stat().st_size == 8
 
 
+def test_export_vanished_output_is_a_demo_export_error(tmp_path, monkeypatch):
+    """An OSError from the size step is mapped too — a refusal never escapes raw (r5 item 2)."""
+
+    def vanished(path):
+        raise FileNotFoundError(f"output vanished: {path}")
+
+    monkeypatch.setattr(exporter, "check_artifact_size", vanished)
+    with pytest.raises(exporter.DemoExportError) as exc:
+        _export_over_env(tmp_path, monkeypatch, artifact_bytes=24, cap=10)
+    assert exc.value.size is None and exc.value.cap is None
+    assert "demo.mp4" in str(exc.value)
+
+
 def _forge_with_overcap_demo(tmp_path, monkeypatch, *, artifact_bytes, cap):
     """A real DemoForge demo whose (faked) encoder writes an over-cap video."""
     from capturd.walk.coordinator import DemoForge
@@ -397,6 +435,16 @@ def test_artifact_too_large_on_the_baseline_is_never_retried(tmp_path, monkeypat
     assert page.goto.await_count == 1, "exactly one navigation"
     assert len(written) == 1, "exactly one write attempt"
     assert not [p for p in tmp_path.rglob("*") if p.is_file()], "nothing stays on disk"
+
+
+def test_exhausted_retries_report_the_whole_budget(tmp_path, monkeypatch):
+    """A failure that survives every retry reports the full attempts budget (r5 item 5)."""
+    context, target, settings, path, page, _written = _capture_stack(
+        tmp_path, monkeypatch, retries=2)
+    page.screenshot.side_effect = RuntimeError("boom")
+    result = asyncio.run(capture._capture_one(context, target, settings, path))
+    assert result["status"] == "failed"
+    assert result["attempts"] == 3, "retries=2 means the whole budget is 3 attempts"
 
 
 def test_still_over_cap_in_the_sweep_is_recorded_and_the_sweep_continues(tmp_path, monkeypatch):
