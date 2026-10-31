@@ -25,8 +25,14 @@ def retake(previous, *, take_index, job_id, attempt_id, direction, created_at):
     Direction only: the pixels are the previous take's, so the revision and
     the source artifact carry over unchanged (§4). Identity and time come
     from the caller — the new child job; every approval field starts null.
+    A retake is a new take: `take_index` equal to the previous record's is
+    refused, so the pair `(shotIndex, takeIndex)` is never minted twice.
     """
     validate_take(previous)
+    if take_index == previous["takeIndex"]:
+        raise TakeError(
+            f"retake is a new take; takeIndex {take_index!r} is the previous "
+            "take's")
     return _new_take(
         previous, take_index=take_index, job_id=job_id, attempt_id=attempt_id,
         direction=direction, created_at=created_at,
@@ -41,8 +47,14 @@ def recapture(previous, *, take_index, job_id, attempt_id, source_revision,
     Refused when `source_revision` equals the previous take's: recapture is
     re-recording the pixels, and the same revision would be a retake (§4).
     The old revision stays immutable; the previous direction carries over.
+    A recapture is a new take: `take_index` equal to the previous record's
+    is refused, so the pair `(shotIndex, takeIndex)` is never minted twice.
     """
     validate_take(previous)
+    if take_index == previous["takeIndex"]:
+        raise TakeError(
+            f"recapture is a new take; takeIndex {take_index!r} is the "
+            "previous take's")
     if source_revision == previous["sourceRevision"]:
         raise TakeError("recapture must record new pixels; use retake to keep "
                         + repr(previous["sourceRevision"]))
