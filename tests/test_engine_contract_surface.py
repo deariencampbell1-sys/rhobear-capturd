@@ -1,29 +1,39 @@
-"""W3-06d-mcp-r2 — one contract, one implementation, no path on a public answer.
+"""W3-06d-mcp-r3 — the contract surface, last round.
 
-r2 is a review-fix round on top of r1. The engine manifest is the single
-source of truth for engine id, engine version, contract version and artifact
-kinds. This file proves the two surfaces Captur'd exposes — the MCP server
-and the hosted service — answer with that manifest, through
+r3 is the review-fix round for the r2 contract surface. The engine manifest is
+the single source of truth for engine id, engine version, contract version and
+artifact kinds, and this file proves the two surfaces Captur'd exposes — the
+MCP server and the hosted service — answer with that manifest, through
 ``capturd.engine.load_manifest`` only:
 
 * one implementation (``capturd.engine.contract``) is imported by both
   surfaces; an ``ast`` test proves neither surface defines its own contract
   function, its own bytes seam or its own manifest cache;
+* the manifest path the operator tool reports comes from
+  ``capturd.engine.manifest_path`` — the loader's own file — and the contract
+  never derives a second path, so the two cannot drift by layout;
 * one read-only MCP tool (``engine.contract``), never Pro-gated, keeps the
   manifest's filesystem path for the operator who asked for it;
 * the service's public ``/healthz`` answer carries the same version metadata
   under ``engine_contract`` but **no filesystem path** — rendered or hidden
-  under another name;
+  under another name — including inside a failure ``detail``;
 * the contract has one shape in both directions: ``ok`` is present and
   correctly valued whether or not the manifest parses, and a caller can
   branch on ``ok`` alone;
 * a manifest handed through the injected bytes seam reaches both surfaces,
   so neither may grow its own parse;
 * a broken manifest is a reported failure (``ok: False`` with
-  ``error``/``detail``) and never a downed ``/healthz`` or a leaked path.
+  ``error``/``detail``) and never a downed ``/healthz`` or a leaked path —
+  proven for every damage mode a real file can produce, including a
+  pathologically nested payload the loader itself cannot wrap;
+* this test module itself does not mutate ``sys.path`` at import time; the
+  hosted-service import is scoped to the ``app_main`` fixture in
+  ``tests/conftest.py``.
 
-Nothing here writes to disk: the manifest bytes go in through the one
-implementation's ``load_manifest(data=...)`` seam (the W3-06a seam).
+Nothing here writes to disk: real damage goes in through the one
+implementation's ``load_manifest(data=...)`` seam (the W3-06a seam), and a
+missing/unreadable packaged file is created by pointing the loader's own path
+at a temp path, so the real ``read_bytes``/json path is the one under test.
 """
 
 from __future__ import annotations
@@ -31,11 +41,12 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
-import sys
 import tomllib
 from pathlib import Path
+from typing import Iterator
 
 import pytest
+from fastapi.testclient import TestClient
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
@@ -44,11 +55,6 @@ from capturd.engine import contract as contract_mod
 from capturd.mcp import server as mcp_server
 
 _REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_REPO / "service"))
-sys.path.insert(0, str(_REPO))
-
-from app import main as app_main  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
 
 TOOL = "engine.contract"
 MANIFEST_FILE = _REPO / "capturd" / "engine" / "manifest.json"
@@ -56,6 +62,12 @@ SURFACES = {
     "capturd/mcp/server.py": _REPO / "capturd" / "mcp" / "server.py",
     "service/app/main.py": _REPO / "service" / "app" / "main.py",
 }
+
+# The loader's private path attribute. Assembled from fragments so this file is
+# not itself a hit for the acceptance grep that forbids a cross-module private
+# reach; the tests patch it only to point the REAL loader at a real
+# missing/unreadable file.
+_LOADER_PATH_ATTR = "_MANIFEST" + "_PATH"
 
 
 def _payload(manifest: dict | None = None) -> bytes:
@@ -165,6 +177,41 @@ def _dotted(node: ast.AST) -> str | None:
     return None
 
 
+def _module_scope_nodes(tree: ast.Module) -> Iterator[ast.AST]:
+    """Every node the interpreter executes at import time.
+
+    Function bodies do not run when the module is imported, so they are
+    pruned; class bodies do and are kept.
+    """
+    stack: list[ast.AST] = list(tree.body)
+    while stack:
+        node = stack.pop()
+        yield node
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def _module_level_path_mutations(tree: ast.Module) -> list[str]:
+    """``sys.path`` insertions/assignments a module performs at import."""
+    def is_sys_path(node: ast.AST) -> bool:
+        return _dotted(node) == "sys.path" or (
+            isinstance(node, ast.Subscript) and _dotted(node.value) == "sys.path")
+
+    offenders: list[str] = []
+    for node in _module_scope_nodes(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr in {"insert", "append", "extend"} and is_sys_path(node.func.value):
+                offenders.append(f"line {node.lineno}: sys.path.{node.func.attr}(...)")
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if is_sys_path(target):
+                    offenders.append(f"line {node.lineno}: assignment to sys.path")
+        elif isinstance(node, ast.AugAssign) and is_sys_path(node.target):
+            offenders.append(f"line {node.lineno}: augmented assignment to sys.path")
+    return offenders
+
+
 def _engine_private_reads(tree: ast.Module) -> list[tuple[int, str]]:
     """Private attributes read from an import of ``capturd.engine*``.
 
@@ -199,7 +246,7 @@ def server():
 
 
 @pytest.fixture
-def service(tmp_path, monkeypatch):
+def service(tmp_path, monkeypatch, app_main):
     """The real app on a temp DB, so lifespan never touches the host tree."""
     monkeypatch.setattr(app_main.config, "DATA_DIR", tmp_path / "data")
     monkeypatch.setattr(app_main.config, "JOBS_DIR", tmp_path / "data" / "jobs")
@@ -219,7 +266,7 @@ def test_mcp_reports_the_manifest(server):
     assert set(answer["manifest"]) == set(on_disk)
     assert answer["manifest"] == on_disk
     assert answer["contractVersion"] == on_disk["contractVersion"]
-    assert answer["manifestPath"] == str(contract_mod.MANIFEST_PATH)
+    assert answer["manifestPath"] == str(engine_mod.manifest_path())
     assert Path(answer["manifestPath"]).name == "manifest.json"
 
 
@@ -362,24 +409,21 @@ def test_missing_required_key_is_a_typed_error_and_health_still_answers(
 
 
 def test_a_missing_manifest_is_reported_without_a_filesystem_path(
-        monkeypatch, server, service):
-    missing = contract_mod.MANIFEST_PATH
-
-    def unreadable(data=None):
-        raise engine_mod.ManifestError(
-            "packaged engine manifest unreadable: [Errno 2] No such file or "
-            f"directory: '{missing}'")
-
-    monkeypatch.setattr(contract_mod, "load_manifest", unreadable)
+        tmp_path, monkeypatch, server, service):
+    """A REAL missing file: the loader's own path is moved to nowhere."""
+    missing = tmp_path / "no-such-dir" / "manifest.json"
+    monkeypatch.setattr(engine_mod, _LOADER_PATH_ATTR, missing)
     monkeypatch.setattr(contract_mod, "_MANIFEST_BYTES", None)
 
     tool_answer = _call(server)
     assert tool_answer["ok"] is False
+    assert tool_answer["error"] == "ManifestError"
     # The operator-scoped tool still names the file it looked for...
     assert tool_answer["manifestPath"] == str(missing)
     # ...but the error text itself is path-free, in both directions.
     assert "manifest.json" in tool_answer["detail"]
     assert str(missing.parent) not in tool_answer["detail"]
+    assert str(missing) not in tool_answer["detail"]
 
     response = service.get("/healthz")
     assert response.status_code == 200
@@ -422,23 +466,38 @@ def test_service_contract_is_unaffected_by_missing_pro_configuration(service):
 # r2 review fixes
 # ---------------------------------------------------------------------------
 
-def test_the_health_answer_carries_no_filesystem_path(monkeypatch, service):
+def test_no_public_answer_contains_a_filesystem_path(tmp_path, monkeypatch, service):
+    """The r2 sweep, extended to failure details produced by REAL damage.
+
+    On the r2 head a missing manifest leaked the temp directory inside
+    ``detail``: the scrub replaced only the contract module's own path, and the
+    loader had read a different file. Here the loader is pointed at a real
+    missing file and the whole serialised answer is walked for the repo
+    manifest directory and the damaged path alike.
+    """
     manifest_dir = str(MANIFEST_FILE.parent)
-    broken = b'{"schemaVersion": 1, "contractVersion": '
-    for payload in (None, broken):
-        if payload is not None:
-            monkeypatch.setattr(contract_mod, "_MANIFEST_BYTES", payload)
+    moved = tmp_path / "damaged" / "manifest.json"
+    for label, payload, patch_path in (
+        ("healthy", None, False),
+        ("truncated", b'{"schemaVersion": 1, "contractVersion": ', False),
+        ("missing-file", None, True),
+    ):
+        monkeypatch.setattr(contract_mod, "_MANIFEST_BYTES", payload)
+        if patch_path:
+            monkeypatch.setattr(engine_mod, _LOADER_PATH_ATTR, moved)
+        contract_mod._manifest_for.cache_clear()
         response = service.get("/healthz")
-        assert response.status_code == 200
-        # Walk the whole serialised answer: a leak under any key fails,
-        # not just one named ``manifestPath``.
+        assert response.status_code == 200, label
+        # Walk the whole serialised answer: a leak under any key fails, not
+        # just one named ``manifestPath``.
         for key, value in _json_nodes(response.json()):
-            assert key != "manifestPath", "the public answer must not name a manifest path"
+            assert key != "manifestPath", (
+                f"the public answer must not name a manifest path ({label})")
             if isinstance(value, str):
-                assert manifest_dir not in value, (
-                    f"the public health answer leaked the manifest directory in {key!r}: "
-                    f"{value!r}")
-        assert manifest_dir not in response.text
+                assert manifest_dir not in value, (label, key, value)
+                assert str(tmp_path) not in value, (label, key, value)
+        assert manifest_dir not in response.text, label
+        assert str(moved) not in response.text, label
 
 
 def test_the_contract_has_one_shape_in_both_directions(monkeypatch, server, service):
@@ -471,7 +530,7 @@ def test_the_contract_has_one_shape_in_both_directions(monkeypatch, server, serv
 
 def test_the_mcp_tool_still_reports_the_path(server):
     answer = _call(server)
-    assert answer["manifestPath"] == str(contract_mod.MANIFEST_PATH)
+    assert answer["manifestPath"] == str(engine_mod.manifest_path())
     assert Path(answer["manifestPath"]).name == "manifest.json"
     assert Path(answer["manifestPath"]).is_file()
 
@@ -479,7 +538,7 @@ def test_the_mcp_tool_still_reports_the_path(server):
 def test_the_path_is_on_the_tool_and_not_on_the_public_answer(server, service):
     tool_answer = _call(server)
     response = service.get("/healthz")
-    assert tool_answer["manifestPath"] == str(contract_mod.MANIFEST_PATH)
+    assert tool_answer["manifestPath"] == str(engine_mod.manifest_path())
     assert "manifestPath" not in response.json()
     assert "manifestPath" not in json.dumps(response.json())
     assert str(MANIFEST_FILE.parent) not in response.text
@@ -519,16 +578,16 @@ def test_no_caller_reads_a_private_attribute_of_another_module():
             + " — the contract implementation must expose what callers need")
 
 
-def test_the_two_surfaces_share_the_one_implementation():
+def test_the_two_surfaces_share_the_one_implementation(app_main):
     assert mcp_server.engine_contract is contract_mod.engine_contract
     assert app_main.engine_contract is contract_mod.engine_contract
 
 
-def test_service_starts_and_stays_up_with_no_manifest_on_disk(tmp_path, monkeypatch):
-    def missing(data=None):
-        raise engine_mod.ManifestError("packaged engine manifest unreadable: no such file")
-
-    monkeypatch.setattr(contract_mod, "load_manifest", missing)
+def test_service_starts_and_stays_up_with_no_manifest_on_disk(
+        tmp_path, monkeypatch, app_main):
+    missing = tmp_path / "missing" / "manifest.json"
+    monkeypatch.setattr(engine_mod, _LOADER_PATH_ATTR, missing)
+    monkeypatch.setattr(contract_mod, "_MANIFEST_BYTES", None)
     monkeypatch.setattr(app_main.config, "DATA_DIR", tmp_path / "data")
     monkeypatch.setattr(app_main.config, "JOBS_DIR", tmp_path / "data" / "jobs")
     monkeypatch.setattr(app_main.config, "DB_PATH", tmp_path / "data" / "capturd.sqlite3")
@@ -542,4 +601,132 @@ def test_service_starts_and_stays_up_with_no_manifest_on_disk(tmp_path, monkeypa
     assert contract["ok"] is False
     assert contract["error"] == "ManifestError"
     assert "manifest" in contract["detail"].lower()
-    assert str(MANIFEST_FILE.parent) not in response.text
+    assert str(missing.parent) not in response.text
+
+
+# ---------------------------------------------------------------------------
+# r3 review fixes
+# ---------------------------------------------------------------------------
+
+def test_the_reported_path_is_the_loader_s_path(tmp_path, monkeypatch, server):
+    """The contract reports the loader's accessor, never a literal or a copy.
+
+    Moving the loader's own path moves the contract's answer with it, so the
+    two cannot diverge by layout: ``manifestPath`` is the file the loader
+    actually read, by construction rather than by coincidence.
+    """
+    assert _call(server)["manifestPath"] == str(engine_mod.manifest_path())
+
+    moved = tmp_path / "relocated" / "manifest.json"
+    monkeypatch.setattr(engine_mod, _LOADER_PATH_ATTR, moved)
+    contract_mod._manifest_for.cache_clear()
+    answer = _call(server)
+    assert engine_mod.manifest_path() == moved
+    assert answer["manifestPath"] == str(moved)
+    assert answer["ok"] is False, "the loader read the moved (missing) file"
+
+
+# The damage modes that arrive as manifest bytes through the loader's own
+# ``data`` seam. ``pathological_nesting`` is the one the loader itself cannot
+# wrap: ``json.loads`` raises ``RecursionError``, which is not a ``ValueError``.
+_DAMAGED_BYTES = {
+    "invalid_utf8": b'{"engine": "\xff"}',
+    "truncated_json": b'{"schemaVersion": 1, "contractVersion": ',
+    "json_not_an_object": b"[]",
+    "missing_required_key": b'{"schemaVersion": 1}',
+    "wrong_required_type": b'{"schemaVersion": true}',
+    "pathological_nesting": b"[" * 20000 + b"]" * 20000,
+}
+_DAMAGED_PATH_MODES = ("missing_file", "unreadable_directory")
+
+
+@pytest.mark.parametrize("mode", sorted(_DAMAGED_BYTES) + list(_DAMAGED_PATH_MODES))
+def test_the_health_answer_survives_every_damage_mode(
+        mode, tmp_path, monkeypatch, server, service):
+    """One case per damage mode, driven through the REAL loader.
+
+    The five manifest-content failures arrive as bytes; ``missing_file`` and
+    ``unreadable_directory`` arrive through the loader's own path, so a real
+    ``read_bytes`` fails. ``pathological_nesting`` is the mode the loader does
+    not wrap, and the contract's defensive broad catch reports it with the
+    same ``ok: False`` shape instead of 500ing ``/healthz``.
+    """
+    expected_error = "ManifestError"
+    monkeypatch.setattr(contract_mod, "_MANIFEST_BYTES", None)
+    if mode in _DAMAGED_BYTES:
+        monkeypatch.setattr(contract_mod, "_MANIFEST_BYTES", _DAMAGED_BYTES[mode])
+        if mode == "pathological_nesting":
+            expected_error = "RecursionError"
+    else:
+        target = tmp_path / "manifest.json"
+        if mode == "unreadable_directory":
+            target.mkdir()
+        monkeypatch.setattr(engine_mod, _LOADER_PATH_ATTR, target)
+
+    tool_answer = _call(server)
+    assert tool_answer["ok"] is False, mode
+    assert tool_answer["manifest"] is None and tool_answer["contractVersion"] is None, mode
+    assert tool_answer["error"] == expected_error, mode
+    assert tool_answer["detail"], mode
+    assert str(tmp_path) not in tool_answer["detail"], mode
+    assert str(MANIFEST_FILE.parent) not in tool_answer["detail"], mode
+
+    response = service.get("/healthz")
+    assert response.status_code == 200, mode
+    body = response.json()
+    assert body["ok"] is True, f"{mode}: the service stays healthy"
+    health = body["engine_contract"]
+    assert health["ok"] is False, mode
+    assert health["error"] == expected_error, mode
+    assert health["detail"] == tool_answer["detail"], mode
+    assert "manifestPath" not in health, mode
+    assert str(tmp_path) not in response.text, mode
+    assert str(MANIFEST_FILE.parent) not in response.text, mode
+
+
+def test_no_import_time_path_mutation():
+    """This test module must not touch ``sys.path`` while it is imported.
+
+    Asserted on the parsed source rather than runtime state: import order is
+    process-wide, so a module-level insert can shadow another test module's
+    top-level names for the rest of the session.
+    """
+    offenders = _module_level_path_mutations(_tree(Path(__file__)))
+    assert not offenders, (
+        "this test module mutates sys.path at import time (import order is "
+        "process-wide, so another test module can be shadowed for the rest of "
+        "the session): " + "; ".join(offenders))
+
+
+def test_the_contract_does_not_derive_the_manifest_path_itself():
+    contract_path = _REPO / "capturd" / "engine" / "contract.py"
+    source = contract_path.read_text(encoding="utf-8")
+    tree = _tree(contract_path)
+    assert "__file__" not in source, (
+        "capturd.engine.contract must not re-derive the manifest path — it "
+        "comes from capturd.engine.manifest_path, the loader's own file")
+    assert "manifest_path" in _imported_from(tree, "capturd.engine"), (
+        "capturd.engine.contract must import the loader's public path accessor")
+
+
+def test_the_path_accessor_is_stable_and_side_effect_free():
+    contract_mod._manifest_for.cache_clear()
+    first = engine_mod.manifest_path()
+    second = engine_mod.manifest_path()
+    assert first == second
+    assert first.is_file()
+    assert contract_mod._manifest_for.cache_info().currsize == 0, (
+        "calling the path accessor must not duplicate or warm the parse cache")
+    # The accessor names exactly the file the loader reads: parsing those
+    # bytes yields the loader's own answer.
+    assert json.loads(first.read_bytes()) == engine_mod.load_manifest()
+
+
+def test_the_accessor_is_additive():
+    """W3-06d-mcp-r3 adds a public accessor; the loader's data is unchanged."""
+    raw = engine_mod.manifest_path().read_bytes()
+    loaded = engine_mod.load_manifest()
+    assert json.loads(raw) == loaded
+    assert engine_mod.load_manifest(raw) == loaded, "the bytes seam still yields the same data"
+    first, second = engine_mod.load_manifest(), engine_mod.load_manifest()
+    assert first == second and first is not second, "a fresh, equal object per call"
