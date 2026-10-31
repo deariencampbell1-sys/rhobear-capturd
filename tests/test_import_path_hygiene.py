@@ -51,7 +51,9 @@ def test_production_package_never_references_the_test_fixture_seam():
     that is what CI can enforce, and unlike an import-assertion it cannot be
     dodged by a conditional import, a stringly-typed getattr, or a lazy
     ``importlib`` call. If any production module so much as mentions the seam,
-    it has leaked: fail loudly.
+    it has leaked: fail loudly. This is a tripwire on committed source, not a
+    proof of the negative — the runtime gate in ``tests/test_net_fixture.py``
+    is what actually keeps the seam inert in a process that never armed it.
     """
     net_py = REPO / "capturd" / "_net.py"
     offenders: list[str] = []

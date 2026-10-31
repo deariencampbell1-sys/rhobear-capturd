@@ -1,6 +1,6 @@
 """Captur'd hosted service — the shippable app.
 
-Full lifecycle: auth → plan/usage gate → cost cap → render → deliver. Serves its
+Full lifecycle: auth → load-protection gates → render → deliver. Serves its
 own frontend. Reuses render_worker (cost cap) + the Director rig. Everything works
 end-to-end today except the owner's payment credentials (see billing.py / config.py).
 """
@@ -128,23 +128,18 @@ async def healthz():
 async def me(request: Request):
     u = current_user(request)
     if not u:
-        return {"signed_in": False, "config": config.status(),
-                "pro_price": config.PRO_PRICE}
+        return {"signed_in": False, "config": config.status()}
     gens = store.usage_count(u["id"], "generation")
     return {
         "signed_in": True, "email": u["email"], "plan": u["plan"],
-        "usage": {"generations": gens,
-                  "free_limit": config.FREE_GENERATION_LIMIT,
-                  "remaining": (None if u["plan"] == "pro"
-                                else max(0, config.FREE_GENERATION_LIMIT - gens))},
-        "mcp_endpoint": (f"{config.BASE_URL}/mcp/{store.mcp_token_for(u['id'])}"
-                         if u["plan"] == "pro" else None),
-        "config": config.status(), "pro_price": config.PRO_PRICE,
+        "usage": {"generations": gens},
+        "mcp_endpoint": f"{config.BASE_URL}/mcp/{store.mcp_token_for(u['id'])}",
+        "config": config.status(),
     }
 
 
 def _run_generation(job_id: str, uid: str, url: str, template: str,
-                    name: str, spec_kwargs: dict, held_free_slot: bool) -> None:
+                    name: str, spec_kwargs: dict) -> None:
     store.record_job(job_id, uid, "walk", "running")
     # Director scout → a tight per-app shot; fall back to the generic tour.
     shot = None
@@ -159,12 +154,6 @@ def _run_generation(job_id: str, uid: str, url: str, template: str,
     spec = JobSpec(shot=shot, job_id=job_id, **spec_kwargs)
     res = run_job(spec, config.JOBS_DIR)
     store.record_job(job_id, uid, "walk", res.status, res.output, res.detail)
-    # The Free lifetime slot was reserved at submit time (race-proof). Success
-    # keeps it — that was the free generation. A non-delivery (timeout/error/
-    # cap) refunds it so the user can retry instead of being locked out of
-    # their one free render by a failure they didn't cause.
-    if res.status != "done" and held_free_slot:
-        store.refund(uid, "generation", 1)
 
 
 @app.post("/api/generate")
@@ -177,10 +166,9 @@ async def generate(request: Request, background: BackgroundTasks):
     _reject_private_url(url)
     template = body.get("template") or "saas-walkthrough"
     uid = user["id"]
-    is_pro = user["plan"] == "pro"
 
-    # Gate 1 — sliding-window rate limit. Applies to Pro too, so a single Pro
-    # key (or a runaway script) can't drain the Vertex/chromium budget.
+    # Gate 1 — sliding-window rate limit. Applies to every plan, so one account
+    # (or a runaway script) can't drain the Vertex/chromium budget.
     # Atomic check-and-reserve so concurrent requests can't all slip under it.
     if not store.try_acquire(uid, "render_request",
                              limit=config.RENDER_MAX_PER_HOUR, window_seconds=3600):
@@ -192,31 +180,13 @@ async def generate(request: Request, background: BackgroundTasks):
                 store.window_retry_after(uid, "render_request", 3600))},
         )
 
-    # Gate 2 — Free lifetime limit (canon: Free = 1). Reserved BEFORE the render
-    # starts, atomically; refunded on failure. The old check (here) + increment
-    # (in the post-completion task) were two transactions up to 600s apart, so N
-    # concurrent Free calls all read 0 and passed — reserving here closes that.
-    held_free_slot = False
-    if not is_pro:
-        if not store.try_acquire(uid, "generation",
-                                 limit=config.FREE_GENERATION_LIMIT,
-                                 window_seconds=None):
-            store.refund(uid, "render_request")   # no render → don't count it
-            raise HTTPException(
-                status_code=402,
-                detail=f"Free plan is {config.FREE_GENERATION_LIMIT} generation. "
-                       f"Upgrade to Pro ({config.PRO_PRICE}/mo) for unlimited.")
-        held_free_slot = True
-
-    # Gate 3 — per-account concurrency (Pro too). try_queue_job creates the
-    # queued job atomically iff under the in-flight cap, so this IS the
-    # reservation; if over, refund what the earlier gates reserved and 429.
+    # Gate 2 — per-account concurrency. try_queue_job creates the queued job
+    # atomically iff under the in-flight cap, so this IS the reservation; if
+    # over, refund the rate-limit reservation and 429.
     job_id = store.try_queue_job(uid, "walk",
                                  max_concurrent=config.RENDER_MAX_CONCURRENT)
     if job_id is None:
         store.refund(uid, "render_request")
-        if held_free_slot:
-            store.refund(uid, "generation")
         raise HTTPException(
             status_code=429,
             detail=f"too many in-flight renders ({config.RENDER_MAX_CONCURRENT} "
@@ -237,7 +207,7 @@ async def generate(request: Request, background: BackgroundTasks):
         "cap": cap,
     }
     background.add_task(_run_generation, job_id, uid, url, template, name,
-                        spec_kwargs, held_free_slot)
+                        spec_kwargs)
     return JSONResponse({"job_id": job_id, "status": "queued"}, status_code=202)
 
 
@@ -305,8 +275,6 @@ async def mcp_proxy(request: Request, token: str, rest: str = ""):
     user = store.user_for_mcp_token(token)
     if not user:
         return JSONResponse({"error": "invalid or revoked mcp token"}, status_code=401)
-    if user["plan"] != "pro":
-        return JSONResponse({"error": "mcp requires pro"}, status_code=402)
 
     url = f"{_MCP_UPSTREAM}/{rest}" if rest else f"{_MCP_UPSTREAM}/"
     headers = {k: v for k, v in request.headers.items()

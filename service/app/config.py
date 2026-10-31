@@ -75,10 +75,9 @@ JOBS_DIR = Path(_env("CAPTURD_JOBS_DIR", str(DATA_DIR / "jobs")))
 DB_PATH = DATA_DIR / "capturd.sqlite3"
 SESSION_SECRET = _env("CAPTURD_SESSION_SECRET") or secrets.token_hex(32)
 
-# ---- plan limits (canon: Free = 1 generation + 20 shots) ---------------------
+# ---- plan limits (canon: Free = 20 shots) ------------------------------------
 FREE_GENERATION_LIMIT = int(_env("CAPTURD_FREE_GEN_LIMIT", "1"))
 FREE_SHOT_LIMIT = int(_env("CAPTURD_FREE_SHOT_LIMIT", "20"))
-PRO_PRICE = _env("CAPTURD_PRO_PRICE", "$19")
 
 # ---- render spend caps (paid Vertex TTS + Chromium is metered) ---------------
 # Every account — Pro included — is bounded on how many renders it can start,
@@ -94,7 +93,7 @@ RENDER_MAX_PER_HOUR = int(_env("CAPTURD_RENDER_MAX_PER_HOUR", "10"))
 # server-side so the founder coupon auto-applies. The legacy path redirects to a
 # static PRO_CHECKOUT_URL (Payment Link). Session-creation wins when configured.
 STRIPE_SECRET_KEY = _env("STRIPE_SECRET_KEY")             # test: sk_test_...  (NEVER commit)
-CAPTURD_PRICE_ID = _env("CAPTURD_PRICE_ID")               # price for lookup_key rhobear_capturd_pro
+CAPTURD_PRICE_ID = _env("CAPTURD_PRICE_ID")               # monthly plan price (Stripe lookup key)
 CAPTURD_COUPON_ID = _env("CAPTURD_COUPON_ID", "rhobear_capturd_founders_25")
 PRO_CHECKOUT_URL = _env("PRO_CHECKOUT_URL")               # buy button target (legacy static link)
 BILLING_WEBHOOK_SECRET = _env("BILLING_WEBHOOK_SECRET")
