@@ -36,6 +36,8 @@ def quote_request(*, operationId: str, accountId: str, product: str,
 def reserve_request(*, operationId: str, attemptId: str, accountId: str, product: str,
                     units: dict[str, int], maxUsd: str,
                     priceVersion: str) -> dict[str, Any]:
+    if not is_money_string(maxUsd):
+        raise L2Error(f"maxUsd must be a money string, not {maxUsd!r}")
     return {"operationId": operationId, "attemptId": attemptId, "accountId": accountId,
             "product": product, "units": dict(units), "maxUsd": maxUsd,
             "priceVersion": priceVersion}
@@ -43,6 +45,8 @@ def reserve_request(*, operationId: str, attemptId: str, accountId: str, product
 
 def settle_request(*, operationId: str, attemptId: str, units: dict[str, int],
                    providerCostUsd: str | None = None) -> dict[str, Any]:
+    if providerCostUsd is not None and not is_money_string(providerCostUsd):
+        raise L2Error(f"providerCostUsd must be a money string or null, not {providerCostUsd!r}")
     return {"operationId": operationId, "attemptId": attemptId, "units": dict(units),
             **({"providerCostUsd": providerCostUsd} if providerCostUsd is not None else {})}
 
@@ -76,9 +80,16 @@ def parse_reserve(answer: Any, request: dict[str, Any]) -> dict[str, Any]:
 
 
 def parse_settle(answer: Any, request: dict[str, Any]) -> dict[str, Any]:
-    """The receipt id and confirmed debit; null means covered, not absent."""
+    """The receipt id and confirmed debit.
+
+    The frozen schema requires `customerDebitUsd`: an explicit `null` means
+    covered, but a missing key is not an answer and is refused. Absence and
+    null are different answers.
+    """
     _answer(answer, request, "receiptId")
-    debit = answer.get("customerDebitUsd")
+    if "customerDebitUsd" not in answer:
+        raise L2Error("customerDebitUsd is absent; null means covered, absence is not an answer")
+    debit = answer["customerDebitUsd"]
     if debit is not None and not is_money_string(debit):
         raise L2Error(f"customerDebitUsd must be a money string or null, not {debit!r}")
     return answer

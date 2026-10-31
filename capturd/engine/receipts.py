@@ -1,9 +1,10 @@
 """The frozen `UsageReceipt` boundary and the closed, one-way state path:
 `cloud/src/mcp/engine/schemas/usage-receipt.schema.json` at `rhobear-builds`.
 
-Money is a string never a float, unit counts are integers, unknown fields are
-preserved, and only `reserved -> settled`, `reserved -> released` and `settled
--> reversed` move; `unresolved` is reconciliation's alone.
+Money is a string never a float, unit counts are non-negative integers,
+unknown fields are preserved, and only `reserved -> settled`, `reserved ->
+released` and `settled -> reversed` move; `unresolved` is reconciliation's
+alone.
 """
 
 from __future__ import annotations
@@ -63,7 +64,12 @@ def validate_coverage(coverage: Any) -> dict[str, Any]:
 
 
 def validate_receipt(record: Any) -> dict[str, Any]:
-    """Return `record` when it is a valid `UsageReceipt`, else ReceiptError."""
+    """Return `record` when it is a valid `UsageReceipt`, else ReceiptError.
+
+    One deliberate rule of this boundary is stricter than the frozen schema,
+    which says only `"type": "integer"` for `units` values: here they must be
+    non-negative integers, because a negative unit count is not a charge.
+    """
     if not isinstance(record, dict):
         raise ReceiptError(f"a receipt is an object, not {type(record).__name__}")
     for field in REQUIRED_FIELDS:
@@ -98,7 +104,10 @@ def is_metered(record: Any) -> bool:
 def next_state(current: str | None, event: str) -> str:
     """The one legal move for `current` on `event`, else ReceiptError.
 
-    `reserve` creates the first state; `unresolved` is never produced here.
+    Exactly three pairs move: `reserved -> settled`, `reserved -> released`
+    and `settled -> reversed`. The first state is created by the caller, not
+    by a `reserve` event; every pair involving `None` raises. `unresolved` is
+    reconciliation's alone and is never produced here.
     """
     if event not in ("reserve", "settle", "release", "reverse"):
         raise ReceiptError(f"unknown receipt event {event!r}")
