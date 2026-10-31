@@ -4,7 +4,9 @@
 Money is a string never a float, unit counts are non-negative integers,
 unknown fields are preserved, and only `reserved -> settled`, `reserved ->
 released` and `settled -> reversed` move; `unresolved` is reconciliation's
-alone.
+alone. A timestamp fraction is pinned to the widths the minimum supported
+runtime parses — exactly three or six digits — so acceptance is the same on
+every interpreter.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ STATES = ("reserved", "settled", "released", "unresolved", "reversed")
 COVERAGE_KIND = "launch_mcp_unmetered"
 _IDENTITY = re.compile(r".{1,512}")
 _TIMESTAMP = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
-                        r"(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$")
+                        r"(\.[0-9]{3}(?:[0-9]{3})?)?(Z|[+-][0-9]{2}:[0-9]{2})$")
 _MONEY = re.compile(r"[0-9]+(?:\.[0-9]+)?")
 _MOVES = {("reserved", "settle"): "settled", ("reserved", "release"): "released",
           ("settled", "reverse"): "reversed"}
@@ -34,8 +36,25 @@ def is_money_string(value: Any) -> bool:
     return isinstance(value, str) and _MONEY.fullmatch(value) is not None
 
 
+def is_identity(value: Any) -> bool:
+    """The one identity rule: a 1-512 character string, never empty.
+
+    The window is the pinned `^.{1,512}$` (matched whole, no newline mode), so
+    an identity containing a newline stays outside it. Do not widen this to
+    `[\\s\\S]` or add DOTALL; the rule is frozen.
+    """
+    return isinstance(value, str) and _IDENTITY.fullmatch(value) is not None
+
+
 def _instant(value: Any, field: str) -> datetime.datetime:
-    """The schema's ISO-8601 timestamp with an offset, parsed as a real instant."""
+    """The schema's ISO-8601 timestamp with an offset, parsed as a real instant.
+
+    The fractional second is pinned to the two widths the minimum supported
+    runtime (`requires-python >= 3.10`) parses — exactly three or six digits —
+    so a timestamp is accepted or refused the same way on every interpreter.
+    Runtimes from 3.11 on would parse any width, which is why the rule lives
+    in the pattern rather than in the interpreter.
+    """
     if not isinstance(value, str) or _TIMESTAMP.fullmatch(value) is None:
         raise ReceiptError(f"{field} is not an ISO-8601 timestamp with an offset")
     try:
@@ -77,7 +96,7 @@ def validate_receipt(record: Any) -> dict[str, Any]:
             raise ReceiptError(f"receipt is missing required field {field!r}")
     for field in ("operationId", "attemptId", "accountId", "product", "priceVersion"):
         value = record[field]
-        if not isinstance(value, str) or _IDENTITY.fullmatch(value) is None:
+        if not is_identity(value):
             raise ReceiptError(f"receipt {field} must be a 1-512 character string")
     units = record["units"]
     if not isinstance(units, dict):
