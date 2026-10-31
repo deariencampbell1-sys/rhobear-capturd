@@ -13,6 +13,7 @@ failure for the state and ``_capture_one`` never retries a vanished file.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import dataclasses
 import logging
@@ -143,6 +144,7 @@ def _sweep_page(monkeypatch):
     """Mock the browser only; drive the real _sweep_states."""
     page = AsyncMock()
     page.url = "https://example.com/"
+    page.written_stills = []
     fingerprint = ["baseline"]
     element = SimpleNamespace(count=AsyncMock(return_value=1),
                               is_visible=AsyncMock(return_value=True))
@@ -166,7 +168,9 @@ def _sweep_page(monkeypatch):
     page.keyboard.press.side_effect = press
 
     async def screenshot(**kwargs):
-        Path(kwargs["path"]).write_bytes(b"x" * 8)
+        path = Path(kwargs["path"])
+        path.write_bytes(b"x" * 8)
+        page.written_stills.append(path)
 
     page.screenshot.side_effect = screenshot
     monkeypatch.setattr(capture, "_dismiss_overlays", AsyncMock())
@@ -251,3 +255,161 @@ def test_a_screenshot_oserror_is_not_remapped_or_unlinked(tmp_path, monkeypatch)
         asyncio.run(capture._write_still(page, path, type="png"))
     assert calls == [], "the cap check ran for a still that was never written"
     assert not path.exists()
+
+
+# ---------------------------------------------------------------------------
+# W3-06f-r2 — one redactor for the outward text of both failed-state sinks
+# ---------------------------------------------------------------------------
+
+def _sweep_target_and_settings(*, extra: dict | None = None):
+    """The sweep's plan, plus any redaction rule the test wants in play."""
+    _, targets, settings = build_capture_plan(
+        {"urls": ["https://example.com/"], "viewports": ["desktop"],
+         "schemes": ["light"], "states": True},
+    )
+    if extra:
+        settings = {**settings, **extra}
+    return dataclasses.replace(targets[0], trigger_selector=""), settings
+
+
+def _raw_refusal_text(path, monkeypatch):
+    """The literal text the still funnel builds before any outward redaction."""
+    page = AsyncMock()
+
+    async def screenshot(**kwargs):
+        Path(kwargs["path"]).write_bytes(b"x" * 8)
+
+    page.screenshot.side_effect = screenshot
+    with pytest.raises(capture.RestedCaptureError) as exc:
+        asyncio.run(capture._write_still(page, path, type="png"))
+    return str(exc.value)
+
+
+def test_the_sweep_redacts_the_outward_error(tmp_path, monkeypatch):
+    """The sweep's refused-state error is the redacted form, not str(exc)."""
+    monkeypatch.setattr(capture, "check_artifact_size", _vanish_before_the_size_read)
+    page = _sweep_page(monkeypatch)
+    target, settings = _sweep_target_and_settings(extra={"redact_path": str(tmp_path)})
+    base = tmp_path / "baseline.png"
+
+    shots = asyncio.run(capture._sweep_states(page, target, settings, base))
+
+    assert len(shots) == 1
+    raw = _raw_refusal_text(page.written_stills[0], monkeypatch)
+    assert str(tmp_path) in raw, "the raw refusal names the local path"
+    assert shots[0]["error"] == capture._redact_outward_error(raw, settings)
+    assert str(tmp_path) not in shots[0]["error"]
+
+
+def test_both_sinks_agree_about_the_error_text(tmp_path, monkeypatch):
+    """Sweep and _capture_one both equal _redact_outward_error on the same failure."""
+    monkeypatch.setattr(capture, "check_artifact_size", _vanish_before_the_size_read)
+    target, settings = _sweep_target_and_settings(extra={"redact_path": str(tmp_path)})
+
+    sweep_page = _sweep_page(monkeypatch)
+    base = tmp_path / "baseline.png"
+    shots = asyncio.run(capture._sweep_states(sweep_page, target, settings, base))
+    sweep_raw = _raw_refusal_text(sweep_page.written_stills[0], monkeypatch)
+
+    context, one_target, one_settings, one_path, _, _ = _capture_one_page(
+        tmp_path, monkeypatch, retries=2)
+    one_settings = {**one_settings, "redact_path": str(tmp_path)}
+    result = asyncio.run(capture._capture_one(context, one_target, one_settings, one_path))
+    one_raw = _raw_refusal_text(one_path, monkeypatch)
+
+    assert shots[0]["error"] == capture._redact_outward_error(sweep_raw, settings)
+    assert result["error"] == capture._redact_outward_error(one_raw, one_settings)
+
+
+def test_the_capture_one_record_carries_the_redacted_error(tmp_path, monkeypatch):
+    """The r1 break path redacts its record — now asserted, not assumed."""
+    monkeypatch.setattr(capture, "check_artifact_size", _vanish_before_the_size_read)
+    context, target, settings, path, _, _ = _capture_one_page(tmp_path, monkeypatch, retries=2)
+    settings = {**settings, "redact_path": str(tmp_path)}
+
+    result = asyncio.run(capture._capture_one(context, target, settings, path))
+    raw = _raw_refusal_text(path, monkeypatch)
+
+    assert result["status"] == "failed"
+    assert result["error"] == capture._redact_outward_error(raw, settings)
+    assert str(tmp_path) not in result["error"]
+
+
+def test_the_failed_state_record_shape_is_built_once():
+    """The failed-state record has one literal shape, so the sinks cannot drift."""
+    tree = ast.parse(Path(capture.__file__).read_text(encoding="utf-8"))
+    records = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        keys = {k.value for k in node.keys
+                if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+        values = {k.value: v.value for k, v in zip(node.keys, node.values)
+                  if isinstance(k, ast.Constant) and isinstance(k.value, str)
+                  and isinstance(v, ast.Constant)}
+        if values.get("status") == "failed" and {"control_tag", "state"} <= keys:
+            records.append(keys)
+    assert len(records) == 1, "the failed-state record is built in exactly one place"
+    assert {"url", "state_id", "viewport", "scheme", "width", "height",
+            "status", "error", "file", "state", "control", "control_tag"} <= records[0]
+
+
+def test_a_non_matching_redaction_rule_passes_the_text_through(tmp_path, monkeypatch):
+    """Edge: a rule that matches nothing is a no-op, never a truncation."""
+    monkeypatch.setattr(capture, "check_artifact_size", _vanish_before_the_size_read)
+    page = _sweep_page(monkeypatch)
+    target, settings = _sweep_target_and_settings(extra={"redact_path": "/no/match/here"})
+    base = tmp_path / "baseline.png"
+
+    shots = asyncio.run(capture._sweep_states(page, target, settings, base))
+    raw = _raw_refusal_text(page.written_stills[0], monkeypatch)
+
+    assert shots[0]["error"] == raw
+    assert "still unreadable at" in shots[0]["error"]
+
+
+def test_both_occurrences_of_the_path_are_redacted(tmp_path, monkeypatch):
+    """Edge: the path appears in the message and in the OSError text; both go."""
+    monkeypatch.setattr(capture, "check_artifact_size", _vanish_before_the_size_read)
+    page = _sweep_page(monkeypatch)
+    target, settings = _sweep_target_and_settings(extra={"redact_path": str(tmp_path)})
+    base = tmp_path / "baseline.png"
+
+    shots = asyncio.run(capture._sweep_states(page, target, settings, base))
+    raw = _raw_refusal_text(page.written_stills[0], monkeypatch)
+
+    assert raw.count(str(tmp_path)) >= 2, "the raw refusal names the path more than once"
+    assert shots[0]["error"].count(str(tmp_path)) == 0
+
+
+def test_no_redaction_configuration_still_records_the_failure(tmp_path, monkeypatch):
+    """Edge: no settings rule at all — the call succeeds and the record is complete."""
+    monkeypatch.setattr(capture, "check_artifact_size", _vanish_before_the_size_read)
+    page = _sweep_page(monkeypatch)
+    target, settings = _sweep_target_and_settings()
+    base = tmp_path / "baseline.png"
+
+    shots = asyncio.run(capture._sweep_states(page, target, settings, base))
+
+    assert len(shots) == 1
+    state = shots[0]
+    assert state["status"] == "failed" and state["file"] is None
+    assert isinstance(state["error"], str) and state["error"]
+    assert {"url", "state_id", "viewport", "scheme", "width", "height",
+            "status", "error", "file", "state", "control", "control_tag"} <= set(state)
+
+
+def test_a_raising_restore_still_leaves_the_failure_recorded(tmp_path, monkeypatch):
+    """Edge: the restore raises; it is swallowed and the record still stands."""
+    monkeypatch.setattr(capture, "check_artifact_size", _vanish_before_the_size_read)
+    page = _sweep_page(monkeypatch)
+    monkeypatch.setattr(capture, "_restore_after_open",
+                        AsyncMock(side_effect=RuntimeError("restore failed")))
+    target, settings = _sweep_target_and_settings(extra={"redact_path": str(tmp_path)})
+    base = tmp_path / "baseline.png"
+
+    shots = asyncio.run(capture._sweep_states(page, target, settings, base))
+
+    assert len(shots) == 1, "the record stands even when the restore raises"
+    assert shots[0]["status"] == "failed"
+    assert str(tmp_path) not in shots[0]["error"]
