@@ -82,8 +82,10 @@ dev = [
     "pytest>=7",
     "pytest-asyncio>=0.21",
     "build>=1",
-    "setuptools",
-    "wheel",
+    # F108: the wheel test builds --no-isolation, so the backend dev installs
+    # must carry at least the floors [build-system].requires declares.
+    "setuptools>=68",
+    "wheel>=0.41",
 ]
 all = ["faster-whisper>=1.0", "sounddevice>=0.4", "miniaudio>=1.60", "pytest>=7", "pytest-asyncio>=0.21"]
 
