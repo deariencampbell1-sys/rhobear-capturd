@@ -643,3 +643,143 @@ def test_modules_stay_pure():
                     raise AssertionError(f"{name}: an open() call")
                 if isinstance(func, ast.Attribute) and func.attr in ("open", "now"):
                     raise AssertionError(f"{name}: a .{func.attr}() call")
+
+
+# --------------------------------------------------------------------------- /
+# 14. Round 3 (W3-06c-r3): the take set is validated before use, a retake is
+#     a new index, and the copies reach through lists and tuples
+
+
+def test_export_blocked_validates_the_take_set_before_it_uses_it():
+    """A record that is not the §3 shape is a caller error — `TakeError`,
+    never `AttributeError` — and a bare `"approved"` string is never trusted:
+    a null `approvedBy` is refused (blocks) rather than clearing the gate."""
+    approved = make_take(state="approved", shot=0, take=0)
+    malformed = {
+        "not a dict": "not a record",
+        "a list entry": ["approved"],
+        "missing §3 key": {k: v for k, v in approved.items() if k != "state"},
+        "extra §3 key": {**approved, "surprise": 1},
+        "null approvedBy": {**approved, "approvedBy": None},
+        "blank approvedBy": {**approved, "approvedBy": "   "},
+        "null approvedAt": {**approved, "approvedAt": None},
+    }
+    for label, record in malformed.items():
+        with pytest.raises(TakeError) as exc:
+            export_blocked([0], [record], {0: 0}, {(0, 0)})
+        assert not isinstance(exc.value, takes.AmbiguousTakeSet), label
+    # An invalid record refuses even when neither selected nor included: the
+    # gate cannot quietly clear by never looking at it.
+    with pytest.raises(TakeError):
+        export_blocked([9], [{**approved, "approvedBy": None}], {}, set())
+
+
+def test_malformed_record_is_reported_before_a_genuine_ambiguity():
+    """Validate every entry as given, then sort, then the r2 ambiguity check:
+    a malformed record is `TakeError`, never `AmbiguousTakeSet`."""
+    first = make_take(state="ready", shot=1, take=0)
+    second = make_take(state="approved", shot=1, take=0, jobId="job_2", attemptId="att_b")
+    malformed = {k: v for k, v in first.items() if k != "shotIndex"}
+    for take_set in ([malformed, first, second], [first, second, malformed]):
+        with pytest.raises(TakeError) as exc:
+            export_blocked([1], take_set, {1: 0}, set())
+        assert type(exc.value) is TakeError, take_set
+        assert not isinstance(exc.value, takes.AmbiguousTakeSet), take_set
+
+
+def test_retake_and_recapture_refuse_the_previous_take_index():
+    """A retake is a new take. The previous `(shotIndex, takeIndex)` pair is
+    never minted twice — r2 taught `export_blocked` to reject exactly that."""
+    previous = make_take(state="ready", shot=2, take=1)
+    snapshot = copy.deepcopy(previous)
+    with pytest.raises(TakeError):
+        retake(previous, take_index=1, job_id="job_next", attempt_id="att_next",
+               direction=dict(DIRECTION), created_at=CREATED_AT)
+    with pytest.raises(TakeError):
+        recapture(previous, take_index=1, job_id="job_c", attempt_id="att_c",
+                  source_revision=OTHER_REVISION, source_artifact_id="art_new",
+                  created_at=CREATED_AT)
+    assert previous == snapshot  # equal is refused without mutating the record
+    # A greater index is a new take, and the resulting set holds the pair once.
+    newer = retake(previous, take_index=2, job_id="job_next", attempt_id="att_next",
+                   direction=dict(DIRECTION), created_at=CREATED_AT)
+    assert (newer["shotIndex"], newer["takeIndex"]) == (2, 2)
+    ready = transition(newer, "ready")
+    assert export_blocked([2], [previous, ready], {2: 1}, set()) == []
+
+
+def test_register_refuses_a_changed_kind():
+    registry = artifacts.register({}, artifact_id="art_1", revision="rev-1", kind="image/png")
+    again = artifacts.register(registry, artifact_id="art_1", revision="rev-1", kind="image/png")
+    assert again == registry  # same id, same revision, same kind: the no-op
+    with pytest.raises(ArtifactError):
+        artifacts.register(registry, artifact_id="art_1", revision="rev-1", kind="video/mp4")
+    assert registry == {"art_1": {"revision": "rev-1", "kind": "image/png"}}  # untouched
+
+
+def test_loads_parses_bytes_and_refuses_non_text():
+    record = make_take(state="ready", shot=0, take=0)
+    text = persistence.dumps(record)
+    assert persistence.loads(text.encode("utf-8")) == record  # the bytes form parses
+    for bad in (5, None, 3.5, ["{}"]):
+        with pytest.raises(TakeError):
+            persistence.loads(bad)
+
+
+def test_negative_included_pairs_are_stray_in_both_modules():
+    """`shots._is_index` and `takes._is_index` are one semantic: a negative
+    index is not a pair, so `(-1, 0)` blocks with null indexes, never a real
+    pair and never an exception."""
+    approved = make_take(state="approved", shot=0, take=0)
+    for entry in ((-1, 0), (0, -1), [-1, 0], [0, -1]):
+        blocks = export_blocked([0], [approved], {0: 0}, [entry])
+        assert codes_of(blocks) == ["included_not_approved"], entry
+        assert blocks[0]["shotIndex"] is None
+        assert blocks[0]["takeIndex"] is None
+    assert shots._is_index(-1) is False
+    assert takes._is_index(-1) is False
+    assert shots._is_index(0) is True
+    assert takes._is_index(0) is True
+
+
+def test_transition_detaches_the_direction():
+    """The returned record's `direction` cannot be reached back through."""
+    record = make_take(state="draft", shot=0, take=0)
+    moved = transition(record, "ready")
+    assert moved["direction"] == DIRECTION
+    assert moved["direction"] is not record["direction"]
+    record["direction"]["caption"] = "mutated after the call"
+    assert moved["direction"]["caption"] == DIRECTION["caption"]
+    moved["direction"]["camera"] = "mutated after the call"
+    assert record["direction"]["camera"] == DIRECTION["camera"]
+
+
+def test_transition_refuses_an_unknown_string_state():
+    record = make_take(state="ready", shot=0, take=0)
+    with pytest.raises(TakeError):
+        transition(record, "pending")
+    assert record["state"] == "ready"  # nothing moved
+
+
+def test_registry_copy_reaches_through_lists():
+    """`_copied` shares no mapping at any depth: a mapping inside a list or
+    tuple is copied too."""
+    label = {"name": "poster"}
+    registry = {
+        "art_1": {
+            "revision": "rev-1",
+            "kind": "image/png",
+            "renditions": [{"name": "poster"}, label],
+            "history": (label,),
+        },
+    }
+    grown = artifacts.register(registry, artifact_id="art_2", revision="rev-2", kind="video/mp4")
+    grown["art_1"]["renditions"][1]["name"] = "mutated"
+    grown["art_1"]["history"][0]["name"] = "mutated"
+    assert label["name"] == "poster"
+    assert registry["art_1"]["renditions"][1]["name"] == "poster"
+    assert registry["art_1"]["history"][0]["name"] == "poster"
+
+
+def test_empty_shot_indexes_is_still_no_shots_and_nothing_else():
+    assert codes_of(export_blocked([], [], {}, set())) == ["no_shots"]
