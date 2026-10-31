@@ -43,9 +43,14 @@ def dumps(record: dict[str, Any]) -> str:
         raise TakeError(f"take record has no canonical JSON text: {exc}") from exc
 
 
-def loads(text: str) -> dict[str, Any]:
+def loads(text: str | bytes) -> dict[str, Any]:
     """Parse and validate; an unknown or missing key, or a `NaN`/`Infinity`
-    in the text, is refused."""
+    in the text, is refused. An argument that is not `str` or `bytes` is
+    refused first: `json.loads(5)` raises `TypeError`, which is not a
+    `ValueError`, so it would otherwise escape as a raw `TypeError`."""
+    if not isinstance(text, (str, bytes)):
+        raise TakeError(
+            f"take record text must be str or bytes, not {type(text).__name__}")
     try:
         record = json.loads(text, parse_constant=_refused_constant)
     except ValueError as exc:
