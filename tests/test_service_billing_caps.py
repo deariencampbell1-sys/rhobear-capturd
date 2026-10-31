@@ -5,8 +5,9 @@ real SQLite DB), not proxies:
 
   * Item 2 (HIGH) — the Free=1 gate used to be check-here/increment-there across
     two transactions up to 600s apart, so N concurrent Free calls all read 0 and
-    passed. ``try_acquire`` is now an atomic BEGIN IMMEDIATE reserve. Proven with
-    real OS threads racing the primitive, plus the HTTP 402 path.
+    passed. ``try_acquire`` is now an atomic BEGIN IMMEDIATE reserve, proven with
+    real OS threads racing the primitive. (W3-06e-r1 retired the free-vs-Pro
+    generation split; the primitive stays as the load-protection seam.)
   * Item 1 (HIGH) — paid render had no cap on Pro. Now a per-account concurrency
     cap and a sliding hourly rate limit (429 + Retry-After), applied to Pro too.
   * Item 3 (HIGH) — buy path: the webhook handler validates a Stripe signature
@@ -108,21 +109,22 @@ def test_free_reserve_atomic_under_concurrency(db):
     assert store.usage_count(uid, "generation") == 1
 
 
-def test_free_limit_returns_402_after_one(client, db):
+def test_no_free_generation_cap(client, db):
+    """The free-vs-Pro generation split is retired: a plan-less user's second
+    render is accepted (the rate limit and concurrency cap still apply)."""
     store = db
     _authed(client, store, "free@example.com", plan="free")
-    # first free generation is accepted
+    # first render accepted
     r1 = client.post("/api/generate", json=_ok_body())
     assert r1.status_code == 202
-    # second is rejected at the Free limit (not 429 rate, not concurrency)
+    # second render is no longer rejected at a Free lifetime limit
     r2 = client.post("/api/generate", json=_ok_body())
-    assert r2.status_code == 402
-    assert "Free plan" in r2.json()["detail"]
+    assert r2.status_code == 202
 
 
-def test_refund_on_failure_releases_free_slot(client, db, monkeypatch):
-    """A Free render that fails (timeout/error/cap) must refund the reserved
-    slot so the user can retry — not be locked out of their one free render."""
+def test_failed_render_does_not_lock_the_account_out(client, db, monkeypatch):
+    """A failed render no longer has a per-plan slot to refund; the account can
+    retry — no plan-level lockout exists."""
     from app import main as app_main
     from render_worker import JobResult
 
@@ -134,7 +136,7 @@ def test_refund_on_failure_releases_free_slot(client, db, monkeypatch):
     r = client.post("/api/generate", json=_ok_body())
     assert r.status_code == 202
     uid = store.get_user_by_email("retry@example.com")["id"]
-    # background task ran (TestClient waits); the failed render refunded the slot
+    # no plan-level generation slot exists to hold or refund
     assert store.usage_count(uid, "generation") == 0
     # …so the user can actually retry
     r2 = client.post("/api/generate", json=_ok_body())
@@ -197,22 +199,20 @@ def test_rate_limit_429_with_retry_after_for_pro(client, db, monkeypatch):
     assert "rate limit" in r2.json()["detail"]
 
 
-def test_rate_limit_does_not_leak_reservation_on_reject(client, db, monkeypatch):
-    """When a later gate rejects, earlier reservations are refunded — a 402'd
+def test_concurrency_reject_refunds_the_rate_reservation(client, db):
+    """When a later gate rejects, earlier reservations are refunded — a 429'd
     request must not count toward the rate window (no render happened)."""
-    import app.config as config
     store = db
-    _authed(client, store, "free2@example.com", plan="free")
-    monkeypatch.setattr(config, "RENDER_MAX_PER_HOUR", 1)
-    # burn the single free slot so the next request 402s at the Free gate
-    assert store.try_acquire(store.get_user_by_email("free2@example.com")["id"],
-                             "generation", limit=1, window_seconds=None)
-    uid = store.get_user_by_email("free2@example.com")["id"]
-    before = store.usage_count(uid, "render_request")
+    u = _authed(client, store, "conc-free@example.com", plan="free")
+    # fill the in-flight cap so the next request is rejected at the concurrency gate
+    for i in range(2):
+        store.record_job(f"seed-{i}", u["id"], "walk", "queued")
+    before = store.usage_count(u["id"], "render_request")
     r = client.post("/api/generate", json=_ok_body())
-    assert r.status_code == 402
-    after = store.usage_count(uid, "render_request")
-    assert before == after, "402 must refund the render_request reservation"
+    assert r.status_code == 429
+    assert "in-flight" in r.json()["detail"]
+    after = store.usage_count(u["id"], "render_request")
+    assert before == after, "429 must refund the render_request reservation"
 
 
 # ---------------------------------------------------------------------------

@@ -358,18 +358,15 @@ def test_an_existing_tool_is_unchanged(tmp_path):
     assert _call(server, "demo.list") == {"demos": [], "count": 0}
 
 
-def test_the_contract_tool_is_not_pro_gated(monkeypatch, server, service):
-    # Patch to True: a gate in front of the contract would have to refuse the
-    # answer even when Pro is active — this is the direction the r1 test
-    # (patched to False) could not catch.
-    monkeypatch.setattr(mcp_server, "is_pro", lambda: True)
+def test_the_contract_tool_is_not_pro_gated(server, service):
+    # There is no entitlement gate on the contract tool (or anywhere else):
+    # the same answer is served to every caller, with no monkeypatching.
     mcp_answer = _call(server)
     service_answer = service.get("/healthz").json()["engine_contract"]
     assert mcp_answer["ok"] is True
     assert mcp_answer["manifest"]["engine"] == "capturd"
     assert service_answer == {k: v for k, v in mcp_answer.items() if k != "manifestPath"}
-    # And Free gets the identical contract — the tool consults no entitlement.
-    monkeypatch.setattr(mcp_server, "is_pro", lambda: False)
+    # And a second call is byte-identical — the tool consults no entitlement.
     assert _call(server) == mcp_answer
 
 
