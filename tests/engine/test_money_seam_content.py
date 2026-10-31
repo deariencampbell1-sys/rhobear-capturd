@@ -1,4 +1,4 @@
-"""W3-06b-r1 — the money seam content: typed records, receipts, no arithmetic.
+"""The money seam content: typed records, receipts, no arithmetic.
 
 The frozen `UsageReceipt` shape is
 `cloud/src/mcp/engine/schemas/usage-receipt.schema.json` at `rhobear-builds`
@@ -649,26 +649,57 @@ def test_a_request_without_identity_is_refused_not_crashed(name, parse, build, a
 
 
 def test_fractional_seconds_are_runtime_independent():
-    """Item 3, pinned-regex option: the module, not the interpreter, decides.
+    """r4: any fraction the frozen schema admits validates on every runtime.
 
-    The fraction is pinned to the widths the minimum supported runtime
-    (`requires-python >= 3.10`) parses — exactly three or six digits — so the
-    accepted and refused spellings below hold on every runtime. There is no
-    `sys.version_info` here: this is a property of the module.
+    The schema pattern is `(\\.\\d+)?`. The module normalises the fraction to
+    six digits before parsing, so `fromisoformat` never sees a width only newer
+    interpreters accept. There is no `sys.version_info` here.
     """
-    for digits in ("123", "123456"):
+    for digits in ("1", "12", "123", "1234", "12345", "123456", "1234567", "123456789"):
         stamp = f"2026-10-31T12:00:00.{digits}Z"
         assert validate_receipt(make_receipt(occurredAt=stamp))["occurredAt"] == stamp
-        assert validate_coverage({**COVERAGE, "startedAt": stamp})["startedAt"] == stamp
-    for digits in ("1", "12", "1234", "12345", "1234567"):
-        with pytest.raises(ReceiptError):
-            validate_receipt(make_receipt(occurredAt=f"2026-10-31T12:00:00.{digits}Z"))
-        with pytest.raises(ReceiptError):
-            validate_coverage({**COVERAGE, "startedAt": f"2026-10-01T00:00:00.{digits}Z"})
-    # No fraction and `Z` both still validate, on receipts and coverage.
+        assert validate_coverage({**COVERAGE, "startedAt": f"2026-10-01T00:00:00.{digits}Z"})
     for stamp in ("2026-10-31T12:00:00Z", "2026-10-31T12:00:00+00:00",
                   "2026-10-31T12:00:00.123+00:00"):
         assert validate_receipt(make_receipt(occurredAt=stamp))["occurredAt"] == stamp
+    for bad in ("2026-10-31T12:00:00.Z", "2026-10-31T12:00:00.1", "2026-13-31T12:00:00.1Z"):
+        with pytest.raises(ReceiptError):
+            validate_receipt(make_receipt(occurredAt=bad))
+
+
+def test_a_fraction_keeps_its_instant_when_normalised():
+    """Truncating past six digits never moves the instant by a second or more."""
+    assert receipts._instant("2026-10-31T12:00:00.1Z", "t").microsecond == 100000
+    assert receipts._instant("2026-10-31T12:00:00.999999999Z", "t").second == 0
+
+
+@pytest.mark.parametrize("separator", ["\n", "\r", "\u2028", "\u2029"])
+def test_identity_refuses_every_line_terminator_the_schema_refuses(separator):
+    """r4: `^.{1,512}$` in the frozen JS schema excludes all four terminators."""
+    bad = f"a{separator}b"
+    assert receipts.is_identity(bad) is False
+    with pytest.raises(ReceiptError):
+        validate_receipt(make_receipt(operationId=bad))
+    with pytest.raises(L2Error):
+        coverage_request(operationId=bad, attemptId="a", accountId="b", product="c")
+
+
+@pytest.mark.parametrize("bad", ["", None, 42, "x" * 513, "a\rb"])
+def test_a_request_with_a_bad_attempt_is_refused(bad):
+    """r4: the `_answer` attemptId branch, on a request naming the operation."""
+    answer = {"operationId": OP, "attemptId": bad, "released": True}
+    with pytest.raises(L2Error, match="attemptId"):
+        l2.parse_release(answer, {"operationId": OP, "attemptId": bad})
+
+
+def test_a_release_reason_must_be_text_when_present():
+    """r4: the `parse_release` reason branch, both ways."""
+    request = {"operationId": OP, "attemptId": "a-1"}
+    answer = {"operationId": OP, "attemptId": "a-1", "released": True}
+    with pytest.raises(L2Error, match="reason"):
+        l2.parse_release({**answer, "reason": 42}, request)
+    assert l2.parse_release({**answer, "reason": "user cancelled"}, request)["reason"] == "user cancelled"
+    assert l2.parse_release({**answer, "reason": None}, request)["reason"] is None
 
 
 def test_null_and_absence_mean_the_same_thing_on_both_halves():
