@@ -32,6 +32,7 @@ from weakref import WeakKeyDictionary
 from xml.etree import ElementTree
 
 from capturd._net import is_private_ip
+from capturd.engine import ArtifactTooLarge, check_artifact_size
 from capturd.shots.pathway_map import load_pathway_map
 
 
@@ -1488,6 +1489,35 @@ async def _dismiss_overlays(page: Any) -> None:
                 break
 
 
+async def _write_still(page: Any, path: str | Path, **kwargs: Any) -> int:
+    """The one still funnel: write the shot, enforce the artifact cap, return bytes."""
+    still = Path(path)
+    await page.screenshot(path=str(still), **kwargs)
+    try:
+        return check_artifact_size(still)
+    except ArtifactTooLarge:
+        still.unlink(missing_ok=True)  # an over-cap still never stays on disk
+        raise
+
+
+async def _restore_after_open(page, el, baseline, base_url, settings):
+    """Return the page to its baseline: Escape, then re-click, then reload as the last resort."""
+    await page.keyboard.press("Escape")
+    await page.wait_for_timeout(250)
+    if await page.evaluate(_FINGERPRINT_JS) != baseline:
+        try:
+            if await el.count() and await el.is_visible():
+                await el.click(timeout=1500)
+                await page.wait_for_timeout(250)
+        except Exception:
+            pass
+    if page.url != base_url or await page.evaluate(_FINGERPRINT_JS) != baseline:
+        await page.goto(base_url, wait_until="domcontentloaded",
+                        timeout=int(settings["timeout_ms"]))
+        await _settle_page(page, settings["wait_ms"])
+        await page.evaluate(_MAP_CONTROLS_JS)   # re-tag after reload
+
+
 async def _sweep_states(page: Any, target: CaptureTarget, settings: dict[str, Any],
                         base_path: Path) -> list[dict[str, Any]]:
     """Click each mapped control, capture the state it opens, restore, and move on."""
@@ -1521,29 +1551,31 @@ async def _sweep_states(page: Any, target: CaptureTarget, settings: dict[str, An
                 seen.add(fingerprint)
                 name = f"{base_path.stem}--open--{_state_slug(control['label'])}{base_path.suffix}"
                 out = base_path.with_name(name)
-                await page.screenshot(path=str(out), **shot_kwargs)
+                still_bytes = await _write_still(page, path=out, **shot_kwargs)
                 shots.append({
                     "url": target.url, "state_id": target.state_id,
                     "viewport": target.viewport_id, "scheme": target.scheme,
                     "width": target.width, "height": target.height,
-                    "status": "ok", "file": out.name, "bytes": out.stat().st_size,
+                    "status": "ok", "file": out.name, "bytes": still_bytes,
                     "state": "open", "control": control["label"], "control_tag": control["tag"],
                 })
-            # restore: Escape, then re-click, then reload as the last resort
-            await page.keyboard.press("Escape")
-            await page.wait_for_timeout(250)
-            if await page.evaluate(_FINGERPRINT_JS) != baseline:
-                try:
-                    if await el.count() and await el.is_visible():
-                        await el.click(timeout=1500)
-                        await page.wait_for_timeout(250)
-                except Exception:
-                    pass
-            if page.url != base_url or await page.evaluate(_FINGERPRINT_JS) != baseline:
-                await page.goto(base_url, wait_until="domcontentloaded",
-                                timeout=int(settings["timeout_ms"]))
-                await _settle_page(page, settings["wait_ms"])
-                await page.evaluate(_MAP_CONTROLS_JS)   # re-tag after reload
+            await _restore_after_open(page, el, baseline, base_url, settings)
+        except ArtifactTooLarge as exc:
+            # An over-cap state is recorded; the page is not aborted.
+            shots.append({
+                "url": target.url, "state_id": target.state_id,
+                "viewport": target.viewport_id, "scheme": target.scheme,
+                "width": target.width, "height": target.height,
+                "status": "failed", "error": "artifact_too_large",
+                "file": None,
+                "bytes": exc.size, "cap": exc.cap,
+                "state": "open", "control": control["label"], "control_tag": control["tag"],
+            })
+            try:
+                await _restore_after_open(page, el, baseline, base_url, settings)
+            except Exception:
+                pass  # the record stands; the next control runs as the generic path does
+            continue
         except Exception:
             continue
     return shots
@@ -1615,6 +1647,7 @@ async def _capture_one(
     started = time.perf_counter()
     attempts = max(1, int(settings.get("retries", DEFAULT_RETRIES)) + 1)
     last_error = ""
+    too_large: dict[str, int] | None = None
     if navigation_cache is None:
         navigation_cache = {}
     if allow_file_access is None:
@@ -1690,8 +1723,7 @@ async def _capture_one(
                 allow_private_hosts=allow_private_hosts, allow_file_access=allow_file_access,
                 cache=navigation_cache,
             )
-            await page.screenshot(**screenshot_kwargs)
-            stat = path.stat()
+            still_bytes = await _write_still(page, **screenshot_kwargs)
             extra_states: list[dict[str, Any]] = []
             if settings.get("states"):
                 for state in await _sweep_states(page, target, settings, path):
@@ -1718,12 +1750,17 @@ async def _capture_one(
                 "height": target.height,
                 "status": "ok",
                 "file": path.name,
-                "bytes": stat.st_size,
+                "bytes": still_bytes,
                 "trigger_selector": target.trigger_selector,
                 "trigger_fired": trigger_fired,
                 "attempts": attempt,
                 "elapsed_ms": int((time.perf_counter() - started) * 1000),
             }
+        except ArtifactTooLarge as exc:
+            # The size cannot change on a second attempt — end the attempts now.
+            last_error = "artifact_too_large"
+            too_large = {"bytes": exc.size, "cap": exc.cap}
+            break
         except Exception as exc:
             if page_errors:
                 selected_error = page_errors[0]
@@ -1756,7 +1793,8 @@ async def _capture_one(
         "height": target.height,
         "status": "failed",
         "error": last_error,
-        "attempts": attempts,
+        "attempts": attempt,
+        **(too_large or {}),
         "elapsed_ms": int((time.perf_counter() - started) * 1000),
     }
 

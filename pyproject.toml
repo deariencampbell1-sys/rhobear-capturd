@@ -81,6 +81,9 @@ voice = ["faster-whisper>=1.0", "sounddevice>=0.4", "miniaudio>=1.60"]
 dev = [
     "pytest>=7",
     "pytest-asyncio>=0.21",
+    "build>=1",
+    "setuptools",
+    "wheel",
 ]
 all = ["faster-whisper>=1.0", "sounddevice>=0.4", "miniaudio>=1.60", "pytest>=7", "pytest-asyncio>=0.21"]
 
@@ -96,9 +99,10 @@ Source = "https://github.com/rhobear-ai/rhobear-capturd"
 Issues = "https://github.com/rhobear-ai/rhobear-capturd/issues"
 
 [tool.setuptools]
-packages = ["capturd", "capturd.shots", "capturd.walk", "capturd.mcp"]
+packages = ["capturd", "capturd.engine", "capturd.shots", "capturd.walk", "capturd.mcp"]
 
 [tool.setuptools.package-data]
+"capturd.engine" = ["manifest.json"]
 "capturd.walk" = ["templates/*.html"]
 
 [tool.pytest.ini_options]

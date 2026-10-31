@@ -25,6 +25,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from capturd.engine import ArtifactTooLarge, check_artifact_size
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_FPS = 30
@@ -47,6 +49,10 @@ class DemoExportError(DemoForgeError, RuntimeError):
     MCP server) also catches export failures; still a RuntimeError for
     callers that relied on that base.
     """
+
+    def __init__(self, message="", *, size=None, cap=None):
+        super().__init__(message)
+        self.size, self.cap = size, cap
 
 
 # ---------------------------------------------------------------------------
@@ -471,6 +477,12 @@ def export_video(
 
     if not out_path.is_file() or out_path.stat().st_size == 0:
         raise DemoExportError(f"export produced no output at {out_path}")
+    try:
+        check_artifact_size(out_path)
+    except ArtifactTooLarge as exc:
+        raise DemoExportError(str(exc), size=exc.size, cap=exc.cap) from exc
+    except OSError as exc:
+        raise DemoExportError(f"export output unreadable at {out_path}: {exc}") from exc
     logger.info("export complete: %s (%.1f KB)", out_path, out_path.stat().st_size / 1024)
     return out_path
 

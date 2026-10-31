@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "contractVersion": "1.0",
+  "engine": "capturd",
+  "engineVersion": "0.2.0",
+  "displayName": "Captur'd",
+  "mark": "capturd",
+  "inputSchema": {
+    "type": "object"
+  },
+  "outputSchema": {
+    "type": "object"
+  },
+  "artifactKinds": [
+    "image/png",
+    "image/jpeg",
+    "video/mp4",
+    "image/gif"
+  ],
+  "capabilities": [
+    {
+      "id": "stills-capture",
+      "version": "1.0.0",
+      "summary": "Batch rested-state screenshots of reachable web pages (stills mode).",
+      "inputPorts": [
+        {"name": "target", "type": "text", "required": true}
+      ],
+      "outputPorts": [
+        {"name": "stills", "type": "image", "required": true}
+      ],
+      "params": {
+        "formats": "png | jpeg",
+        "viewports": "desktop | tablet | mobile",
+        "schemes": "light | dark",
+        "states": "also capture the states opened by mapped page controls"
+      },
+      "cancellable": false,
+      "loopsAllowed": false
+    },
+    {
+      "id": "walk-export",
+      "version": "1.0.0",
+      "summary": "Render a recorded walkthrough session to a demo video (walk mode).",
+      "inputPorts": [
+        {"name": "session", "type": "artifact", "required": true}
+      ],
+      "outputPorts": [
+        {"name": "demo", "type": "video", "required": true}
+      ],
+      "params": {
+        "fmt": "mp4 | gif",
+        "fps": "frames per second"
+      },
+      "cancellable": false,
+      "loopsAllowed": false
+    }
+  ],
+  "limits": {
+    "maxInputBytes": 512000,
+    "maxArtifactBytes": 1073741824,
+    "maxActiveJobsPerAccount": 2,
+    "maxJobDurationMs": 600000
+  },
+  "execution": {
+    "cpu": true,
+    "gpuOnDemand": false
+  }
+}
