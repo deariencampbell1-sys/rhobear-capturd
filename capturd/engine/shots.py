@@ -120,9 +120,9 @@ def _take_order(record):
 
 
 def _pair_order(pair):
-    if len(pair) == 2 and _is_index(pair[0]) and _is_index(pair[1]):
-        return (0, pair[0], pair[1])
-    return (1, 0, 0)
+    """The sort key for a real included pair: always two non-negative ints
+    (only `_included_pair`'s two-int result is ever appended)."""
+    return pair
 
 
 def _block(code, shot_index, take_index, needed):
