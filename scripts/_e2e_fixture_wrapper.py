@@ -13,13 +13,6 @@ exactly that one origin is allowed. Every other URL — metadata, RFC1918, other
 loopback ports — still hits the real fail-closed guard. Production never runs
 this wrapper; production processes (``python -m capturd.mcp.server``, the
 hosted service) never register anything and stay fail-closed.
-
-This module deliberately ships NO licence provisioning: the Pro gate reads its
-codes/licence from the environment (``capturd/pro.py``), so anything this
-harness set would be a working licence bypass checked into the repo. The
-driver takes the licence from the operator's own environment and skips the
-demo.* leg loudly when there is none. (Issue #44 tracks the gate design
-itself; this PR only removes the provisioning from the tree.)
 """
 
 SERVER_FIXTURE_WRAPPER = """\
