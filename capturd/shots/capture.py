@@ -1523,6 +1523,31 @@ async def _restore_after_open(page, el, baseline, base_url, settings):
         await page.evaluate(_MAP_CONTROLS_JS)   # re-tag after reload
 
 
+async def _record_failed_state(
+    page: Any, el: Any, baseline: Any, base_url: str, settings: dict[str, Any],
+    target: CaptureTarget, control: dict[str, Any], *, error: str, **extra: Any,
+) -> dict[str, Any]:
+    """Build the one failed-state record and restore the page after it.
+
+    The over-cap and refused-still handlers differ only in ``error`` and the
+    over-cap sizing keys, so the record shape lives here once. A restore that
+    raises is swallowed: the record already stands.
+    """
+    record = {
+        "url": target.url, "state_id": target.state_id,
+        "viewport": target.viewport_id, "scheme": target.scheme,
+        "width": target.width, "height": target.height,
+        "status": "failed", "error": error, "file": None,
+        **extra,
+        "state": "open", "control": control["label"], "control_tag": control["tag"],
+    }
+    try:
+        await _restore_after_open(page, el, baseline, base_url, settings)
+    except Exception:
+        pass  # the record stands; the next control runs as the generic path does
+    return record
+
+
 async def _sweep_states(page: Any, target: CaptureTarget, settings: dict[str, Any],
                         base_path: Path) -> list[dict[str, Any]]:
     """Click each mapped control, capture the state it opens, restore, and move on."""
@@ -1567,34 +1592,18 @@ async def _sweep_states(page: Any, target: CaptureTarget, settings: dict[str, An
             await _restore_after_open(page, el, baseline, base_url, settings)
         except ArtifactTooLarge as exc:
             # An over-cap state is recorded; the page is not aborted.
-            shots.append({
-                "url": target.url, "state_id": target.state_id,
-                "viewport": target.viewport_id, "scheme": target.scheme,
-                "width": target.width, "height": target.height,
-                "status": "failed", "error": "artifact_too_large",
-                "file": None,
-                "bytes": exc.size, "cap": exc.cap,
-                "state": "open", "control": control["label"], "control_tag": control["tag"],
-            })
-            try:
-                await _restore_after_open(page, el, baseline, base_url, settings)
-            except Exception:
-                pass  # the record stands; the next control runs as the generic path does
+            shots.append(await _record_failed_state(
+                page, el, baseline, base_url, settings, target, control,
+                error="artifact_too_large", bytes=exc.size, cap=exc.cap,
+            ))
             continue
         except RestedCaptureError as exc:
             # A still that vanished mid-read is a real failure, not "nothing to
             # see": record it and restore before the next control.
-            shots.append({
-                "url": target.url, "state_id": target.state_id,
-                "viewport": target.viewport_id, "scheme": target.scheme,
-                "width": target.width, "height": target.height,
-                "status": "failed", "error": str(exc), "file": None,
-                "state": "open", "control": control["label"], "control_tag": control["tag"],
-            })
-            try:
-                await _restore_after_open(page, el, baseline, base_url, settings)
-            except Exception:
-                pass  # the record stands; the next control runs as the generic path does
+            shots.append(await _record_failed_state(
+                page, el, baseline, base_url, settings, target, control,
+                error=_redact_outward_error(str(exc), settings),
+            ))
             continue
         except Exception:
             continue
