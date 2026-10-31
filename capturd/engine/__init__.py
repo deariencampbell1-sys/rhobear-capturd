@@ -50,7 +50,7 @@ def load_manifest(data: bytes | None = None) -> dict[str, Any]:
     for key, expected in _MANIFEST_REQUIRED.items():
         if key not in manifest:
             raise ManifestError(f"packaged engine manifest is missing required key: {key}")
-        if not isinstance(manifest[key], expected):
+        if isinstance(manifest[key], bool) or not isinstance(manifest[key], expected):
             raise ManifestError(
                 f"packaged engine manifest key {key!r} must be {expected.__name__}, "
                 f"not {type(manifest[key]).__name__}")

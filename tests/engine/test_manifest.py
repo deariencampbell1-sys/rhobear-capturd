@@ -179,7 +179,9 @@ def _service_render_max_concurrent() -> int:
     config_path = PROJECT_ROOT / "service" / "app" / "config.py"
     spec = importlib.util.spec_from_file_location("capturd_service_config_readonly", config_path)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    with pytest.MonkeyPatch.context() as env:
+        env.delenv("CAPTURD_RENDER_MAX_CONCURRENT", raising=False)
+        spec.loader.exec_module(module)
     return int(module.RENDER_MAX_CONCURRENT)
 
 

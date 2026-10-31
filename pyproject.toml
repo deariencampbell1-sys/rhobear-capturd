@@ -81,6 +81,7 @@ voice = ["faster-whisper>=1.0", "sounddevice>=0.4", "miniaudio>=1.60"]
 dev = [
     "pytest>=7",
     "pytest-asyncio>=0.21",
+    "build>=1",
 ]
 all = ["faster-whisper>=1.0", "sounddevice>=0.4", "miniaudio>=1.60", "pytest>=7", "pytest-asyncio>=0.21"]
 

@@ -50,6 +50,10 @@ class DemoExportError(DemoForgeError, RuntimeError):
     callers that relied on that base.
     """
 
+    def __init__(self, message="", *, size=None, cap=None):
+        super().__init__(message)
+        self.size, self.cap = size, cap
+
 
 # ---------------------------------------------------------------------------
 # Mechanical frame inspection — a blank export must never become a video
@@ -476,12 +480,9 @@ def export_video(
     try:
         check_artifact_size(out_path)
     except ArtifactTooLarge as exc:
-        # Refuse as DemoExportError so coordinator.export_demo's boundary maps
-        # it; the measured size and the cap ride along for the caller.
-        refused = DemoExportError(str(exc))
-        refused.size = exc.size
-        refused.cap = exc.cap
-        raise refused from exc
+        raise DemoExportError(str(exc), size=exc.size, cap=exc.cap) from exc
+    except OSError as exc:
+        raise DemoExportError(f"export output unreadable at {out_path}: {exc}") from exc
     logger.info("export complete: %s (%.1f KB)", out_path, out_path.stat().st_size / 1024)
     return out_path
 
