@@ -21,6 +21,10 @@ def _copied(value: Any) -> Any:
     """A copy of `value` sharing no mapping with it, at any depth."""
     if isinstance(value, Mapping):
         return {key: _copied(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_copied(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_copied(item) for item in value)
     return value
 
 
