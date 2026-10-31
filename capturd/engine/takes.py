@@ -109,10 +109,17 @@ def transition(record: dict[str, Any], to: str) -> dict[str, Any]:
 
     Refuses everything outside TRANSITIONS: staying put, entering or leaving
     `approved` (approval.py's alone), anything out of terminal `failed`.
+    The returned record copies `direction` one level, so a caller mutating
+    what it was handed cannot reach back through it into `record`.
     """
     validate_take(record)
     if not isinstance(to, str) or to not in STATES:
         raise TakeError(f"cannot move a take to the unknown state {to!r}")
     if (record["state"], to) not in TRANSITIONS:
         raise TakeError(f"a take cannot move from {record['state']!r} to {to!r}")
-    return {**record, "state": to}
+    direction = record["direction"]
+    return {
+        **record,
+        "state": to,
+        "direction": dict(direction) if isinstance(direction, dict) else direction,
+    }
