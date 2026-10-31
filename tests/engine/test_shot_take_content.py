@@ -222,7 +222,7 @@ def test_revoke_records_reason_and_time():
     assert again["revokedReason"] is None
     assert again["approvedBy"] == "Niobe"
     assert again["approvedAt"] == APPROVED_AT_2
-    assert validate_take(again) == again  # edge case 3: re-approval validates
+    assert validate_take(again) is again  # F114: the very object, not an equal copy
     assert export_blocked([0], [again], {0: 0}, {(0, 0)}) == []
 
 
@@ -241,7 +241,7 @@ def test_reject_requires_a_real_reason():
         assert "ready take" in str(exc.value)  # the state refusal, not the reason
     rejected = approval.reject(record, reason="caption wrong")
     assert rejected["rejectedReason"] == "caption wrong"
-    assert validate_take(rejected) == rejected
+    assert validate_take(rejected) is rejected
 
 
 def test_mutators_validate_what_they_return():
@@ -278,7 +278,7 @@ def test_retake_keeps_exact_revision():
     for field in ("approvedBy", "approvedAt", "rejectedReason",
                   "revokedBy", "revokedAt", "revokedReason"):
         assert new[field] is None
-    assert validate_take(new) == new
+    assert validate_take(new) is new
     assert previous["state"] == "ready" and previous["takeIndex"] == 1  # untouched
 
 
@@ -567,7 +567,7 @@ def test_registry_result_shares_nothing_and_refuses_corrupt_entries():
 
 def test_validate_refuses_bad_records():
     base = make_take(state="ready")
-    assert validate_take(base) == base
+    assert validate_take(base) is base
     bad_records = [
         {**base, "kind": "capturd.shot"},
         {**base, "shotIndex": -1},
@@ -608,7 +608,7 @@ def test_an_approved_take_carries_no_revocation():
     moved = transition(revoked, "failed")
     assert moved["state"] == "failed"
     assert moved["revokedBy"] == "Morpheus"  # the history is kept
-    assert validate_take(moved) == moved
+    assert validate_take(moved) is moved
 
 
 # --------------------------------------------------------------------------- /
@@ -618,9 +618,15 @@ def test_an_approved_take_carries_no_revocation():
 def test_modules_stay_pure():
     for name in CONTENT_MODULES:
         source = (ENGINE_DIR / name).read_text(encoding="utf-8")
-        assert "waiting" not in source, f"{name}: mentions a waiting state"
-        assert "awaiting_approval" not in source, f"{name}: mentions a waiting state"
         tree = ast.parse(source, filename=name)
+        # F115: a state name counts only as a string constant. A comment that
+        # uses the word is prose, not a state, and must not fail this test.
+        string_constants = {
+            node.value for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        }
+        for waiting in ("waiting", "awaiting_approval"):
+            assert waiting not in string_constants, f"{name}: names the state {waiting!r}"
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
