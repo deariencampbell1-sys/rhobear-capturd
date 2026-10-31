@@ -1,0 +1,110 @@
+"""The frozen `UsageReceipt` boundary and the closed, one-way state path:
+`cloud/src/mcp/engine/schemas/usage-receipt.schema.json` at `rhobear-builds`.
+
+Money is a string never a float, unit counts are integers, unknown fields are
+preserved, and only `reserved -> settled`, `reserved -> released` and `settled
+-> reversed` move; `unresolved` is reconciliation's alone.
+"""
+
+from __future__ import annotations
+
+import datetime
+import re
+from typing import Any
+
+REQUIRED_FIELDS = ("operationId", "attemptId", "accountId", "product", "priceVersion",
+                   "units", "customerDebitUsd", "state", "occurredAt")
+STATES = ("reserved", "settled", "released", "unresolved", "reversed")
+COVERAGE_KIND = "launch_mcp_unmetered"
+_IDENTITY = re.compile(r".{1,512}")
+_TIMESTAMP = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+                        r"(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$")
+_MONEY = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+_MOVES = {("reserved", "settle"): "settled", ("reserved", "release"): "released",
+          ("settled", "reverse"): "reversed"}
+
+
+class ReceiptError(ValueError):
+    """Not the frozen `UsageReceipt` shape, or not a move on the one-way path."""
+
+
+def is_money_string(value: Any) -> bool:
+    """A non-negative decimal string; `"0.00"` is a real charge, `-1` is not."""
+    return isinstance(value, str) and _MONEY.fullmatch(value) is not None
+
+
+def _instant(value: Any, field: str) -> datetime.datetime:
+    """The schema's ISO-8601 timestamp with an offset, parsed as a real instant."""
+    if not isinstance(value, str) or _TIMESTAMP.fullmatch(value) is None:
+        raise ReceiptError(f"{field} is not an ISO-8601 timestamp with an offset")
+    try:
+        # `Z` is the one spelling `fromisoformat` before 3.11 does not accept.
+        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ReceiptError(f"{field} is not a real instant: {value!r}") from exc
+
+
+def validate_coverage(coverage: Any) -> dict[str, Any]:
+    """The launch-coverage block exactly as the frozen schema carries it."""
+    if not isinstance(coverage, dict):
+        raise ReceiptError("coverage must be an object")
+    for field in ("kind", "startedAt", "endsAt"):
+        if field not in coverage:
+            raise ReceiptError(f"coverage is missing required field {field!r}")
+    if coverage["kind"] != COVERAGE_KIND:
+        raise ReceiptError(f"coverage kind must be {COVERAGE_KIND!r}")
+    started = _instant(coverage["startedAt"], "coverage startedAt")
+    if _instant(coverage["endsAt"], "coverage endsAt") < started:
+        raise ReceiptError("coverage endsAt precedes startedAt")
+    seat = coverage.get("seat")
+    if "seat" in coverage and (isinstance(seat, bool) or not isinstance(seat, int)):
+        raise ReceiptError(f"coverage seat must be an integer, not {seat!r}")
+    return coverage
+
+
+def validate_receipt(record: Any) -> dict[str, Any]:
+    """Return `record` when it is a valid `UsageReceipt`, else ReceiptError."""
+    if not isinstance(record, dict):
+        raise ReceiptError(f"a receipt is an object, not {type(record).__name__}")
+    for field in REQUIRED_FIELDS:
+        if field not in record:
+            raise ReceiptError(f"receipt is missing required field {field!r}")
+    for field in ("operationId", "attemptId", "accountId", "product", "priceVersion"):
+        value = record[field]
+        if not isinstance(value, str) or _IDENTITY.fullmatch(value) is None:
+            raise ReceiptError(f"receipt {field} must be a 1-512 character string")
+    units = record["units"]
+    if not isinstance(units, dict):
+        raise ReceiptError(f"units must be an object, not {type(units).__name__}")
+    for name, value in units.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ReceiptError(f"units[{name!r}] must be a non-negative integer, not {value!r}")
+    debit = record["customerDebitUsd"]
+    if debit is not None and not is_money_string(debit):
+        raise ReceiptError(f"customerDebitUsd must be a money string or null, not {debit!r}")
+    if record["state"] not in STATES:
+        raise ReceiptError(f"receipt state {record['state']!r} is not one of {STATES}")
+    _instant(record["occurredAt"], "occurredAt")
+    if "coverage" in record:
+        validate_coverage(record["coverage"])
+    return record
+
+
+def is_metered(record: Any) -> bool:
+    """True when the receipt carries real money; False only under launch coverage."""
+    return "coverage" not in validate_receipt(record)
+
+
+def next_state(current: str | None, event: str) -> str:
+    """The one legal move for `current` on `event`, else ReceiptError.
+
+    `reserve` creates the first state; `unresolved` is never produced here.
+    """
+    if event not in ("reserve", "settle", "release", "reverse"):
+        raise ReceiptError(f"unknown receipt event {event!r}")
+    if current is not None and current not in STATES:
+        raise ReceiptError(f"unknown receipt state {current!r}")
+    move = _MOVES.get((current, event))
+    if move is None:
+        raise ReceiptError(f"a receipt cannot move from {current!r} on {event!r}")
+    return move
