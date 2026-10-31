@@ -118,27 +118,26 @@ def test_load_manifest_twice_is_equal_and_mutation_isolated():
     assert engine.load_manifest() == second, "a caller's copy leaked into the next load"
 
 
-def _write_bad_manifest(tmp_path, monkeypatch, payload) -> None:
+def _write_bad_manifest(tmp_path, monkeypatch, payload=None, *, raw: str | None = None) -> None:
     """Write a manifest payload and point ``load_manifest`` at the file.
 
-    F98: a ``str`` payload is raw text here, so a JSON string never reaches
-    the type branch — the fix JSON-encodes values and keeps raw text explicit.
+    F98: values are JSON-encoded, so a JSON string (``json.dumps("...")``)
+    reaches the type branch; genuinely malformed text goes through ``raw=``.
     """
     path = tmp_path / "manifest.json"
-    path.write_text(payload if isinstance(payload, str) else json.dumps(payload),
-                    encoding="utf-8")
+    path.write_text(raw if raw is not None else json.dumps(payload), encoding="utf-8")
     monkeypatch.setattr(engine, "_MANIFEST_PATH", path)
 
 
 def test_corrupt_packaged_manifest_raises_a_named_error(tmp_path, monkeypatch):
     good = engine.load_manifest()
 
-    def bad(payload) -> None:
-        _write_bad_manifest(tmp_path, monkeypatch, payload)
+    def bad(payload=None, *, raw: str | None = None) -> None:
+        _write_bad_manifest(tmp_path, monkeypatch, payload, raw=raw)
         with pytest.raises(engine.ManifestError):
             engine.load_manifest()
 
-    bad("{not json")                                    # not JSON at all
+    bad(raw="{not json")                                # not JSON at all
     bad([])                                             # a JSON list (r4 edge 3)
     bad("just a string")                                # a JSON string (r4 edge 3)
     bad({})                                             # every required key missing
@@ -197,7 +196,7 @@ def _requirement_floor(entry: object) -> tuple[int, ...]:
 
 def _is_build_requirement(entry: object) -> bool:
     """F105: the dev extra names the ``build`` distribution, never a lookalike."""
-    return str(entry).strip().startswith("build")
+    return _requirement_name(entry) == "build"
 
 
 def test_the_dev_extra_matches_build_exactly():
@@ -233,8 +232,8 @@ def test_max_active_jobs_per_account_matches_the_render_budget():
 
 
 def test_service_default_ignores_a_stray_env(monkeypatch):
-    """A stray CAPTURD_RENDER_MAX_CONCURRENT must not leak into the default read."""
-    monkeypatch.setenv("CAPTURD_RENDER_MAX_CONCURRENT", "99")
+    """A stray env var must not leak into the default read (the name comes from config)."""
+    monkeypatch.setenv(_render_max_concurrent_env_name(), "99")
     value = _service_render_max_concurrent()
     assert value != 99
     assert value == engine.load_manifest()["limits"]["maxActiveJobsPerAccount"]
@@ -333,20 +332,29 @@ def test_every_advertised_format_maps_to_a_listed_artifact_kind():
 # The wheel really packages the manifest (r4 item 1)
 # ---------------------------------------------------------------------------
 
+def _copy_project_tree(dest: Path) -> Path:
+    """F100: a throwaway project copy so ``python -m build`` never writes into the repo."""
+    shutil.copytree(
+        PROJECT_ROOT,
+        dest,
+        ignore=shutil.ignore_patterns(
+            ".git", "build", "dist", "*.egg-info", "__pycache__",
+            ".pytest_cache", ".ruff_cache", "out", "demos",
+        ),
+    )
+    return dest
+
+
 def test_the_published_wheel_carries_a_loadable_manifest(tmp_path):
-    """Prove packaging against a real wheel. A missing build tool or a failed
+    """Prove packaging against a real wheel built from a throwaway copy (F100:
+    the repository tree is never written to). A missing build tool or a failed
     build fails loudly with the command's output below — this never skips."""
+    src = _copy_project_tree(tmp_path / "src")
     out_dir = tmp_path / "dist"
-    build_dir = PROJECT_ROOT / "build"
-    build_dir_preexisting = build_dir.exists()
-    try:
-        proc = subprocess.run(
-            [sys.executable, "-m", "build", "--wheel", "--no-isolation", "--outdir", str(out_dir)],
-            cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=600,
-        )
-    finally:
-        if not build_dir_preexisting:
-            shutil.rmtree(build_dir, ignore_errors=True)
+    proc = subprocess.run(
+        [sys.executable, "-m", "build", "--wheel", "--no-isolation", "--outdir", str(out_dir)],
+        cwd=src, capture_output=True, text=True, timeout=600,
+    )
     assert proc.returncode == 0, (
         "python -m build --wheel failed — the packaged manifest is unproven\n"
         f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
