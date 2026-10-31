@@ -21,6 +21,20 @@ def _blank(*values: Any) -> bool:
     return any(not isinstance(value, str) or not value.strip() for value in values)
 
 
+def _checked(record: Any) -> dict[str, Any]:
+    """Validate the record before a mutator reads it.
+
+    A record that is not a dict is the module's own `ApprovalError`, never an
+    `AttributeError` from `record.get`. A malformed dict is refused by
+    `validate_take` (`TakeError`) — the same refusal the returned records
+    already go through, so a mutator never escapes as a builtin.
+    """
+    if not isinstance(record, dict):
+        raise ApprovalError(
+            f"a take record is a dict, not {type(record).__name__}")
+    return validate_take(record)
+
+
 def approve(record: dict[str, Any], *, by: str, at: str, source_revision: str) -> dict[str, Any]:
     """Approve a `ready` take: bind the named human, the time, the revision.
 
@@ -29,6 +43,7 @@ def approve(record: dict[str, Any], *, by: str, at: str, source_revision: str) -
     `revoked*` fields and `rejectedReason`. The returned record passes
     `validate_take`. Never mutates.
     """
+    record = _checked(record)
     if record.get("state") != "ready":
         raise ApprovalError(
             f"only a ready take can be approved, not {record.get('state')!r}")
@@ -58,6 +73,7 @@ def revoke(record: dict[str, Any], *, by: str, at: str, reason: str) -> dict[str
     `approvedAt` stay as history (§5.4); a derived export is L9's concern.
     The returned record passes `validate_take`.
     """
+    record = _checked(record)
     if record.get("state") != "approved":
         raise ApprovalError(
             f"only an approved take can be revoked, not {record.get('state')!r}")
@@ -81,6 +97,7 @@ def reject(record: dict[str, Any], *, reason: str) -> dict[str, Any]:
     would block the whole job. The returned record passes `validate_take`.
     Never mutates.
     """
+    record = _checked(record)
     if record.get("state") != "ready":
         raise ApprovalError(
             f"only a ready take can be rejected, not {record.get('state')!r}")

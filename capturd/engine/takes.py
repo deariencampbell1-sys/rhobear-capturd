@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .artifacts import _copied
+
 #: The closed set of §2 states — nothing else, ever: progress flags belong to
 #: the L8d job, never to a take state.
 STATES = ("draft", "ready", "approved", "failed", "unresolved")
@@ -63,9 +65,9 @@ def validate_take(record: Any) -> dict[str, Any]:
     """Return `record` unchanged when it passes the shape checks, else TakeError.
 
     The checks, and only these: the closed §3 key set — no key missing, none
-    extra — plus the listed fields: `kind` is `capturd.take`; `shotIndex` and
-    `takeIndex` are non-negative ints; `state` is one of STATES;
-    `sourceRevision` is 40 lowercase hex. An `approved` take also carries a
+    extra — plus the listed fields: `kind` is `capturd.take`; `jobId` is a
+    str; `shotIndex` and `takeIndex` are non-negative ints; `state` is one of
+    STATES; `sourceRevision` is 40 lowercase hex. An `approved` take also carries a
     named `approvedBy` and a real `approvedAt` (§5.3) and has every
     `revoked*` field null — approval clears revocations, so both at once is
     a contradiction. Every other field value is not type-checked here.
@@ -86,6 +88,9 @@ def validate_take(record: Any) -> dict[str, Any]:
         if not _is_index(record[field]):
             raise TakeError(
                 f"take record {field} must be a non-negative int, not {record[field]!r}")
+    if not isinstance(record["jobId"], str):
+        raise TakeError(
+            f"take record jobId must be a str, not {record['jobId']!r}")
     if record["state"] not in STATES:
         raise TakeError(
             f"take record state {record['state']!r} is not one of {STATES} "
@@ -109,17 +114,17 @@ def transition(record: dict[str, Any], to: str) -> dict[str, Any]:
 
     Refuses everything outside TRANSITIONS: staying put, entering or leaving
     `approved` (approval.py's alone), anything out of terminal `failed`.
-    The returned record copies `direction` one level, so a caller mutating
-    what it was handed cannot reach back through it into `record`.
+    The returned record copies `direction` at every depth (the shared
+    `_copied` recursion), so a caller mutating what it was handed cannot
+    reach back through it into `record`.
     """
     validate_take(record)
     if not isinstance(to, str) or to not in STATES:
         raise TakeError(f"cannot move a take to the unknown state {to!r}")
     if (record["state"], to) not in TRANSITIONS:
         raise TakeError(f"a take cannot move from {record['state']!r} to {to!r}")
-    direction = record["direction"]
     return {
         **record,
         "state": to,
-        "direction": dict(direction) if isinstance(direction, dict) else direction,
+        "direction": _copied(record["direction"]),
     }
