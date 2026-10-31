@@ -21,6 +21,7 @@ import importlib.util
 import inspect
 import itertools
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -159,6 +160,19 @@ def test_dev_extra_declares_build():
     pyproject = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     dev = pyproject["project"]["optional-dependencies"]["dev"]
     assert any(str(entry).startswith("build") for entry in dev), dev
+
+
+def _requirement_name(entry: object) -> str:
+    """The requirement's name: everything up to the first version-specifier character."""
+    match = re.match(r"[A-Za-z0-9._-]+", str(entry).strip())
+    return match.group(0) if match else ""
+
+
+def test_dev_extra_declares_setuptools_and_wheel():
+    """r6 item 3: a --no-isolation wheel build needs the backend importable from dev alone."""
+    pyproject = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    dev = pyproject["project"]["optional-dependencies"]["dev"]
+    assert {"build", "setuptools", "wheel"} <= {_requirement_name(entry) for entry in dev}, dev
 
 
 def test_max_active_jobs_per_account_matches_the_render_budget():
@@ -484,10 +498,151 @@ def test_still_over_cap_in_the_sweep_is_recorded_and_the_sweep_continues(tmp_pat
         "viewport": target.viewport_id, "scheme": target.scheme,
         "width": target.width, "height": target.height,
         "status": "failed", "error": "artifact_too_large",
+        "file": None,
         "bytes": 24, "cap": 10,
         "state": "open", "control": "Open menu", "control_tag": "button",
     }]
     assert written == [out] and not out.exists(), "the over-cap sweep still never stays on disk"
+
+
+def _overcap_sweep_page(*, controls, sizes, escape_restores=True, escape_raises=False, order=None):
+    """The r6 sweep setup: a manual page whose screenshots write `sizes` in call order.
+
+    Clicks set a fresh non-baseline fingerprint; Escape restores the baseline
+    unless `escape_restores` is False, or raises when `escape_raises` is set.
+    `order`, when given, records every click/evaluate/escape/screenshot/reload event.
+    """
+    page = AsyncMock()
+    page.url = "https://example.com/"
+    sizes = iter(sizes)
+    fingerprint = ["baseline"]
+    clicks = itertools.count(1)
+
+    async def screenshot(**kwargs):
+        Path(kwargs["path"]).write_bytes(b"x" * next(sizes))
+        if order is not None:
+            order.append("shot")
+
+    page.screenshot.side_effect = screenshot
+    elements: dict[str, SimpleNamespace] = {}
+
+    def locator(selector: str) -> SimpleNamespace:
+        key = selector.rsplit("=", 1)[-1]
+        if key not in elements:
+            el = SimpleNamespace(count=AsyncMock(return_value=1), is_visible=AsyncMock(return_value=True))
+
+            async def click(**kwargs):
+                fingerprint[0] = f"opened-{next(clicks)}"
+                if order is not None:
+                    order.append(f"click-{key}")
+
+            el.click = AsyncMock(side_effect=click)
+            elements[key] = el
+        return SimpleNamespace(first=elements[key])
+
+    page.locator = locator
+
+    async def evaluate(script):
+        if script == capture._MAP_CONTROLS_JS:
+            if order is not None:
+                order.append("map")
+            return list(controls)
+        if order is not None:
+            order.append(f"fp:{fingerprint[0]}")
+        return fingerprint[0]
+
+    page.evaluate.side_effect = evaluate
+
+    async def press(key):
+        if escape_raises:
+            raise RuntimeError("escape boom")
+        if escape_restores:
+            fingerprint[0] = "baseline"
+        if order is not None:
+            order.append("escape")
+
+    page.keyboard.press.side_effect = press
+    return page
+
+
+def _sweep_target():
+    return dataclasses.replace(build_capture_plan(
+        {"urls": ["https://example.com/"], "viewports": ["desktop"], "schemes": ["light"]})[1][0])
+
+
+def test_over_cap_state_presses_escape_before_the_next_control(tmp_path, monkeypatch):
+    """r6 item 1: the over-cap branch restores the page — Escape fires once per control."""
+    _, _, settings, _, _, _ = _capture_stack(tmp_path, monkeypatch)
+    monkeypatch.setattr(engine, "MAX_ARTIFACT_BYTES", 10)
+    page = _overcap_sweep_page(
+        controls=[{"id": "0", "label": "Open menu", "tag": "button"},
+                  {"id": "1", "label": "Close menu", "tag": "button"}],
+        sizes=[24, 24])
+    shots = asyncio.run(capture._sweep_states(page, _sweep_target(), settings, tmp_path / "baseline.png"))
+    assert [s["status"] for s in shots] == ["failed", "failed"]
+    assert page.keyboard.press.await_count == 2, "Escape once per control"
+    assert all(call.args == ("Escape",) for call in page.keyboard.press.await_args_list)
+
+
+def test_over_cap_state_reloads_when_escape_does_not_restore(tmp_path, monkeypatch):
+    """r6 item 1 edge: a compound state that survives Escape is reloaded before the next control."""
+    _, _, settings, _, _, _ = _capture_stack(tmp_path, monkeypatch)
+    monkeypatch.setattr(engine, "MAX_ARTIFACT_BYTES", 10)
+    order: list[str] = []
+    page = _overcap_sweep_page(
+        controls=[{"id": "0", "label": "Open menu", "tag": "button"},
+                  {"id": "1", "label": "Close menu", "tag": "button"}],
+        sizes=[24, 24], escape_restores=False, order=order)
+    shots = asyncio.run(capture._sweep_states(page, _sweep_target(), settings, tmp_path / "baseline.png"))
+    assert [s["status"] for s in shots] == ["failed", "failed"]
+    assert page.goto.await_count >= 1, "the compound state is reloaded"
+    assert all(call.args[0] == "https://example.com/" for call in page.goto.await_args_list)
+    assert order.index("goto") < order.index("click-1"), "the second control runs after the reload"
+
+
+def test_second_control_after_over_cap_is_not_recorded_from_a_dirty_page(tmp_path, monkeypatch):
+    """r6 item 1: the restore runs before the second control's fingerprint is read."""
+    _, _, settings, _, _, _ = _capture_stack(tmp_path, monkeypatch)
+    monkeypatch.setattr(engine, "MAX_ARTIFACT_BYTES", 10)
+    order: list[str] = []
+    page = _overcap_sweep_page(
+        controls=[{"id": "0", "label": "Open menu", "tag": "button"},
+                  {"id": "1", "label": "Close menu", "tag": "button"}],
+        sizes=[24, 24], order=order)
+    shots = asyncio.run(capture._sweep_states(page, _sweep_target(), settings, tmp_path / "baseline.png"))
+    assert [s["status"] for s in shots] == ["failed", "failed"]
+    assert order.index("escape") < order.index("click-1") < order.index("fp:opened-2"), order
+
+
+def test_failed_sweep_entry_carries_a_null_file(tmp_path, monkeypatch):
+    """r6 item 2: failed and ok sweep entries share the shape — every entry has a "file"."""
+    _, _, settings, _, _, _ = _capture_stack(tmp_path, monkeypatch)
+    monkeypatch.setattr(engine, "MAX_ARTIFACT_BYTES", 10)
+    page = _overcap_sweep_page(
+        controls=[{"id": "0", "label": "Open menu", "tag": "button"},
+                  {"id": "1", "label": "Close menu", "tag": "button"}],
+        sizes=[24, 8])
+    shots = asyncio.run(capture._sweep_states(page, _sweep_target(), settings, tmp_path / "baseline.png"))
+    assert [s["status"] for s in shots] == ["failed", "ok"]
+    assert all("file" in s for s in shots), shots
+    assert next(s for s in shots if s["status"] == "failed")["file"] is None
+    ok = next(s for s in shots if s["status"] == "ok")
+    assert isinstance(ok["file"], str) and ok["file"].endswith(".png")
+
+
+def test_restore_failure_on_the_over_cap_branch_keeps_the_record(tmp_path, monkeypatch):
+    """r6 edge 1: a raising restore keeps the failed entry and the sweep continues."""
+    _, _, settings, _, _, _ = _capture_stack(tmp_path, monkeypatch)
+    monkeypatch.setattr(engine, "MAX_ARTIFACT_BYTES", 10)
+    page = _overcap_sweep_page(
+        controls=[{"id": "0", "label": "Open menu", "tag": "button"},
+                  {"id": "1", "label": "Close menu", "tag": "button"}],
+        sizes=[24, 8], escape_raises=True)
+    shots = asyncio.run(capture._sweep_states(page, _sweep_target(), settings, tmp_path / "baseline.png"))
+    assert [s["status"] for s in shots] == ["failed", "ok"], "the record stands and the sweep continues"
+    assert all("file" in s for s in shots), shots
+    assert next(s for s in shots if s["status"] == "failed")["file"] is None
+    assert page.keyboard.press.await_count == 2, "the restore was attempted on the over-cap branch too"
 
 
 def test_two_over_cap_states_and_three_good_ones_on_one_page(tmp_path, monkeypatch):
