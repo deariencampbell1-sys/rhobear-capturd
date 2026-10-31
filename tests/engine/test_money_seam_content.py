@@ -480,3 +480,215 @@ def test_no_arithmetic_on_money():
                               ast.Mod, ast.Pow)):
                 offenders.append(f"{name}:{node.lineno}:{type(node.op).__name__}")
     assert not offenders, f"arithmetic in the money seam: {offenders}"
+
+
+# --------------------------------------------------------------------------- /
+# 6. W3-06b-r3 — the builders guard the whole record; null and absence agree
+
+
+def _quote(**overrides):
+    args = dict(operationId=OP, accountId=ACCOUNT, product=PRODUCT,
+                units={"searches": 1}, priceVersion=PRICE_VERSION)
+    args.update(overrides)
+    return quote_request(**args)
+
+
+def _reserve(**overrides):
+    args = dict(operationId=OP, attemptId=ATTEMPT, accountId=ACCOUNT, product=PRODUCT,
+                units={"searches": 1}, maxUsd="1.00", priceVersion=PRICE_VERSION)
+    args.update(overrides)
+    return reserve_request(**args)
+
+
+def _settle(**overrides):
+    args = dict(operationId=OP, attemptId=ATTEMPT, units={"searches": 1})
+    args.update(overrides)
+    return settle_request(**args)
+
+
+def _release(**overrides):
+    args = dict(operationId=OP, attemptId=ATTEMPT)
+    args.update(overrides)
+    return release_request(**args)
+
+
+def _coverage(**overrides):
+    args = dict(operationId=OP, attemptId=ATTEMPT, accountId=ACCOUNT, product=PRODUCT)
+    args.update(overrides)
+    return coverage_request(**args)
+
+
+#: name, builder, the identity fields it carries, whether it carries units.
+BUILDERS = (
+    ("quote", _quote, ("operationId", "accountId", "product", "priceVersion"), True),
+    ("reserve", _reserve,
+     ("operationId", "attemptId", "accountId", "product", "priceVersion"), True),
+    ("settle", _settle, ("operationId", "attemptId"), True),
+    ("release", _release, ("operationId", "attemptId"), False),
+    ("coverage", _coverage, ("operationId", "attemptId", "accountId", "product"), False),
+)
+BUILDERS_BY_NAME = {name: build for name, build, _, _ in BUILDERS}
+
+#: name, parser, request builder, a valid dict answer, and the parser's own
+#: required text fields. Release has no required text field, so no entry here.
+PARSER_CASES = (
+    ("quote", parse_quote, _quote,
+     dict(operationId=OP, priceVersion=PRICE_VERSION, requiredUsd="0.10")),
+    ("reserve", parse_reserve, _reserve,
+     dict(operationId=OP, attemptId=ATTEMPT, reservationId="res-1",
+          priceVersion=PRICE_VERSION, heldUsd="1.00")),
+    ("settle", parse_settle, _settle,
+     dict(operationId=OP, attemptId=ATTEMPT, receiptId="l2rc-1", customerDebitUsd=None)),
+    ("release", parse_release, _release,
+     dict(operationId=OP, attemptId=ATTEMPT, released=True)),
+    ("coverage", parse_coverage, _coverage,
+     dict(operationId=OP, attemptId=ATTEMPT, kind="launch_mcp_unmetered",
+          startedAt="2026-10-01T00:00:00Z", endsAt="2026-10-31T23:59:59Z")),
+)
+PARSER_IDS = [case[0] for case in PARSER_CASES]
+TEXT_FIELD_CASES = [
+    ("quote", parse_quote, _quote, PARSER_CASES[0][3], "priceVersion"),
+    ("reserve", parse_reserve, _reserve, PARSER_CASES[1][3], "reservationId"),
+    ("reserve", parse_reserve, _reserve, PARSER_CASES[1][3], "priceVersion"),
+    ("settle", parse_settle, _settle, PARSER_CASES[2][3], "receiptId"),
+    ("coverage", parse_coverage, _coverage, PARSER_CASES[4][3], "kind"),
+]
+
+
+def _bad_builder_cases():
+    """Every builder against every bad record it can actually be handed."""
+    cases = []
+    for name, _build, identity_fields, has_units in BUILDERS:
+        for field in identity_fields:
+            cases.append(pytest.param(name, field, "", id=f"{name}-{field}-empty"))
+            cases.append(pytest.param(name, field, "x" * 513, id=f"{name}-{field}-513"))
+        if has_units:
+            for bad in (1.5, True, -1):
+                cases.append(pytest.param(name, "units", bad, id=f"{name}-units-{bad!r}"))
+    cases.append(pytest.param("release", "reason", 42, id="release-reason-42"))
+    cases.append(pytest.param("release", "reason", 1.5, id="release-reason-1.5"))
+    return cases
+
+
+@pytest.mark.parametrize("name,field,bad", _bad_builder_cases())
+def test_every_builder_refuses_a_bad_record(name, field, bad):
+    """Item 1: the builders guard the whole record, not only money."""
+    build = BUILDERS_BY_NAME[name]
+    if field == "units":
+        with pytest.raises(L2Error):
+            build(units={"searches": bad})
+    else:
+        with pytest.raises(L2Error):
+            build(**{field: bad})
+
+
+def test_builder_identity_window_is_the_schema_window():
+    """The same 1-512 rule receipts.py enforces, newline behaviour included."""
+    for name, build, identity_fields, _ in BUILDERS:
+        for field in identity_fields:
+            assert build(**{field: "x"})[field] == "x"
+            assert build(**{field: "x" * 512})[field] == "x" * 512
+            with pytest.raises(L2Error):
+                build(**{field: "x" * 513})
+            with pytest.raises(L2Error):
+                build(**{field: ""})
+    # The pinned schema pattern is ^.{1,512}$ with no newline mode: an
+    # embedded newline is outside the window on both the builder and the
+    # receipt. Do not "fix" this to diverge from the pinned rule.
+    with pytest.raises(L2Error):
+        _quote(operationId="a\nb")
+    with pytest.raises(ReceiptError):
+        validate_receipt(make_receipt(operationId="a\nb"))
+
+
+def test_builder_unit_edges_are_counts_not_absences():
+    assert _quote(units={})["units"] == {}
+    assert _quote(units={"searches": 0})["units"] == {"searches": 0}
+    with pytest.raises(L2Error):
+        _quote(units=5)
+
+
+@pytest.mark.parametrize("name,parse,build,answer", PARSER_CASES, ids=PARSER_IDS)
+@pytest.mark.parametrize("bad", (None, [], "answer"))
+def test_every_parser_refuses_a_non_dict_answer(name, parse, build, answer, bad):
+    """Item 2's first guard branch, driven on every parser."""
+    request = build()
+    if parse is parse_coverage and bad is None:
+        # None is the documented no-coverage answer for this parser alone.
+        assert parse(None, request) is None
+        return
+    with pytest.raises(L2Error):
+        parse(bad, request)
+
+
+@pytest.mark.parametrize("name,parse,build,answer,field", TEXT_FIELD_CASES,
+                         ids=[f"{case[0]}-{case[4]}" for case in TEXT_FIELD_CASES])
+@pytest.mark.parametrize("spelling", ("absent", "empty"))
+def test_every_parser_refuses_a_missing_or_empty_text_field(name, parse, build, answer,
+                                                            field, spelling):
+    """Item 2's second guard branch: every required text field is proven."""
+    request = build()
+    broken = dict(answer)
+    if spelling == "absent":
+        del broken[field]
+    else:
+        broken[field] = ""
+    with pytest.raises(L2Error):
+        parse(broken, request)
+
+
+@pytest.mark.parametrize("name,parse,build,answer", PARSER_CASES, ids=PARSER_IDS)
+def test_a_request_without_identity_is_refused_not_crashed(name, parse, build, answer):
+    """Item 2: a hand-built request refuses with L2Error, never KeyError."""
+    for bad_request in ({}, {"operationId": 42}, {"operationId": None},
+                        {"operationId": ""}, {"operationId": "x" * 513}):
+        with pytest.raises(L2Error):
+            parse(answer, bad_request)
+    with pytest.raises(L2Error):
+        parse(answer, None)
+
+
+def test_fractional_seconds_are_runtime_independent():
+    """Item 3, pinned-regex option: the module, not the interpreter, decides.
+
+    The fraction is pinned to the widths the minimum supported runtime
+    (`requires-python >= 3.10`) parses — exactly three or six digits — so the
+    accepted and refused spellings below hold on every runtime. There is no
+    `sys.version_info` here: this is a property of the module.
+    """
+    for digits in ("123", "123456"):
+        stamp = f"2026-10-31T12:00:00.{digits}Z"
+        assert validate_receipt(make_receipt(occurredAt=stamp))["occurredAt"] == stamp
+        assert validate_coverage({**COVERAGE, "startedAt": stamp})["startedAt"] == stamp
+    for digits in ("1", "12", "1234", "12345", "1234567"):
+        with pytest.raises(ReceiptError):
+            validate_receipt(make_receipt(occurredAt=f"2026-10-31T12:00:00.{digits}Z"))
+        with pytest.raises(ReceiptError):
+            validate_coverage({**COVERAGE, "startedAt": f"2026-10-01T00:00:00.{digits}Z"})
+    # No fraction and `Z` both still validate, on receipts and coverage.
+    for stamp in ("2026-10-31T12:00:00Z", "2026-10-31T12:00:00+00:00",
+                  "2026-10-31T12:00:00.123+00:00"):
+        assert validate_receipt(make_receipt(occurredAt=stamp))["occurredAt"] == stamp
+
+
+def test_null_and_absence_mean_the_same_thing_on_both_halves():
+    """Item 4 decision: one mapping, asserted on both halves at once.
+
+    Request side: `providerCostUsd=None` states an explicit null; omitting the
+    keyword, or passing the documented `PROVIDER_COST_ABSENT` sentinel, leaves
+    the key out. Answer side: an explicit `customerDebitUsd: null` parses as
+    covered; an absent key is refused. Neither half invents a third meaning
+    for either spelling.
+    """
+    stated = _settle(providerCostUsd=None)
+    omitted = _settle()
+    sentinel_absent = _settle(providerCostUsd=l2.PROVIDER_COST_ABSENT)
+    assert stated["providerCostUsd"] is None
+    assert "providerCostUsd" not in omitted
+    assert sentinel_absent == omitted
+
+    answer = {"operationId": OP, "attemptId": ATTEMPT, "receiptId": "l2rc-1"}
+    assert parse_settle({**answer, "customerDebitUsd": None},
+                        stated)["customerDebitUsd"] is None
+    with pytest.raises(L2Error):
+        parse_settle(dict(answer), sentinel_absent)
