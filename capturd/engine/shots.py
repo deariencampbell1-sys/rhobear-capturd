@@ -9,7 +9,7 @@ receipt, `expectedRevision` — is elsewhere; ruling D: the `conflict` +
 
 from __future__ import annotations
 
-from .takes import TakeError, validate_take
+from .takes import AmbiguousTakeSet, TakeError, validate_take
 
 # §6: the code and what-is-needed per blocking take state.
 _BLOCKS = {
@@ -81,6 +81,27 @@ def _is_index(value):
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _ambiguous_pair(take_list):
+    """The first duplicated `(shotIndex, takeIndex)` of two ints, or None."""
+    seen = set()
+    for record in take_list:
+        shot, take = record.get("shotIndex"), record.get("takeIndex")
+        if _is_index(shot) and _is_index(take):
+            pair = (shot, take)
+            if pair in seen:
+                return pair
+            seen.add(pair)
+    return None
+
+
+def _included_pair(entry):
+    """The `(shotIndex, takeIndex)` of a two-item int-sequence entry, else None."""
+    if isinstance(entry, (tuple, list)) and len(entry) == 2 \
+            and _is_index(entry[0]) and _is_index(entry[1]):
+        return (entry[0], entry[1])
+    return None
+
+
 def _take_order(record):
     shot, take = record.get("shotIndex"), record.get("takeIndex")
     return (0, shot, take) if _is_index(shot) and _is_index(take) else (1, 0, 0)
@@ -103,12 +124,28 @@ def export_blocked(shot_indexes, takes, selection, included):
     the job tree (ruling C); `selection` maps shot index to take index
     (ruling B); `included` the `(shotIndex, takeIndex)` pairs in the package.
     Every matching clause reports, not only the first; a blocked state never
-    raises; each block names the shot, the take and what is needed.
+    raises; each block names the shot, the take and what is needed. An
+    ambiguous take set — two records sharing a `(shotIndex, takeIndex)` of
+    two ints — is a caller error and raises `AmbiguousTakeSet`; it is never
+    silently picked from. An `included` entry that is not a two-item pair
+    becomes an `included_not_approved` block with null indexes.
     """
     shot_list = list(shot_indexes)
     take_list = sorted(takes, key=_take_order)
+    ambiguous = _ambiguous_pair(take_list)
+    if ambiguous is not None:
+        raise AmbiguousTakeSet(
+            f"two take records share (shotIndex={ambiguous[0]}, "
+            f"takeIndex={ambiguous[1]}); a take set holds one record per pair")
     chosen = dict(selection)
-    included_pairs = sorted({tuple(pair) for pair in included}, key=_pair_order)
+    included_pairs, stray_included = [], []
+    for entry in included:
+        pair = _included_pair(entry)
+        if pair is None:
+            stray_included.append(entry)
+        else:
+            included_pairs.append(pair)
+    included_pairs = sorted(set(included_pairs), key=_pair_order)
     by_pair = {(t.get("shotIndex"), t.get("takeIndex")): t for t in take_list}
     blocks = []
     if not shot_list:
@@ -130,6 +167,9 @@ def export_blocked(shot_indexes, takes, selection, included):
             needs.append("the rejectedReason on the selected take cleared")
         if needs:
             blocks.append(_block("selected_not_exportable", shot, take_index, "; ".join(needs)))
+    for _entry in stray_included:
+        blocks.append(_block("included_not_approved", None, None,
+                             "each included entry to be a (shotIndex, takeIndex) pair"))
     for pair in included_pairs:
         record = by_pair.get(pair)
         if record is None:

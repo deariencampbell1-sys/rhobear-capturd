@@ -40,6 +40,16 @@ class TakeError(ValueError):
     """A record is not the §3 shape, or the move is not in the §2 table."""
 
 
+class AmbiguousTakeSet(TakeError):
+    """Two records in one take set share a `(shotIndex, takeIndex)` of two ints.
+
+    A blocked export is a normal state and never raises (§6); an ambiguous
+    take set is a caller error and does. The pair does not identify a take
+    (`jobId` + `attemptId` do), so refusing beats silently picking one
+    record and letting the other vanish from every verdict.
+    """
+
+
 def _is_index(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
@@ -50,11 +60,16 @@ def _is_revision(value: Any) -> bool:
 
 
 def validate_take(record: Any) -> dict[str, Any]:
-    """Return `record` if it is exactly the §3 shape, else raise TakeError.
+    """Return `record` unchanged when it passes the shape checks, else TakeError.
 
-    Closed key set, `kind`, non-negative int indexes, a state in STATES,
-    `sourceRevision` as 40 lowercase hex; `approved` also carries a named
-    `approvedBy` and a real `approvedAt` (§5.3). Never mutates.
+    The checks, and only these: the closed §3 key set — no key missing, none
+    extra — plus the listed fields: `kind` is `capturd.take`; `shotIndex` and
+    `takeIndex` are non-negative ints; `state` is one of STATES;
+    `sourceRevision` is 40 lowercase hex. An `approved` take also carries a
+    named `approvedBy` and a real `approvedAt` (§5.3) and has every
+    `revoked*` field null — approval clears revocations, so both at once is
+    a contradiction. Every other field value is not type-checked here.
+    Never mutates.
     """
     if not isinstance(record, dict):
         raise TakeError(f"a take record is a dict, not {type(record).__name__}")
@@ -82,6 +97,10 @@ def validate_take(record: Any) -> dict[str, Any]:
             value = record[field]
             if not isinstance(value, str) or not value.strip():
                 raise TakeError(f"an approved take carries a named {field}")
+        for field in ("revokedBy", "revokedAt", "revokedReason"):
+            if record[field] is not None:
+                raise TakeError(
+                    f"an approved take carries no revocation; its {field} is set")
     return record
 
 
@@ -92,7 +111,7 @@ def transition(record: dict[str, Any], to: str) -> dict[str, Any]:
     `approved` (approval.py's alone), anything out of terminal `failed`.
     """
     validate_take(record)
-    if to not in STATES:
+    if not isinstance(to, str) or to not in STATES:
         raise TakeError(f"cannot move a take to the unknown state {to!r}")
     if (record["state"], to) not in TRANSITIONS:
         raise TakeError(f"a take cannot move from {record['state']!r} to {to!r}")

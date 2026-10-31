@@ -13,7 +13,15 @@ from typing import Any, Mapping
 
 
 class ArtifactError(ValueError):
-    """An artifact id is being re-registered at a different revision."""
+    """An artifact id is being re-registered at a different revision, or the
+    known entry is not an artifact mapping at all."""
+
+
+def _copied(value: Any) -> Any:
+    """A copy of `value` sharing no mapping with it, at any depth."""
+    if isinstance(value, Mapping):
+        return {key: _copied(item) for key, item in value.items()}
+    return value
 
 
 def register(
@@ -23,13 +31,21 @@ def register(
 
     The same id at the same revision is a no-op: an equal mapping comes back
     and the recorded kind is left alone. The same id at a different revision
-    raises ArtifactError. The input registry is never mutated.
+    raises ArtifactError, as does a known id mapped to `None` or to anything
+    that is not a mapping. The returned mapping shares no per-artifact dict
+    with `registry`, and the input is never mutated.
     """
-    known = registry.get(artifact_id)
-    if known is not None:
+    if artifact_id in registry:
+        known = registry[artifact_id]
+        if not isinstance(known, Mapping):
+            raise ArtifactError(
+                f"artifact {artifact_id!r} is registered as {known!r}, "
+                "which is not an artifact mapping")
         if known.get("revision") == revision:
-            return dict(registry)
+            return _copied(registry)
         raise ArtifactError(
             f"artifact {artifact_id!r} is registered at {known.get('revision')!r}, "
             f"not {revision!r}; a re-recorded artifact takes a new id")
-    return {**registry, artifact_id: {"revision": revision, "kind": kind}}
+    fresh = _copied(registry)
+    fresh[artifact_id] = {"revision": revision, "kind": kind}
+    return fresh

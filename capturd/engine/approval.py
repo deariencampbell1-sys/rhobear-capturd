@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .takes import validate_take
+
 
 class ApprovalError(ValueError):
     """The approval, revocation or rejection is not allowed on this record."""
@@ -22,9 +24,10 @@ def _blank(*values: Any) -> bool:
 def approve(record: dict[str, Any], *, by: str, at: str, source_revision: str) -> dict[str, Any]:
     """Approve a `ready` take: bind the named human, the time, the revision.
 
-    Refused unless the state is `ready`, `by` is non-blank and
+    Refused unless the state is `ready`, `by` and `at` are non-blank, and
     `source_revision` equals the record's (§5.2, L8d §14.3). Clears the
-    `revoked*` fields and `rejectedReason`. Never mutates.
+    `revoked*` fields and `rejectedReason`. The returned record passes
+    `validate_take`. Never mutates.
     """
     if record.get("state") != "ready":
         raise ApprovalError(
@@ -36,7 +39,7 @@ def approve(record: dict[str, Any], *, by: str, at: str, source_revision: str) -
     if source_revision != record.get("sourceRevision"):
         raise ApprovalError(
             f"approval binds {record.get('sourceRevision')!r}, not {source_revision!r}")
-    return {
+    return validate_take({
         **record,
         "state": "approved",
         "approvedBy": by,
@@ -45,7 +48,7 @@ def approve(record: dict[str, Any], *, by: str, at: str, source_revision: str) -
         "revokedBy": None,
         "revokedAt": None,
         "revokedReason": None,
-    }
+    })
 
 
 def revoke(record: dict[str, Any], *, by: str, at: str, reason: str) -> dict[str, Any]:
@@ -53,28 +56,34 @@ def revoke(record: dict[str, Any], *, by: str, at: str, reason: str) -> dict[str
 
     All of `by`, `at` and `reason` must be non-blank. `approvedBy` and
     `approvedAt` stay as history (§5.4); a derived export is L9's concern.
+    The returned record passes `validate_take`.
     """
     if record.get("state") != "approved":
         raise ApprovalError(
             f"only an approved take can be revoked, not {record.get('state')!r}")
     if _blank(by, at, reason):
         raise ApprovalError("a revocation records who, when and why; all three are required")
-    return {
+    return validate_take({
         **record,
         "state": "ready",
         "revokedBy": by,
         "revokedAt": at,
         "revokedReason": reason,
-    }
+    })
 
 
 def reject(record: dict[str, Any], *, reason: str) -> dict[str, Any]:
     """Reject a `ready` take: record why, leave the state `ready`.
 
-    The state does not move — a rejected take is not good enough yet, while a
-    `failed` take anywhere would block the whole job (§6). Never mutates.
+    `reason` must be non-blank: an empty `rejectedReason` is not null, so it
+    would block the export forever (§6). The state does not move — a
+    rejected take is not good enough yet, while a `failed` take anywhere
+    would block the whole job. The returned record passes `validate_take`.
+    Never mutates.
     """
     if record.get("state") != "ready":
         raise ApprovalError(
             f"only a ready take can be rejected, not {record.get('state')!r}")
-    return {**record, "rejectedReason": reason}
+    if _blank(reason):
+        raise ApprovalError("a rejection records why; reason is blank")
+    return validate_take({**record, "rejectedReason": reason})
