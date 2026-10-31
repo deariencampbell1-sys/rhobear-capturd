@@ -546,8 +546,9 @@ def test_registry_result_shares_nothing_and_refuses_corrupt_entries():
     grown["art_2"]["kind"] = "text/plain"
     grown["art_1"]["kind"] = "text/plain"
     assert registry["art_1"] == {"revision": "rev-1", "kind": "image/png"}
-    # The same-revision path copies too.
-    again = artifacts.register(grown, artifact_id="art_2", revision="rev-2", kind="video/mp4")
+    # The same-revision path copies too (the kind matches the mutated entry,
+    # which is what makes it a no-op rather than the item-3 refusal).
+    again = artifacts.register(grown, artifact_id="art_2", revision="rev-2", kind="text/plain")
     again["art_1"]["kind"] = "application/pdf"
     again["art_2"]["revision"] = "rev-9"
     assert grown["art_1"] == {"revision": "rev-1", "kind": "text/plain"}

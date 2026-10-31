@@ -29,11 +29,13 @@ def register(
 ) -> dict[str, Any]:
     """Return a new mapping with `artifact_id` registered at `revision`.
 
-    The same id at the same revision is a no-op: an equal mapping comes back
-    and the recorded kind is left alone. The same id at a different revision
-    raises ArtifactError, as does a known id mapped to `None` or to anything
-    that is not a mapping. The returned mapping shares no per-artifact dict
-    with `registry`, and the input is never mutated.
+    The same id at the same revision and kind is a no-op: an equal mapping
+    comes back and the recorded entry is left alone. The same id at the same
+    revision with a different kind raises ArtifactError — an artifact's kind
+    cannot change. The same id at a different revision also raises
+    ArtifactError, as does a known id mapped to `None` or to anything that
+    is not a mapping. The returned mapping shares no per-artifact dict with
+    `registry`, and the input is never mutated.
     """
     if artifact_id in registry:
         known = registry[artifact_id]
@@ -42,6 +44,11 @@ def register(
                 f"artifact {artifact_id!r} is registered as {known!r}, "
                 "which is not an artifact mapping")
         if known.get("revision") == revision:
+            if known.get("kind") != kind:
+                raise ArtifactError(
+                    f"artifact {artifact_id!r} is registered at revision "
+                    f"{revision!r} as kind {known.get('kind')!r}, not {kind!r}; "
+                    "an artifact's kind cannot change")
             return _copied(registry)
         raise ArtifactError(
             f"artifact {artifact_id!r} is registered at {known.get('revision')!r}, "
