@@ -41,6 +41,7 @@ from capturd.engine.receipts import (
     ReceiptError,
     is_metered,
     next_state,
+    validate_coverage,
     validate_receipt,
 )
 
@@ -154,6 +155,7 @@ def test_settled_with_null_debit_is_valid_state_and_money_are_independent():
     settled = validate_receipt(make_receipt(state="settled", customerDebitUsd=None))
     assert settled["state"] == "settled"
     assert settled["customerDebitUsd"] is None
+    assert is_metered(settled) is True
 
 
 def test_validate_never_mutates_its_input():
@@ -161,6 +163,30 @@ def test_validate_never_mutates_its_input():
     before = copy.deepcopy(record)
     assert validate_receipt(record) == record
     assert record == before
+
+
+def test_identity_boundaries():
+    """The schema's 1-512 window is exact: both edges, both sides."""
+    for field in ("operationId", "attemptId", "accountId", "product", "priceVersion"):
+        assert validate_receipt(make_receipt(**{field: "x"}))[field] == "x"
+        assert validate_receipt(make_receipt(**{field: "x" * 512}))[field] == "x" * 512
+        for empty_or_over in ("", "x" * 513):
+            with pytest.raises(ReceiptError):
+                validate_receipt(make_receipt(**{field: empty_or_over}))
+
+
+@pytest.mark.parametrize("impossible", (
+    "2026-02-30T00:00:00Z",   # February has no 30th
+    "2026-13-01T00:00:00Z",   # there is no 13th month
+    "2026-10-31T25:00:00Z",   # there is no 25th hour
+))
+def test_an_impossible_timestamp_is_refused(impossible):
+    """Regex-valid but impossible instants reach, and are refused by, the
+    `fromisoformat` branch — the reason that call exists."""
+    with pytest.raises(ReceiptError):
+        validate_receipt(make_receipt(occurredAt=impossible))
+    with pytest.raises(ReceiptError):
+        validate_coverage({**COVERAGE, "startedAt": impossible})
 
 
 # --------------------------------------------------------------------------- /
@@ -205,6 +231,22 @@ def test_unresolved_is_not_reachable_from_next_state():
     for event in ("reserve", "settle", "release", "reverse"):
         with pytest.raises(ReceiptError):
             next_state("unresolved", event)
+
+
+def test_next_state_documents_only_what_it_does():
+    """The three pairs move; `None` has no move — the caller creates the first
+    state — and `unresolved` is unreachable from every state."""
+    assert next_state("reserved", "settle") == "settled"
+    assert next_state("reserved", "release") == "released"
+    assert next_state("settled", "reverse") == "reversed"
+    with pytest.raises(ReceiptError):
+        next_state(None, "reserve")
+    produced = {next_state("reserved", "settle"), next_state("reserved", "release"),
+                next_state("settled", "reverse")}
+    assert "unresolved" not in produced
+    for state in STATES:
+        with pytest.raises(ReceiptError):
+            next_state(state, "reserve")
 
 
 # --------------------------------------------------------------------------- /
@@ -306,6 +348,42 @@ def test_a_response_keeps_fields_the_seam_does_not_know():
     answer = {"operationId": OP, "priceVersion": PRICE_VERSION, "requiredUsd": "0.10",
               "futureField": {"kept": True}}
     assert parse_quote(answer, request)["futureField"] == {"kept": True}
+
+
+def _money_request(argument, value):
+    """The two request calls that carry money, exercised one keyword at a time."""
+    if argument == "maxUsd":
+        return reserve_request(operationId=OP, attemptId=ATTEMPT, accountId=ACCOUNT,
+                               product=PRODUCT, units={"searches": 1},
+                               maxUsd=value, priceVersion=PRICE_VERSION)
+    assert argument == "providerCostUsd"
+    return settle_request(operationId=OP, attemptId=ATTEMPT, units={"searches": 1},
+                          providerCostUsd=value)
+
+
+@pytest.mark.parametrize("argument", ("maxUsd", "providerCostUsd"))
+def test_a_request_refuses_non_string_money(argument):
+    """No float, int, bool, comma-decimal, negative or empty money leaves."""
+    for bad in (1.0, 1, True, "1,00", "-1", ""):
+        with pytest.raises(L2Error):
+            _money_request(argument, bad)
+    for good in ("0.00", "12.34"):
+        assert _money_request(argument, good)[argument] == good
+
+
+def test_settle_request_without_a_provider_cost_keeps_the_key_absent():
+    request = settle_request(operationId=OP, attemptId=ATTEMPT, units={"searches": 1})
+    assert "providerCostUsd" not in request
+
+
+def test_a_settle_answer_without_the_debit_field_is_refused():
+    """A missing `customerDebitUsd` is not an answer; an explicit null is."""
+    request = settle_request(operationId=OP, attemptId=ATTEMPT, units={"searches": 1})
+    truncated = {"operationId": OP, "attemptId": ATTEMPT, "receiptId": "l2rc-res-1-1"}
+    with pytest.raises(L2Error):
+        parse_settle(truncated, request)
+    covered = {**truncated, "customerDebitUsd": None}
+    assert parse_settle(covered, request)["customerDebitUsd"] is None
 
 
 def test_a_request_record_does_not_alias_the_units_it_was_given():
