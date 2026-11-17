@@ -5,72 +5,73 @@
 <h1 align="center">RHOBEAR Captur'd</h1>
 
 <p align="center">
-  <b>Post-work product capture. Free screenshots of every page state — plus, on Pro,
-  agent-made AI walkthrough videos.</b><br>
-  You built the thing. Now show it. Point Captur'd at a URL and get every rested-state
-  screenshot of it — <b>free</b>, local, offline. Upgrade to <b>Pro</b> for a full
-  agent-narrated walkthrough video, powered by our own AI. No clicking through, no manual editing.
+  <b>The engine that records product demos: free rested-state stills, and agent-made
+  interactive walkthroughs you review shot by shot.</b><br>
+  Captur'd is the studio inside RHOBEAR Builds (Engines → Captur'd) and the <code>@capturd</code> MCP
+  for other harnesses. Every plan gets every feature; stills also run free and offline on your own machine.
 </p>
 
 <p align="center">
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-7dffd5"></a>
-  <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-f5b942">
-  <img alt="Playwright" src="https://img.shields.io/badge/engine-Playwright-b794f4">
-  <img alt="MCP" src="https://img.shields.io/badge/agent--surface-MCP-6ea8fe">
+  <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-3aa7ff">
+  <img alt="Playwright" src="https://img.shields.io/badge/engine-Playwright-3aa7ff">
+  <img alt="MCP" src="https://img.shields.io/badge/agent--surface-MCP-3aa7ff">
 </p>
 
 ---
 
-## Two modes, one lane
+## What it does today
 
-### `capturd shots` — rested-state screenshots, in bulk &nbsp;·&nbsp; **free**
-The free core, unchanged. Most screenshot tools fire too early — mid-animation,
-before fonts load, while a carousel is sliding — and you get junk. Captur'd takes **rested** shots:
-animations disabled, fonts awaited, motion stopped, scroll reset, then every page × every viewport ×
-every color scheme, in one run.
+### `capturd shots`: rested-state stills, in bulk, free and local
+Most screenshot tools fire too early (mid-animation, before fonts load, while a carousel slides).
+Captur'd takes **rested** shots: animations disabled, fonts awaited, motion stopped, scroll reset,
+then every page × every viewport × every color scheme, in one run.
 
-- 🕸️ **Four ways in** — crawl a **site**, expand a **sitemap.xml**, paste **URLs**, point at **local HTML**.
-- 📱 **Responsive matrix** — desktop (1440×1000), tablet (834×1112), mobile (390×844), in **light and dark**.
-- 🧘 **Deterministic** — same input, same pixels. Diff-friendly.
-- 📦 **Clean output** — `NNN-site-viewport-scheme.png` + `manifest.json`, ZIP or folder.
+- **Four ways in**: crawl a **site**, expand a **sitemap.xml**, paste **URLs**, point at **local HTML**,
+  or drive it from a pathway map (below).
+- **Responsive matrix**: desktop (1440×1000), tablet (834×1112), mobile (390×844), light and dark.
+- **Deterministic**: same input, same pixels.
+- **Clean output**: `NNN-site-viewport-scheme.png` + `manifest.json`, ZIP or folder.
 
-### `capturd walk` — agent-made AI walkthroughs &nbsp;·&nbsp; **Pro**
-The paid mode, powered by our own AI (piped through the RHOBEAR gateway — **no bring-your-own-key**).
-Unlock with `capturd activate <CODE>`. Prompt in, walkthrough out. Your agent (Plans, social manager, support, pi) says
-"make me a UX-flow video of this site" and Captur'd walks the site itself and produces:
+### `capturd walk`: agent-made walkthroughs
+An agent records a product flow (on its own toward a goal, turn by turn from chat, or while a person
+clicks), Captur'd enriches it (annotations, narration, camera timeline) and exports:
 
-- **Interactive HTML viewer** (self-contained, zero deps, embeddable anywhere), plus
-- **MP4 / GIF export** for social & sales,
-- with **semantic zoom** (camera anchors to DOM elements, not pixels — survives your site's font/layout changes),
-- **voice-synced camera** (TTS word timestamps align keyframes — camera lands on the noun),
-- **spotlight mode** (rest of the page dims and blurs; attention is forced),
-- **content-mode auto-detection** — canvas / WebGL / Three.js / HTML5 games fall back to video-mode automatically instead of silently breaking like every SaaS demo tool does.
+- a self-contained **interactive HTML viewer** with choices and local viewer events, and
+- **MP4 / GIF** export,
+- with a **semantic camera** (anchored to DOM elements, not pixels; meaningless zoom is suppressed),
+- **voice-synced** camera keyframes from TTS word timings, and **spotlight**.
 
-Nothing else in the space is agent-made. Supademo / Arcade / Storylane all assume a human clicks
-through. Screen Studio has the cinematography but no interactivity and no agent surface. Captur'd
-does both. The walkthroughs run on **our own AI** and are the **Pro** tier — in the desktop app
-and the hosted web service alike. **Screenshots are always free.**
+Every edit makes a new immutable revision (`demo.revision`), and `demo.audit` / `demo.optimize` check and
+tidy a spec without changing an approved one.
 
-### `capturd serve` — MCP surface for both modes
-One MCP server exposes both modes to any RHOBEAR agent:
+**Not supported yet, stated plainly:** canvas / WebGL / game pages are *detected and labelled*
+(`contentMode`), but there is no video-mode playback for them in the viewer or the export. Hosted
+metering, take review and publication are being built in this repo; see `GAPS-NOW.md`.
 
+### `capturd serve`: the `@capturd` MCP
+
+```text
+# @capturd tools
+capture.crawl   capture.rested                                  # stills
+demo.record     demo.act      demo.narrate    demo.poll_voice   # record
+demo.look       demo.stop     demo.status     demo.list         # session and library
+demo.edit       demo.delete   demo.export                       # edit and export
+demo.zoom       demo.pan      demo.hold                         # camera
+demo.spotlight  demo.overlay                                    # composition
+demo.reorder    demo.trim     demo.branch                       # structure
+demo.stylize    demo.regenerate                                 # restyle
+demo.audit      demo.optimize demo.revision                     # check, tidy, revisions
+engine.contract                                                 # manifest + contract version (also /healthz)
 ```
-capture.crawl   capture.rested                            # stills
-demo.record     demo.stop        demo.export              # walk basics
-demo.zoom       demo.pan         demo.hold                # camera
-demo.spotlight  demo.overlay                              # composition
-demo.reorder    demo.trim        demo.branch              # structure
-demo.stylize    demo.regenerate                           # restyle
-engine.contract                                           # manifest + contract version; manifest path from the engine loader (also /healthz engine_contract)
-```
 
-Editing is the API. The agent IS the editor. No GUI editor as v1.
+Editing is the API: the agent is the editor.
 
 ## Install
 
 ```bash
-git clone https://github.com/rhobear-ai/rhobear-capturd
-cd sunsponge-capture
+git clone https://github.com/rhobear75/rhobear-capturd
+cd rhobear-capturd
 pip install -e .
 python -m playwright install chromium
 ```
@@ -164,8 +165,8 @@ Playwright or Chromium is a named required-security failure.
 
 - Python **3.10+**
 - **Playwright >=1.48** + Chromium (`python -m playwright install chromium`). `BrowserContext.route_web_socket` is required; capture refuses loudly when it is unavailable.
-- For `walk` mode: a RHOBEAR Vertex Gateway token (`RHOBEAR_GW_API_KEY`) — walkthrough narration
-  and camera choreography go through the family gateway. No API keys checked into source.
+- For `walk` agent mode: a RHOBEAR gateway token (`RHOBEAR_GW_API_KEY`, base URL `RHOBEAR_GW_BASE_URL`);
+  narration and camera choreography go through the family gateway. No keys in source.
 - For `walk` MP4 export: `ffmpeg` on PATH.
 
 ## Development
