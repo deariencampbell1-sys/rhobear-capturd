@@ -51,6 +51,10 @@ Or, from inside pi, attach it as an MCP server via the standard
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import signal
+import subprocess
 import logging
 import socket
 import sys
@@ -58,11 +62,12 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
+from types import SimpleNamespace
 from urllib.parse import urlparse
 
 from capturd._net import is_private_ip
 from capturd.engine.contract import engine_contract
-from capturd.engine.idempotency import IdempotencyMismatch, OperationLedger
+from capturd.engine.idempotency import IdempotencyMismatch, OperationLedger, OperationUnknown
 from capturd.engine.take_store import (
     DirectionError,
     RevisionConflict,
@@ -80,6 +85,7 @@ from capturd.walk.coordinator import (
     DemoForgeError,
     DemoNotFound,
     DEMOS_DIR_NAME,
+    INCOMPLETE_MARKER,
 )
 
 logger = logging.getLogger("capturd.mcp.server")
@@ -188,23 +194,40 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
         except DemoRecorderError as exc:
             raise ValueError(str(exc)) from exc
 
+        process = None
         if mode == "agent":
-            # Agent mode drives itself to completion in its own loop; the
-            # thread wrapper marks the recorder finished either way so
-            # demo.stop never hangs on a crashed run.
-            def _spawn_agent() -> None:
-                try:
-                    asyncio.run(recorder.agent_record())
-                except Exception:
-                    logger.exception("agent recorder crashed for %s", session_id)
-                finally:
-                    recorder.finished.set()
-
-            thread = threading.Thread(
-                target=_spawn_agent,
-                name=f"demo-agent-{session_id}",
-                daemon=True,
-            )
+            # Python threads cannot interrupt a blocked turn or kill only its
+            # browser. The isolated process group is the cancellation boundary.
+            if hasattr(recorder, "output_dir"):
+                recorder._write_outputs()
+                pending = recorder.output_dir / INCOMPLETE_MARKER
+                pending.touch(exist_ok=True)
+                args = {"session_id": recorder.session_id, "url": recorder.url,
+                        "name": recorder.name, "goal": recorder.goal,
+                        "viewport": recorder.viewport, "output_dir": str(recorder.output_dir),
+                        "workflow_mode": recorder.workflow_mode, "headful": recorder.headful,
+                        "voice_enabled": recorder.voice_loop is not None}
+                process = subprocess.Popen(
+                    [sys.executable, "-m", "capturd.walk.agent_worker"],
+                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, start_new_session=True)
+                assert process.stdin is not None
+                process.stdin.write(json.dumps(args).encode("utf-8"))
+                process.stdin.close()
+                def _spawn_agent() -> None:
+                    try:
+                        if process.wait() == 0:
+                            pending.unlink(missing_ok=True)
+                    finally:
+                        recorder.finished.set()
+            else:
+                def _spawn_agent() -> None:
+                    try:
+                        asyncio.run(recorder.agent_record())
+                    except Exception:
+                        logger.exception("agent recorder crashed for %s", session_id)
+                    finally:
+                        recorder.finished.set()
+            thread = threading.Thread(target=_spawn_agent, name=f"demo-agent-{session_id}", daemon=True)
         else:
             # human + live: the recorder needs a live event loop for the whole
             # session. Park the loop with run_forever(); recorder.stop() /
@@ -243,6 +266,7 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
         _live_sessions[session_id] = {
             "recorder": recorder,
             "thread": thread,
+            "process": process,
             "mode": mode,
         }
         messages = {
@@ -311,7 +335,7 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
             return await asyncio.to_thread(
                 _operations().run, operation_id, {"tool": "demo.record", **args},
                 lambda: asyncio.run(_record(**args)))
-        except IdempotencyMismatch as exc:
+        except (IdempotencyMismatch, OperationUnknown) as exc:
             return {"ok": False, **exc.payload()}
 
     @mcp.tool(
@@ -493,7 +517,13 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
                     "agent recording did not finish within 300s — "
                     "poll demo.stop again"
                 )
-            spec = recorder.get_spec()
+            if live.get("process") is not None:
+                if live["process"].returncode != 0:
+                    raise RuntimeError("agent recording failed; no complete demo was produced")
+                data = forge.load_spec(session_id)
+                spec = SimpleNamespace(id=data["id"], steps=data["steps"], goal=data.get("goal", ""))
+            else:
+                spec = recorder.get_spec()
         else:
             # Human mode: bridge into the recorder's parked loop.
             try:
@@ -565,11 +595,35 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
                     "status": status}
         recorder = live["recorder"]
         if live["mode"] == "agent":
-            recorder.request_stop()
-            await asyncio.to_thread(live["thread"].join, 90.0)
-            if live["thread"].is_alive():
-                raise RuntimeError("agent session did not stop within 90s; call demo.cancel again")
-            spec = recorder.get_spec()
+            process = live.get("process")
+            if process is None:
+                recorder.request_stop()
+                await asyncio.to_thread(live["thread"].join, 90.0)
+                if live["thread"].is_alive():
+                    raise RuntimeError("agent session did not stop within 90s; call demo.cancel again")
+                spec = recorder.get_spec()
+            else:
+                if process.poll() is not None:
+                    await asyncio.to_thread(live["thread"].join, 5.0)
+                    status = forge.get_status(session_id)
+                    return {"ok": False, "code": "too_late", "demoId": session_id,
+                            "detail": "the session already ended; nothing changed", "status": status}
+                data = forge.load_spec(session_id)
+                forge.mark_cancelled(session_id, len(data.get("steps") or []))
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                await asyncio.to_thread(live["thread"].join, 2.0)
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                await asyncio.to_thread(live["thread"].join, 5.0)
+                if live["thread"].is_alive():
+                    raise RuntimeError("agent process did not stop after forced cancellation")
+                data = forge.load_spec(session_id)
+                spec = SimpleNamespace(id=data["id"], steps=data.get("steps") or [])
         else:
             try:
                 spec = await asyncio.wait_for(asyncio.to_thread(recorder.stop), timeout=60.0)
@@ -714,7 +768,7 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
                 _operations().run, operation_id,
                 {"tool": "demo.export", "demo_id": demo_id, "format": format},
                 lambda: asyncio.run(_export(demo_id, format)))
-        except IdempotencyMismatch as exc:
+        except (IdempotencyMismatch, OperationUnknown) as exc:
             return {"ok": False, **exc.payload()}
 
     async def _export(demo_id: str, format: str) -> dict[str, Any]:
