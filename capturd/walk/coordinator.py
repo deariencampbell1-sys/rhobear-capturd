@@ -653,9 +653,16 @@ class DemoForge:
         data = self.load_spec(demo_id)
         from capturd.engine.take_store import TakeStore
 
-        blocks = TakeStore(self).export_blocks(demo_id)
+        review = TakeStore(self)
+        blocks = review.export_blocks(demo_id)
         if blocks:
             raise DemoExportBlocked(blocks)
+        # The selected take's caption is the line that ships (the saved spec
+        # itself is never changed by a take).
+        steps = data.get("steps") or []
+        for shot, direction in review.selected_directions(demo_id).items():
+            if 0 <= shot < len(steps) and direction.get("caption") is not None:
+                steps[shot]["annotation"] = direction["caption"]
         self._inline_screenshots(data, demo_id)
         # Carry the semantic target metadata into the embedded viewer so the
         # HTML export resolves the same camera as the recorder (W1-03-r1).

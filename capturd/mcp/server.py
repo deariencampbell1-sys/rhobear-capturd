@@ -63,7 +63,12 @@ from urllib.parse import urlparse
 from capturd._net import is_private_ip
 from capturd.engine.contract import engine_contract
 from capturd.engine.idempotency import IdempotencyMismatch, OperationLedger
-from capturd.engine.take_store import RevisionConflict, TakeStore, TakeStoreError
+from capturd.engine.take_store import (
+    DirectionError,
+    RevisionConflict,
+    TakeStore,
+    TakeStoreError,
+)
 from fastmcp import FastMCP
 
 from capturd.walk.recorder import DemoRecorderError
@@ -744,6 +749,8 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
             return {"ok": True, "take": fn(*args, **kwargs)}
         except RevisionConflict as exc:
             return {"ok": False, **exc.payload(), "detail": str(exc)}
+        except DirectionError as exc:
+            return {"ok": False, **exc.payload()}
         except TakeStoreError as exc:
             return {"ok": False, "code": "invalid", "detail": str(exc)}
 
@@ -781,6 +788,22 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
                            approved_by: str, expected_revision: str) -> dict[str, Any]:
         return _take_call(takes.approve, demo_id, shot_index, take_index,
                           by=approved_by, expected_revision=expected_revision)
+
+    @mcp.tool(
+        name="take.retake",
+        description=(
+            "Direction-only retake of one shot: keeps the exact pixels "
+            "(same sourceRevision) and makes a new ready take with the new "
+            "direction. direction = {caption: the on-screen line, note: the "
+            "person's own words, camera: 'semantic'}; other fields are refused "
+            "by name. The shot keeps its selected take until a person approves "
+            "the new one with take.approve."
+        ),
+    )
+    async def take_retake(demo_id: str, shot_index: int, take_index: int,
+                          direction: dict[str, Any], expected_revision: str) -> dict[str, Any]:
+        return _take_call(takes.retake, demo_id, shot_index, take_index,
+                          direction=direction, expected_revision=expected_revision)
 
     @mcp.tool(
         name="take.reject",

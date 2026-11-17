@@ -23,9 +23,9 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from . import approval, persistence
+from . import approval, persistence, shots
 from .shots import export_blocked
-from .takes import KIND, TakeError
+from .takes import KIND, TakeError, transition
 
 FILENAME = "takes.json"
 
@@ -45,6 +45,44 @@ class RevisionConflict(TakeStoreError):
         return {"code": "conflict",
                 "details": {"reason": "revision_conflict",
                             "expected": self.expected, "actual": self.actual}}
+
+
+class DirectionError(TakeStoreError):
+    """A direction field is malformed or not one this engine renders yet."""
+
+    def __init__(self, field: str, detail: str):
+        super().__init__(f"direction {field}: {detail}")
+        self.field = field
+
+    def payload(self) -> dict[str, Any]:
+        return {"code": "invalid_direction", "field": self.field, "detail": str(self)}
+
+
+#: The direction fields a take can carry today, each one rendered or kept:
+#: `caption` replaces the step's on-screen line in the export, `note` keeps the
+#: person's own words for the agent, `camera` is the semantic camera. Voice,
+#: cursor, effect and transition direction are refused by name until the
+#: export renders them (GAPS-NOW M6).
+_CAPTION_MAX, _NOTE_MAX = 500, 2000
+_CAMERAS = ("semantic",)
+
+
+def validate_direction(direction: Any) -> dict[str, Any]:
+    """Return the direction with defaults filled, or raise DirectionError."""
+    if not isinstance(direction, dict) or not direction:
+        raise DirectionError("direction", "is a non-empty object")
+    for field in direction:
+        if field not in ("caption", "note", "camera"):
+            raise DirectionError(field, "is not a direction this engine renders yet")
+    for field, limit in (("caption", _CAPTION_MAX), ("note", _NOTE_MAX)):
+        value = direction.get(field)
+        if value is not None and (not isinstance(value, str) or len(value) > limit):
+            raise DirectionError(field, f"is text of at most {limit} characters")
+    camera = direction.get("camera", "semantic")
+    if camera not in _CAMERAS:
+        raise DirectionError("camera", f"is one of {list(_CAMERAS)}")
+    return {"caption": direction.get("caption"), "note": direction.get("note"),
+            "camera": camera}
 
 
 def _now() -> str:
@@ -68,8 +106,8 @@ def _seed_take(demo_id: str, shot: int, step: dict[str, Any], created_at: str) -
         "sourceRevision": digest,
         "sourceArtifactId": f"local_{digest[:16]}" if pixels else None,
         "kind": KIND,
-        "direction": {"caption": step.get("annotation"), "voiceover": step.get("voiceover"),
-                      "camera": "semantic"},
+        # caption None = the step's own line, whatever enrichment makes it.
+        "direction": {"caption": None, "note": None, "camera": "semantic"},
         "durationMs": None,
         "createdAt": created_at,
         "approvedBy": None,
@@ -153,6 +191,9 @@ class TakeStore:
                     except (approval.ApprovalError, TakeError) as exc:
                         raise TakeStoreError(str(exc)) from exc
                     review["takes"][i] = updated
+                    if updated["state"] == "approved":
+                        # A person chose this take for the shot.
+                        review["selection"][shot] = take
                     self._write(demo_id, review)
                     return updated
             raise TakeStoreError(f"demo {demo_id!r} has no shot {shot} take {take}")
@@ -172,3 +213,42 @@ class TakeStore:
     def revoke(self, demo_id: str, shot: int, take: int, *, by: str, reason: str) -> dict[str, Any]:
         return self._move(demo_id, shot, take,
                           lambda record: approval.revoke(record, by=by, at=_now(), reason=reason))
+
+    def retake(self, demo_id: str, shot: int, take: int, *, direction: Any,
+               expected_revision: str) -> dict[str, Any]:
+        """§4 direction-only retake: same pixels, new direction, a new take.
+
+        The new take is `ready` at once (nothing is re-recorded) and is not
+        selected until a person approves it; every other record is untouched.
+        """
+        clean = validate_direction(direction)
+        with self._lock:
+            review = self._read(demo_id)
+            if review is None:
+                raise TakeStoreError(f"no review is open for demo {demo_id!r}; call take.list first")
+            shot_takes = [t for t in review["takes"] if t["shotIndex"] == shot]
+            base = next((t for t in shot_takes if t["takeIndex"] == take), None)
+            if base is None:
+                raise TakeStoreError(f"demo {demo_id!r} has no shot {shot} take {take}")
+            if expected_revision != base["sourceRevision"]:
+                raise RevisionConflict(expected_revision, base["sourceRevision"])
+            if base["state"] == "failed" or base["sourceArtifactId"] is None:
+                raise TakeStoreError(
+                    f"shot {shot} take {take} has no pixels to keep; record the shot again")
+            draft = shots.retake(
+                base, take_index=max(t["takeIndex"] for t in shot_takes) + 1,
+                job_id=demo_id, attempt_id=f"att_{uuid.uuid4().hex}",
+                direction=clean, created_at=_now())
+            new = transition(draft, "ready")
+            review["takes"].append(new)
+            self._write(demo_id, review)
+            return new
+
+    def selected_directions(self, demo_id: str) -> dict[int, dict[str, Any]]:
+        """The selected take's direction per shot; empty without a review."""
+        review = self._read(demo_id)
+        if review is None:
+            return {}
+        by_pair = {(t["shotIndex"], t["takeIndex"]): t for t in review["takes"]}
+        return {shot: by_pair[(shot, take)]["direction"]
+                for shot, take in review["selection"].items() if (shot, take) in by_pair}
