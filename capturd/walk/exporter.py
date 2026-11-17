@@ -419,6 +419,19 @@ def _encode_gif(ffmpeg: str, frames_dir: Path, fps: int, out_path: Path) -> None
 # ---------------------------------------------------------------------------
 
 
+def _write_captions(steps: list[dict[str, Any]], audio_plan: list[dict[str, Any]],
+                    out_path: Path) -> None:
+    """WebVTT + transcript beside the video, from the real narration only."""
+    from capturd.walk.captions import build_cues, to_transcript, to_webvtt
+
+    cues = build_cues(steps, audio_plan)
+    if not cues:
+        return
+    out_path.with_suffix(".vtt").write_text(to_webvtt(cues), encoding="utf-8")
+    out_path.with_name(out_path.stem + ".transcript.txt").write_text(
+        to_transcript(steps), encoding="utf-8")
+
+
 def export_video(
     spec: dict[str, Any],
     viewer_html: Path,
@@ -474,6 +487,7 @@ def export_video(
                     continue
                 audio_clips.append((clip, at_ms))
             _encode_mp4(ffmpeg, frames_dir, fps, duration_s, out_path, audio_clips)
+            _write_captions(steps, audio_plan, out_path)
 
     # The existence check and the size read are one mapped step: a file that
     # vanishes between them is refused, never leaked as a bare OSError, and
