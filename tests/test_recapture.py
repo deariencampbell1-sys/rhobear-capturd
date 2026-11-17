@@ -141,3 +141,31 @@ def test_the_recapture_tool_keeps_the_ssrf_guard(tmp_path, page_url):
         asyncio.run(server.call_tool("take.recapture", {
             "demo_id": "demo1", "shot_index": 0, "take_index": 0,
             "expected_revision": takes[0]["sourceRevision"]}))
+
+
+def test_recapture_refuses_source_symlink_without_touching_target(tmp_path):
+    forge = _forge(tmp_path, "https://example.com")
+    store = TakeStore(forge)
+    take = store.open_review("demo1")["takes"][0]
+    sentinel = tmp_path / "sentinel"
+    sentinel.write_bytes(b"unchanged")
+    pixels = b"new pixels"
+    path = forge.demo_dir("demo1") / f"source_{hashlib.sha1(pixels).hexdigest()}.png"
+    path.symlink_to(sentinel)
+    with pytest.raises((OSError, TakeStoreError, ValueError)):
+        store.recapture("demo1", 0, 0, pixels=pixels, expected_revision=take["sourceRevision"])
+    assert sentinel.read_bytes() == b"unchanged"
+    assert len(store.review("demo1")["takes"]) == 2
+
+
+def test_atomic_output_refuses_symlinked_parent(tmp_path):
+    from capturd._safe_files import atomic_write
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "source.png"
+    sentinel.write_bytes(b"unchanged")
+    link = tmp_path / "linked"
+    link.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(OSError):
+        atomic_write(link / "source.png", b"changed")
+    assert sentinel.read_bytes() == b"unchanged"
