@@ -51,3 +51,28 @@ def test_no_pixels_no_poster(tmp_path):
     forge.save_spec("d", _spec(None))
     forge.export_demo("d", fmt="html")
     assert not (forge.demo_dir("d") / "poster.png").exists()
+
+
+def test_poster_output_refuses_symlink(tmp_path):
+    import pytest
+    forge = DemoForge(demos_dir=tmp_path / 'demos')
+    forge.save_spec('d', _spec(b'png'))
+    sentinel = tmp_path / 'sentinel'
+    sentinel.write_bytes(b'unchanged')
+    (forge.demo_dir('d') / 'poster.png').symlink_to(sentinel)
+    with pytest.raises((OSError, ValueError)):
+        forge._write_poster(_spec(b'png'), 'd')
+    assert sentinel.read_bytes() == b'unchanged'
+
+
+def test_removing_stale_poster_refuses_symlink(tmp_path):
+    import pytest
+    forge = DemoForge(demos_dir=tmp_path / 'demos')
+    forge.save_spec('d', _spec(None))
+    sentinel = tmp_path / 'sentinel'
+    sentinel.write_bytes(b'unchanged')
+    link = forge.demo_dir('d') / 'poster.png'
+    link.symlink_to(sentinel)
+    with pytest.raises((OSError, ValueError)):
+        forge._write_poster(_spec(None), 'd')
+    assert link.is_symlink() and sentinel.read_bytes() == b'unchanged'
