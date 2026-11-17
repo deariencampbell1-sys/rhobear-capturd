@@ -42,7 +42,8 @@ PROJECT_ROOT = Path(engine.__file__).resolve().parents[2]
 PORT_TYPES = {"text", "image", "video", "audio", "model3d", "diagram", "artifact", "json", "number"}
 NAMED_LIMITS = {"maxInputBytes", "maxArtifactBytes", "maxActiveJobsPerAccount", "maxJobDurationMs"}
 # Every format token the capabilities may advertise maps to a listed kind.
-FORMAT_KINDS = {"mp4": "video/mp4", "gif": "image/gif", "png": "image/png", "jpeg": "image/jpeg"}
+FORMAT_KINDS = {"mp4": "video/mp4", "gif": "image/gif", "html": "text/html", "png": "image/png",
+                "jpeg": "image/jpeg"}
 
 # One DNS stub for the capture-path tests (tests/conftest.py).
 pytestmark = pytest.mark.usefixtures("_offline_test_dns")

@@ -70,8 +70,13 @@ def test_demo_export_with_an_operation_id_is_idempotent(tmp_path, monkeypatch):
 
     forge = DemoForge(demos_dir=tmp_path / "demos")
     exports = []
-    monkeypatch.setattr(forge, "export_demo",
-                        lambda demo_id, fmt="html": exports.append(fmt) or (tmp_path / "x.html"))
+    def fake_export(demo_id, fmt="html"):
+        exports.append(fmt)
+        out = tmp_path / "x.html"
+        out.write_text("<html></html>")  # a real export always writes its file
+        return out
+
+    monkeypatch.setattr(forge, "export_demo", fake_export)
     server = _build_server(forge)
 
     def call(args):

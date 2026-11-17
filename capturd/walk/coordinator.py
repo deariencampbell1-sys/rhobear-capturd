@@ -23,12 +23,14 @@ Hard rules:
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
 import re
 import shutil
 import threading
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -79,6 +81,7 @@ def viewer_template_path() -> Path:
 
 
 CANCELLED_MARKER = "cancelled.json"
+_EXPORT_KINDS = {"html": "text/html", "mp4": "video/mp4", "gif": "image/gif"}
 
 
 def _pid_alive(pid: Any) -> bool:
@@ -793,6 +796,47 @@ class DemoForge:
             # object, message, subtype and cause through export_demo — do
             # NOT re-type it as DemoForgeError here (bare re-raise).
             raise
+
+    def record_artifact(self, demo_id: str, path: Path, *, fmt: str,
+                        operation_id: str | None) -> dict[str, Any]:
+        """The §1/§7 reference for one export, kept in the demo's registry.
+
+        Content-addressed: the id and revision come from the SHA-256 of the
+        bytes, the kind from the manifest's list, the provenance is §7's
+        fields only. `artifacts.register` refuses an id at a new revision.
+        """
+        from capturd.engine import artifacts
+        from capturd.engine.contract import engine_contract
+
+        body = path.read_bytes()
+        digest = hashlib.sha256(body).hexdigest()
+        kind = _EXPORT_KINDS[fmt]
+        manifest = engine_contract()["manifest"] or {}
+        capability = next((c for c in manifest.get("capabilities", [])
+                           if c.get("id") == "walk-export"), {})
+        ref = {
+            "artifactId": f"art_{digest[:24]}",
+            "revision": f"sha256:{digest}",
+            "kind": kind,
+            "bytes": len(body),
+            "provenance": {
+                "engineId": manifest.get("engine"),
+                "engineVersion": manifest.get("engineVersion"),
+                "capability": capability.get("id"),
+                "capabilityVersion": capability.get("version"),
+                "operationId": operation_id,
+                "attemptId": f"att_{uuid.uuid4().hex}",
+            },
+        }
+        registry_path = self.demo_dir(demo_id) / "artifacts.json"
+        registry_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            known = (json.loads(registry_path.read_text(encoding="utf-8"))
+                     if registry_path.is_file() else {})
+            updated = artifacts.register(known, artifact_id=ref["artifactId"],
+                                         revision=ref["revision"], kind=kind)
+            registry_path.write_text(json.dumps(updated, sort_keys=True), encoding="utf-8")
+        return ref
 
     def _write_poster(self, data: dict[str, Any], demo_id: str) -> None:
         """``poster.png``: the first shot's exported pixels, or none at all."""

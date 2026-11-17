@@ -715,11 +715,12 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
             return await asyncio.to_thread(
                 _operations().run, operation_id,
                 {"tool": "demo.export", "demo_id": demo_id, "format": format},
-                lambda: asyncio.run(_export(demo_id, format)))
+                lambda: asyncio.run(_export(demo_id, format, operation_id)))
         except IdempotencyMismatch as exc:
             return {"ok": False, **exc.payload()}
 
-    async def _export(demo_id: str, format: str) -> dict[str, Any]:
+    async def _export(demo_id: str, format: str,
+                      operation_id: str | None = None) -> dict[str, Any]:
         if not demo_id:
             raise ValueError("demoId is required")
         fmt = (format or "html").lower()
@@ -738,10 +739,13 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
                     "blocks": exc.blocks, "detail": str(exc)}
         except DemoForgeError as exc:
             raise ValueError(str(exc))
+        artifact = (forge.record_artifact(demo_id, out_path, fmt=fmt, operation_id=operation_id)
+                    if hasattr(forge, "record_artifact") else None)
         return {
             "path": str(out_path.resolve()),
             "demoId": demo_id,
             "format": fmt,
+            "artifact": artifact,
         }
 
     # ---- demo.package -----------------------------------------------------
