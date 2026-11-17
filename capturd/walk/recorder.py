@@ -39,6 +39,10 @@ from capturd.walk.voice import MIC_BUTTON_JS, VoiceConfig, VoiceLoop, VoiceLoopE
 
 logger = logging.getLogger(__name__)
 
+#: Beside demo.json while a session runs: {state, pid, sessionId}. `state` is
+#: recording -> stopped, or interrupted when a later process finds `pid` dead.
+SESSION_MARKER = "session.json"
+
 
 # ---------------------------------------------------------------------------
 # JS overlay — injected on every page load via page.add_init_script()
@@ -1723,6 +1727,7 @@ class DemoRecorder:
         )
         self.spec.steps.append(step)
         self._last_url = step.pageUrl
+        self._checkpoint()
 
     # ----- workflow-mode dialog loop -----------------------------------------
 
@@ -1853,6 +1858,7 @@ class DemoRecorder:
                 )
             self.spec.steps.append(step)
             self._last_url = step.pageUrl
+            self._checkpoint()
 
             # Workflow mode: after each user click, prompt for intent.
             if self.workflow_mode and not is_voice and self.voice_loop is not None:
@@ -1885,13 +1891,31 @@ class DemoRecorder:
 
     # ----- output ------------------------------------------------------------
 
-    def _write_outputs(self) -> None:
-        """Persist demo.json next to the screenshots."""
+    def _write_spec(self) -> Path:
+        """demo.json, replaced atomically so a crash never leaves half a file."""
         out_path = self.output_dir / "demo.json"
-        out_path.write_text(
-            json.dumps(self.spec.to_dict(), indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
+        tmp = out_path.with_name(f".demo.json.{uuid.uuid4().hex}.tmp")
+        tmp.write_text(json.dumps(self.spec.to_dict(), indent=2, sort_keys=True),
+                       encoding="utf-8")
+        os.replace(tmp, out_path)
+        return out_path
+
+    def _mark_session(self, state: str) -> None:
+        (self.output_dir / SESSION_MARKER).write_text(json.dumps(
+            {"state": state, "pid": os.getpid(), "sessionId": self.session_id}), encoding="utf-8")
+
+    def _checkpoint(self) -> None:
+        """After every committed step: the spec so far, and who is recording."""
+        try:
+            self._write_spec()
+            self._mark_session("recording")
+        except OSError as exc:
+            logger.warning("checkpoint failed for %s: %s", self.session_id, exc)
+
+    def _write_outputs(self) -> None:
+        """Persist demo.json next to the screenshots; the session is over."""
+        out_path = self._write_spec()
+        self._mark_session("stopped")
         logger.info("wrote %s (%d steps)", out_path, len(self.spec.steps))
 
     # ----- public read-only handle -------------------------------------------
@@ -2047,6 +2071,7 @@ def run_async(coro: Any) -> Any:
 
 
 __all__ = [
+    "SESSION_MARKER",
     "BoundingRect",
     "ContentMetadata",
     "ContentMode",

@@ -44,7 +44,7 @@ from capturd.walk.ai_pipeline import (
     _synthesize_one,
 )
 from capturd.walk.exporter import DemoExportError, DemoForgeError
-from capturd.walk.recorder import DemoManager, run_async
+from capturd.walk.recorder import SESSION_MARKER, DemoManager, run_async
 from capturd.walk.schema import validate_choices
 
 logger = logging.getLogger(__name__)
@@ -79,6 +79,32 @@ def viewer_template_path() -> Path:
 
 
 CANCELLED_MARKER = "cancelled.json"
+
+
+def _pid_alive(pid: Any) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    if pid == os.getpid():
+        return True
+    if os.name == "nt":
+        # os.kill(pid, 0) would TerminateProcess on Windows; only ask.
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5  # access denied: it exists
+        kernel32.CloseHandle(handle)
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 class DemoNotFound(DemoForgeError):
@@ -313,10 +339,39 @@ class DemoForge:
         A cancelled recording also carries ``cancelled``/``partial: True``.
         """
         status = self._status(demo_id)
-        marker = self.demo_dir(status["demoId"]) / CANCELLED_MARKER
-        if marker.is_file():
+        folder = self.demo_dir(status["demoId"])
+        if (folder / CANCELLED_MARKER).is_file():
             status.update(cancelled=True, partial=True)
+        session = folder / SESSION_MARKER
+        if session.is_file():
+            try:
+                state = json.loads(session.read_text(encoding="utf-8")).get("state")
+            except (OSError, ValueError):
+                state = None
+            if state == "interrupted":
+                status.update(interrupted=True, partial=True)
         return status
+
+    def recover_interrupted(self) -> list[str]:
+        """Mark every recording whose process died as interrupted (X8).
+
+        Its checkpointed steps stay on disk as a partial demo. A marker owned
+        by a process that is still alive is left alone.
+        """
+        recovered = []
+        for marker in sorted(self.demos_dir.glob(f"*/{SESSION_MARKER}")):
+            try:
+                data = json.loads(marker.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if data.get("state") != "recording" or _pid_alive(data.get("pid")):
+                continue
+            data["state"] = "interrupted"
+            marker.write_text(json.dumps(data), encoding="utf-8")
+            recovered.append(marker.parent.name)
+            logger.warning("recording %s was interrupted; kept as a partial demo",
+                           marker.parent.name)
+        return recovered
 
     def _status(self, demo_id: str) -> dict[str, Any]:
         safe = self._safe_demo_id(demo_id)

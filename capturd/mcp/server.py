@@ -123,6 +123,8 @@ _INSTRUCTIONS = (
 def _build_server(forge: DemoForge | None = None) -> FastMCP:
     """Construct the MCP server with every tool wired up."""
     forge = forge if forge is not None else DemoForge()
+    if hasattr(forge, "recover_interrupted"):
+        forge.recover_interrupted()
     # Identity comes from the manifest; a broken manifest still builds the
     # server so engine.contract can report the damage.
     manifest = engine_contract()["manifest"] or {}
