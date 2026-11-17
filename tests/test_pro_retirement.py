@@ -272,6 +272,23 @@ def test_no_upgrade_or_checkout_text_a_user_can_see(service, monkeypatch):
     _assert_no_paywall_text(output.getvalue(), "capturd --help")
 
 
+def test_the_separate_checkout_path_is_gone(service):
+    """GAPS-NOW W1/W6: no Stripe checkout, webhook or Pro price on the hosted
+    service. The monthly plan is L2's; the plan comes from central auth."""
+    import app.config as config
+    from app.main import app
+
+    client, _store = service
+    paths = sorted(getattr(route, "path", "") for route in app.routes)
+    assert not [p for p in paths if p.startswith("/billing")], paths
+    assert not (REPO / "service" / "app" / "billing.py").exists()
+    for name in ("STRIPE_SECRET_KEY", "CAPTURD_PRICE_ID", "CAPTURD_COUPON_ID",
+                 "PRO_CHECKOUT_URL", "BILLING_WEBHOOK_SECRET"):
+        assert not hasattr(config, name), name
+    health = client.get("/healthz").json()
+    assert not [k for k in health if "billing" in k or "webhook" in k], health
+
+
 # ---------------------------------------------------------------------------
 # The two load-protection gates the ruling keeps
 # ---------------------------------------------------------------------------
