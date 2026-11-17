@@ -8,10 +8,13 @@ finished studio.
 
 The bridge table is pinned to `rhobear75/rhobear-north-star` main `a9a9cb1`,
 L8d CONTRACT section 9. The package pins family-kit 1.0.0 by release, source
-SHA and tarball SHA-256 in `package.json`. `npm ci` requires Node 22+, `gh`,
-and access to the release asset; the install script checks the tarball hash.
+SHA and tarball SHA-256 in `package.json`. The install requires Node 22+, `gh`, and access to the release asset; the
+fetch script checks the tarball hash. On an empty npm cache, `npm ci` cannot
+resolve the local tarball before its preinstall hook runs, so fetch it first.
+The brief requires bare `npm ci`; that clean-install gate remains incomplete.
 
 ```sh
+npm run fetch-kit
 npm ci
 npm test
 npm run test:bridge
