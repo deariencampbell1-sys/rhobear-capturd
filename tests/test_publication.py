@@ -168,3 +168,24 @@ def test_the_mp4_export_writes_real_chapter_starts(tmp_path, monkeypatch):
     assert json.loads((tmp_path / "walkthrough.chapters.json").read_text()) == [
         {"label": "Open the picker.", "startSeconds": 0.0},
         {"label": "Step 2", "startSeconds": 1.5}]
+
+
+def test_the_package_tool(tmp_path):
+    import asyncio
+
+    from capturd.mcp.server import _build_server
+
+    forge = _approved_demo(tmp_path)
+    server = _build_server(forge)
+
+    def call(args):
+        result = asyncio.run(server.call_tool("demo.package", args))
+        return result.structured_content.get("result", result.structured_content)
+
+    args = {"demo_id": "d", "scenario_id": "capturd-making-of", "engine_or_product": "capturd",
+            "source_app": "capturd", "source_revision": REV, "base_url": BASE}
+    ok = call(args)
+    assert ok["ok"] is True and ok["manifest"]["publicationState"] == "pending"
+    assert ok["path"].endswith(ok["manifest"]["packageRevision"])
+    refused = call({**args, "base_url": "http://x.example.com"})
+    assert refused["ok"] is False and "https" in refused["detail"]

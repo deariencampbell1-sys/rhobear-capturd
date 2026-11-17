@@ -71,6 +71,7 @@ from capturd.engine.take_store import (
 )
 from fastmcp import FastMCP
 
+from capturd.walk.publication import PackageError, build_package
 from capturd.walk.recapture import RecaptureError, recapture_step
 from capturd.walk.recorder import DemoRecorderError
 from capturd.walk.coordinator import (
@@ -740,6 +741,36 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
             "demoId": demo_id,
             "format": fmt,
         }
+
+    # ---- demo.package -----------------------------------------------------
+
+    @mcp.tool(
+        name="demo.package",
+        description=(
+            "Build the immutable rhobear.demo-package.v1 folder for an exported, "
+            "fully approved demo (run demo.export format=mp4 first): MP4, poster, "
+            "captions, transcript, chapters, interactive HTML and manifest.json "
+            "under package/<packageRevision>/. Nothing is uploaded or published. "
+            "base_url is the https location the folder will be served from. Pass "
+            "approved_by and watched_complete=true only after a person watched the "
+            "whole result; otherwise the package is pending."
+        ),
+    )
+    async def demo_package(demo_id: str, scenario_id: str, engine_or_product: str,
+                           source_app: str, source_revision: str, base_url: str,
+                           approved_by: str | None = None,
+                           watched_complete: bool = False) -> dict[str, Any]:
+        try:
+            manifest, folder = await asyncio.to_thread(
+                build_package, forge, demo_id, scenario_id=scenario_id,
+                engine_or_product=engine_or_product, source_app=source_app,
+                source_revision=source_revision, base_url=base_url,
+                approved_by=approved_by, watched_complete=watched_complete)
+        except DemoNotFound:
+            raise ValueError(f"demo not found: {demo_id}")
+        except PackageError as exc:
+            return {"ok": False, "code": "package_refused", "detail": str(exc)}
+        return {"ok": True, "manifest": manifest, "path": str(folder.resolve())}
 
     # ---- take review (contract §2–§6) -------------------------------------
 

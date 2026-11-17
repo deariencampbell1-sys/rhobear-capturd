@@ -57,7 +57,7 @@ capture.crawl   capture.rested                                  # stills
 demo.record     demo.act      demo.narrate    demo.poll_voice   # record
 demo.look       demo.stop     demo.cancel                       # session
 demo.status     demo.list                                       # library
-demo.edit       demo.delete   demo.export                       # edit and export
+demo.edit       demo.delete   demo.export     demo.package      # edit, export, package
 demo.zoom       demo.pan      demo.hold                         # camera
 demo.spotlight  demo.overlay                                    # composition
 demo.reorder    demo.trim     demo.branch                       # structure

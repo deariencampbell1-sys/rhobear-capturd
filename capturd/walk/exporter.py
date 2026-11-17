@@ -60,6 +60,10 @@ class DemoExportError(DemoForgeError, RuntimeError):
 # ---------------------------------------------------------------------------
 
 
+#: The render plan `_capture_frames` leaves in its frames folder.
+PLAN_FILE = "plan.json"
+
+
 def _decode_png_rgb(png: bytes) -> tuple[int, int, bytes]:
     """Decode an 8-bit PNG into packed RGB bytes.
 
@@ -316,6 +320,10 @@ async def _capture_frames(
                 logger.info("export: %d/%d frames", i, n_frames)
 
         await browser.close()
+    # Every frame landed: keep the render timeline for chapter starts (real
+    # media time). Written last, so a failed seek leaves no output at all.
+    (frames_dir / PLAN_FILE).write_text(
+        json.dumps({"stepWindows": plan.get("stepWindows") or []}), encoding="utf-8")
     return n_frames, total_ms / 1000.0, audio_plan
 
 
@@ -419,6 +427,23 @@ def _encode_gif(ffmpeg: str, frames_dir: Path, fps: int, out_path: Path) -> None
 # ---------------------------------------------------------------------------
 
 
+def _write_chapters(steps: list[dict[str, Any]], plan_file: Path, out_path: Path) -> None:
+    """Chapter starts from the timeline the frames were cut from, never a timer."""
+    if not plan_file.is_file():
+        return
+    windows = json.loads(plan_file.read_text(encoding="utf-8")).get("stepWindows") or []
+    chapters = []
+    for window in windows:
+        index = window.get("index")
+        if not isinstance(index, int) or not 0 <= index < len(steps):
+            continue
+        label = (steps[index].get("annotation") or "").strip() or f"Step {index + 1}"
+        chapters.append({"label": label, "startSeconds": round(float(window["tStart"]) / 1000, 3)})
+    if chapters:
+        out_path.with_name(out_path.stem + ".chapters.json").write_text(
+            json.dumps(chapters), encoding="utf-8")
+
+
 def _write_captions(steps: list[dict[str, Any]], audio_plan: list[dict[str, Any]],
                     out_path: Path) -> None:
     """WebVTT + transcript beside the video, from the real narration only."""
@@ -488,6 +513,7 @@ def export_video(
                 audio_clips.append((clip, at_ms))
             _encode_mp4(ffmpeg, frames_dir, fps, duration_s, out_path, audio_clips)
             _write_captions(steps, audio_plan, out_path)
+            _write_chapters(steps, frames_dir / PLAN_FILE, out_path)
 
     # The existence check and the size read are one mapped step: a file that
     # vanishes between them is refused, never leaked as a bare OSError, and
