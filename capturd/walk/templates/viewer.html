@@ -693,26 +693,26 @@
       return placeholderImage(step);
     }
 
+    // A shot with no pixels is shown as exactly that (GAPS-NOW M11): never a
+    // frame that could pass for a captured step.
     function placeholderImage(step) {
       const w = (step.viewport && step.viewport.width)  || 1024;
       const h = (step.viewport && step.viewport.height) || 768;
-      const idx = step.index != null ? step.index : '?';
-      const sel = step.interaction && step.interaction.target && step.interaction.target.selector
-                    ? step.interaction.target.selector : '';
-      const label = sel ? sel.replace(/[<>&"']/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c])) : '';
+      const shot = step.index != null ? step.index + 1 : '?';
+      const esc = t => String(t).replace(/[<>&"']/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]))
+                                .replace(/[^\x20-\x7e]/g, '?');
+      // An <img> SVG cannot see page CSS, so read the accent token here.
+      const accent = esc(getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || 'currentColor');
+      const reason = step.screenshotError ? esc(step.screenshotError).slice(0, 160) : 'no screenshot was saved';
       // Pure ASCII only — btoa() rejects code points > 255, and some image
       // decoders refuse to load data: URLs that contain UTF-8 bytes.
       const svg =
         `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}">` +
-          `<defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">` +
-            `<stop offset="0" stop-color="#1f2937"/>` +
-            `<stop offset="1" stop-color="#111827"/>` +
-          `</linearGradient></defs>` +
-          `<rect width="100%" height="100%" fill="url(#g)"/>` +
-          `<g font-family="-apple-system, system-ui, sans-serif" fill="#9ca3af">` +
-            `<text x="50%" y="46%" text-anchor="middle" font-size="56" font-weight="700" fill="#e8eaed">Step ${idx}</text>` +
-            (label ? `<text x="50%" y="58%" text-anchor="middle" font-size="28">${label}</text>` : '') +
-            `<text x="50%" y="94%" text-anchor="middle" font-size="16" opacity="0.5">placeholder screenshot  ${w}x${h}</text>` +
+          `<rect width="100%" height="100%" fill="#111827"/>` +
+          `<g font-family="-apple-system, system-ui, sans-serif" text-anchor="middle">` +
+            `<text x="50%" y="42%" font-size="48" font-weight="700" fill="#e8eaed">Shot ${shot} was not captured</text>` +
+            `<text x="50%" y="54%" font-size="24" fill="#9ca3af">${reason}</text>` +
+            `<text x="50%" y="66%" font-size="22" fill="${accent}">Record this shot again before sharing</text>` +
           `</g>` +
         `</svg>`;
       // btoa throws on code points > 255; encode safely via TextEncoder first.
