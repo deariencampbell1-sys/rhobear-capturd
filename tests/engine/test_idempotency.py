@@ -57,11 +57,12 @@ def test_concurrent_same_key_does_the_work_once(tmp_path):
     assert calls == [1] and all(r == {"job": "j1"} for r in results)
 
 
-def test_a_failed_attempt_is_not_remembered(tmp_path):
+def test_a_failed_attempt_is_unknown_until_reconciled(tmp_path):
     ledger = OperationLedger(tmp_path / "ops.json")
     with pytest.raises(RuntimeError):
         ledger.run("op-f", {"a": 1}, lambda: (_ for _ in ()).throw(RuntimeError("boom")))
-    assert ledger.run("op-f", {"a": 1}, lambda: {"job": "retry"}) == {"job": "retry"}
+    with pytest.raises(Exception, match="(?i)(unknown|reconcil)"):
+        ledger.run("op-f", {"a": 1}, lambda: {"job": "retry"})
 
 
 def test_demo_export_with_an_operation_id_is_idempotent(tmp_path, monkeypatch):
