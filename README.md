@@ -64,7 +64,7 @@ demo.reorder    demo.trim     demo.branch                       # structure
 demo.stylize    demo.regenerate                                 # restyle
 demo.audit      demo.optimize demo.revision                     # check, tidy, revisions
 take.list       take.approve  take.reject     take.revoke       # shot review; export waits for approval
-take.retake                                                     # new direction, same pixels
+take.retake     take.recapture                                  # new direction, same pixels / record a shot again
 engine.contract                                                 # manifest + contract version (also /healthz)
 ```
 

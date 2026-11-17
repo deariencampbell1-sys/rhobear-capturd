@@ -663,6 +663,10 @@ class DemoForge:
         for shot, direction in review.selected_directions(demo_id).items():
             if 0 <= shot < len(steps) and direction.get("caption") is not None:
                 steps[shot]["annotation"] = direction["caption"]
+        for shot, name in review.selected_sources(demo_id).items():
+            if 0 <= shot < len(steps):
+                steps[shot].update(screenshotPath=name, screenshotBase64=None,
+                                   screenshotError=None)
         self._inline_screenshots(data, demo_id)
         # Carry the semantic target metadata into the embedded viewer so the
         # HTML export resolves the same camera as the recorder (W1-03-r1).

@@ -30,6 +30,11 @@ from .takes import KIND, TakeError, transition
 FILENAME = "takes.json"
 
 
+def source_file(revision: str) -> str:
+    """The demo-folder file name of recaptured pixels at `revision`."""
+    return f"source_{revision}.png"
+
+
 class TakeStoreError(ValueError):
     """The review or the take named does not exist, or the move is refused."""
 
@@ -252,3 +257,55 @@ class TakeStore:
         by_pair = {(t["shotIndex"], t["takeIndex"]): t for t in review["takes"]}
         return {shot: by_pair[(shot, take)]["direction"]
                 for shot, take in review["selection"].items() if (shot, take) in by_pair}
+
+    def recapture(self, demo_id: str, shot: int, take: int, *, pixels: bytes,
+                  expected_revision: str) -> dict[str, Any]:
+        """§4 recapture: new pixels make a new take with a new sourceRevision.
+
+        The bytes are kept as `source_<sha1>.png` in the demo folder (a retake
+        of this take keeps that file). Identical pixels are refused: that is
+        no recapture. The new take is `ready`, unselected until approved.
+        """
+        revision = hashlib.sha1(pixels).hexdigest()
+        with self._lock:
+            review = self._read(demo_id)
+            if review is None:
+                raise TakeStoreError(f"no review is open for demo {demo_id!r}; call take.list first")
+            shot_takes = [t for t in review["takes"] if t["shotIndex"] == shot]
+            base = next((t for t in shot_takes if t["takeIndex"] == take), None)
+            if base is None:
+                raise TakeStoreError(f"demo {demo_id!r} has no shot {shot} take {take}")
+            if expected_revision != base["sourceRevision"]:
+                raise RevisionConflict(expected_revision, base["sourceRevision"])
+            if revision == base["sourceRevision"]:
+                raise TakeStoreError(
+                    f"shot {shot} recaptured the same pixels; nothing new to review")
+            source = self._forge.demo_dir(demo_id) / source_file(revision)
+            source.write_bytes(pixels)
+            try:
+                draft = shots.recapture(
+                    base, take_index=max(t["takeIndex"] for t in shot_takes) + 1,
+                    job_id=demo_id, attempt_id=f"att_{uuid.uuid4().hex}",
+                    source_revision=revision, source_artifact_id=f"local_{revision[:16]}",
+                    created_at=_now())
+            except TakeError as exc:
+                raise TakeStoreError(str(exc)) from exc
+            new = transition(draft, "ready")
+            review["takes"].append(new)
+            self._write(demo_id, review)
+            return new
+
+    def selected_sources(self, demo_id: str) -> dict[int, str]:
+        """Shot -> the recaptured pixel file of its selected take, if it has one."""
+        review = self._read(demo_id)
+        if review is None:
+            return {}
+        by_pair = {(t["shotIndex"], t["takeIndex"]): t for t in review["takes"]}
+        found = {}
+        for shot, take in review["selection"].items():
+            record = by_pair.get((shot, take))
+            if record is not None:
+                name = source_file(record["sourceRevision"])
+                if (self._forge.demo_dir(demo_id) / name).is_file():
+                    found[shot] = name
+        return found

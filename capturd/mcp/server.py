@@ -71,6 +71,7 @@ from capturd.engine.take_store import (
 )
 from fastmcp import FastMCP
 
+from capturd.walk.recapture import RecaptureError, recapture_step
 from capturd.walk.recorder import DemoRecorderError
 from capturd.walk.coordinator import (
     DemoExportBlocked,
@@ -804,6 +805,38 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
                           direction: dict[str, Any], expected_revision: str) -> dict[str, Any]:
         return _take_call(takes.retake, demo_id, shot_index, take_index,
                           direction=direction, expected_revision=expected_revision)
+
+    @mcp.tool(
+        name="take.recapture",
+        description=(
+            "Record one shot again: reloads the step's page headless, finds "
+            "the recorded target, repeats the click and captures new pixels as "
+            "a new ready take (new sourceRevision). Other shots and takes are "
+            "untouched; the new take is selected only when approved. If the "
+            "page or target no longer reproduces, answers ok:false "
+            "code:source_stale with the cause and makes no take."
+        ),
+        timeout=120.0,
+    )
+    async def take_recapture(demo_id: str, shot_index: int, take_index: int,
+                             expected_revision: str) -> dict[str, Any]:
+        try:
+            data = forge.load_spec(demo_id)
+        except DemoNotFound:
+            raise ValueError(f"demo not found: {demo_id}")
+        steps = data.get("steps") or []
+        if not 0 <= shot_index < len(steps):
+            return {"ok": False, "code": "invalid",
+                    "detail": f"demo {demo_id!r} has no shot {shot_index}"}
+        step = steps[shot_index]
+        _reject_private_url(step.get("pageUrl") or "")
+        try:
+            pixels = await recapture_step(step, data.get("viewport") or {"width": 1280, "height": 800})
+        except RecaptureError as exc:
+            return {"ok": False, "code": "source_stale", "detail": str(exc),
+                    "needed": "a new source plan for this shot"}
+        return _take_call(takes.recapture, demo_id, shot_index, take_index,
+                          pixels=pixels, expected_revision=expected_revision)
 
     @mcp.tool(
         name="take.reject",
