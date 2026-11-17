@@ -62,7 +62,7 @@ from urllib.parse import urlparse
 
 from capturd._net import is_private_ip
 from capturd.engine.contract import engine_contract
-from capturd.engine.idempotency import IdempotencyMismatch, OperationLedger
+from capturd.engine.idempotency import IdempotencyMismatch, OperationLedger, OperationUnknown
 from capturd.engine.take_store import (
     DirectionError,
     RevisionConflict,
@@ -309,7 +309,7 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
             return await asyncio.to_thread(
                 _operations().run, operation_id, {"tool": "demo.record", **args},
                 lambda: asyncio.run(_record(**args)))
-        except IdempotencyMismatch as exc:
+        except (IdempotencyMismatch, OperationUnknown) as exc:
             return {"ok": False, **exc.payload()}
 
     @mcp.tool(
@@ -712,7 +712,7 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
                 _operations().run, operation_id,
                 {"tool": "demo.export", "demo_id": demo_id, "format": format},
                 lambda: asyncio.run(_export(demo_id, format)))
-        except IdempotencyMismatch as exc:
+        except (IdempotencyMismatch, OperationUnknown) as exc:
             return {"ok": False, **exc.payload()}
 
     async def _export(demo_id: str, format: str) -> dict[str, Any]:
