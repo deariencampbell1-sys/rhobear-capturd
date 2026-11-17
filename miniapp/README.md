@@ -28,3 +28,6 @@ that collection's location in an `EngineJob`; the engine manifest currently
 has an open object output schema. Those details must be resolved before the
 review UI can be wired without guessing. `npm audit` reports development-tool
 dependency vulnerabilities; they require resolution before delivery.
+
+Cold-cache verification: bare `npm ci` fails with `ENOENT` for the kit
+tarball; after the verified fetch, `npm ci`, tests, and build work.
