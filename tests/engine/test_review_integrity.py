@@ -105,3 +105,15 @@ def test_processes_cannot_both_approve(tmp_path):
         process.join(15)
         assert process.exitcode == 0
     assert sorted(queue.get(timeout=3) for _ in processes) == ['approved', 'refused']
+
+
+def test_save_immediately_reopens_approval(tmp_path):
+    forge = _forge(tmp_path, pngs=(PNG_A,))
+    store = _store(forge)
+    take = store.open_review('demo1')['takes'][0]
+    store.approve('demo1', 0, 0, by='Neo', expected_revision=take['sourceRevision'])
+    spec = forge.load_spec('demo1')
+    spec['steps'][0]['annotation'] = 'Changed'
+    forge.save_spec('demo1', spec)
+    assert store.review('demo1')['takes'][0]['state'] == 'ready'
+    assert store.review('demo1')['history'][-1]['from'] == 'approved'
