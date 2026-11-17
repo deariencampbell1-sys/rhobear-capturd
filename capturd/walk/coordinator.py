@@ -715,6 +715,7 @@ class DemoForge:
         # regex matches LF, and we want the export to be portable across
         # platforms. ``write_text`` would translate to CRLF on Windows.
         html_path.write_bytes(exported.encode("utf-8"))
+        self._write_poster(data, demo_id)
         if fmt == "html":
             return html_path
 
@@ -731,6 +732,16 @@ class DemoForge:
             # object, message, subtype and cause through export_demo — do
             # NOT re-type it as DemoForgeError here (bare re-raise).
             raise
+
+    def _write_poster(self, data: dict[str, Any], demo_id: str) -> None:
+        """``poster.png``: the first shot's exported pixels, or none at all."""
+        poster = self.demo_dir(demo_id) / "poster.png"
+        steps = data.get("steps") or []
+        first = steps[0] if steps else {}
+        if first.get("screenshotError") or not first.get("screenshotBase64"):
+            poster.unlink(missing_ok=True)
+            return
+        poster.write_bytes(base64.b64decode(first["screenshotBase64"]))
 
     def _inline_screenshots(self, data: dict[str, Any], demo_id: str) -> None:
         """Mutate ``data`` so each step has ``screenshotBase64`` populated.
