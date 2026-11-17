@@ -883,6 +883,8 @@ class DemoRecorder:
         from playwright.async_api import async_playwright
 
         self._loop = asyncio.get_running_loop()
+        self._agent_checkpoint = True
+        self._write_outputs()
         self._playwright = await async_playwright().start()
         self._browser = await _launch_demo_browser(self._playwright, headless=not self.headful)
         self._context = await self._browser.new_context(
@@ -1723,6 +1725,8 @@ class DemoRecorder:
         )
         self.spec.steps.append(step)
         self._last_url = step.pageUrl
+        if getattr(self, "_agent_checkpoint", False):
+            self._write_outputs()
 
     # ----- workflow-mode dialog loop -----------------------------------------
 
@@ -1853,6 +1857,8 @@ class DemoRecorder:
                 )
             self.spec.steps.append(step)
             self._last_url = step.pageUrl
+            if getattr(self, "_agent_checkpoint", False):
+                self._write_outputs()
 
             # Workflow mode: after each user click, prompt for intent.
             if self.workflow_mode and not is_voice and self.voice_loop is not None:
@@ -1888,10 +1894,18 @@ class DemoRecorder:
     def _write_outputs(self) -> None:
         """Persist demo.json next to the screenshots."""
         out_path = self.output_dir / "demo.json"
-        out_path.write_text(
-            json.dumps(self.spec.to_dict(), indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
+        import os
+        import tempfile
+        fd, temp = tempfile.mkstemp(prefix=".demo-", dir=self.output_dir)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(self.spec.to_dict(), stream, indent=2, sort_keys=True)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp, out_path)
+        finally:
+            if os.path.exists(temp):
+                os.unlink(temp)
         logger.info("wrote %s (%d steps)", out_path, len(self.spec.steps))
 
     # ----- public read-only handle -------------------------------------------
