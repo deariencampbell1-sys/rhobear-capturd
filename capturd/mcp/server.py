@@ -101,7 +101,7 @@ def _reject_private_url(url: str) -> None:
 # ---------------------------------------------------------------------------
 
 _INSTRUCTIONS = (
-    "DemoForge MCP server. Use the demo.* tools to record product flows, "
+    "Captur'd MCP server (@capturd). Use the demo.* tools to record product flows, "
     "enrich them with AI (annotations, voiceover, animation timeline), and "
     "export the result as a standalone HTML viewer. Recording tools open a "
     "headful Playwright window — make sure the host has a graphical session "
@@ -111,12 +111,15 @@ _INSTRUCTIONS = (
 
 
 def _build_server(forge: DemoForge | None = None) -> FastMCP:
-    """Construct the MCP server with all 7 tools wired up."""
+    """Construct the MCP server with every tool wired up."""
     forge = forge if forge is not None else DemoForge()
+    # Identity comes from the manifest; a broken manifest still builds the
+    # server so engine.contract can report the damage.
+    manifest = engine_contract()["manifest"] or {}
     mcp = FastMCP(
-        name="DemoForge",
+        name=manifest.get("engine", "capturd"),
         instructions=_INSTRUCTIONS,
-        version="0.1.0",
+        version=manifest.get("engineVersion"),
     )
 
     # ---- demo.record ------------------------------------------------------

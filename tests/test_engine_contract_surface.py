@@ -242,7 +242,11 @@ def _cold_contract_cache():
 
 @pytest.fixture
 def server():
-    return mcp_server._build_server()
+    built = mcp_server._build_server()
+    # Building the server reads its name/version through the contract; keep
+    # the "start every test cold" promise of _cold_contract_cache.
+    contract_mod._manifest_for.cache_clear()
+    return built
 
 
 @pytest.fixture
