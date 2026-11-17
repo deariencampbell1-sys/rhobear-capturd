@@ -62,6 +62,7 @@ from urllib.parse import urlparse
 
 from capturd._net import is_private_ip
 from capturd.engine.contract import engine_contract
+from capturd.engine.idempotency import IdempotencyMismatch, OperationLedger
 from capturd.engine.take_store import RevisionConflict, TakeStore, TakeStoreError
 from fastmcp import FastMCP
 
@@ -128,30 +129,16 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
 
     # sessionId → {"recorder", "thread", "mode"} for demo.stop.
     _live_sessions: dict[str, dict[str, Any]] = {}
+    # operation_id → first result, for demo.record / demo.export retries.
+    # Built on first use: only a call that passes operation_id needs it.
+    _ledger: list[OperationLedger] = []
 
-    @mcp.tool(
-        name="demo.record",
-        description=(
-            "Start recording a product demo. Three modes:\n"
-            "• mode='agent' — the 'prompt in, demo out' flow: an LLM drives "
-            "the browser toward `goal` on its own; the session finishes by "
-            "itself, then call demo.stop to persist + enrich. Needs a gateway "
-            "(RHOBEAR_GW_API_KEY / RHOBEAR_GW_BASE_URL env on the host).\n"
-            "• mode='live' — YOU drive it turn-by-turn from chat: opens a "
-            "visible browser and returns a sessionId; send each instruction "
-            "with demo.act (click/type/scroll/navigate) and caption it with "
-            "demo.narrate, then demo.stop. This is the 'talk to it as it "
-            "records' surface — no gateway needed to drive.\n"
-            "• mode='human' — a person clicks through the visible window, "
-            "then demo.stop.\n"
-            "Pass visible=true to force the browser on-screen (agent mode is "
-            "hidden by default; live/human show by default). The browser opens "
-            "on whatever machine runs this MCP server — run it on the box with "
-            "the display for the on-screen experience."
-        ),
-        timeout=60.0,
-    )
-    async def demo_record(
+    def _operations() -> OperationLedger:
+        if not _ledger:
+            _ledger.append(OperationLedger(forge.demos_dir / ".operations.json"))
+        return _ledger[0]
+
+    async def _record(
         url: str,
         name: str,
         goal: str = "",
@@ -275,6 +262,50 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
         }
 
     # ---- demo.act (live-drive) -------------------------------------------
+
+    @mcp.tool(
+        name="demo.record",
+        description=(
+            "Start recording a product demo. Three modes:\n"
+            "• mode='agent' — the 'prompt in, demo out' flow: an LLM drives "
+            "the browser toward `goal` on its own; the session finishes by "
+            "itself, then call demo.stop to persist + enrich. Needs a gateway "
+            "(RHOBEAR_GW_API_KEY / RHOBEAR_GW_BASE_URL env on the host).\n"
+            "• mode='live' — YOU drive it turn-by-turn from chat: opens a "
+            "visible browser and returns a sessionId; send each instruction "
+            "with demo.act (click/type/scroll/navigate) and caption it with "
+            "demo.narrate, then demo.stop. This is the 'talk to it as it "
+            "records' surface — no gateway needed to drive.\n"
+            "• mode='human' — a person clicks through the visible window, "
+            "then demo.stop.\n"
+            "Pass visible=true to force the browser on-screen (agent mode is "
+            "hidden by default; live/human show by default). The browser opens "
+            "on whatever machine runs this MCP server — run it on the box with "
+            "the display for the on-screen experience."
+        ),
+        timeout=60.0,
+    )
+    async def demo_record(
+        url: str,
+        name: str,
+        goal: str = "",
+        mode: str = "agent",
+        visible: bool | None = None,
+        viewport: dict[str, int] | None = None,
+        workflow: bool = False,
+        voice: bool | None = None,
+        operation_id: str = "",
+    ) -> dict[str, Any]:
+        args = dict(url=url, name=name, goal=goal, mode=mode, visible=visible,
+                    viewport=viewport, workflow=workflow, voice=voice)
+        if not operation_id:
+            return await _record(**args)
+        try:
+            return await asyncio.to_thread(
+                _operations().run, operation_id, {"tool": "demo.record", **args},
+                lambda: asyncio.run(_record(**args)))
+        except IdempotencyMismatch as exc:
+            return {"ok": False, **exc.payload()}
 
     @mcp.tool(
         name="demo.act",
@@ -667,7 +698,19 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
         ),
         timeout=900.0,
     )
-    async def demo_export(demo_id: str, format: str = "html") -> dict[str, Any]:
+    async def demo_export(demo_id: str, format: str = "html",
+                          operation_id: str = "") -> dict[str, Any]:
+        if not operation_id:
+            return await _export(demo_id, format)
+        try:
+            return await asyncio.to_thread(
+                _operations().run, operation_id,
+                {"tool": "demo.export", "demo_id": demo_id, "format": format},
+                lambda: asyncio.run(_export(demo_id, format)))
+        except IdempotencyMismatch as exc:
+            return {"ok": False, **exc.payload()}
+
+    async def _export(demo_id: str, format: str) -> dict[str, Any]:
         if not demo_id:
             raise ValueError("demoId is required")
         fmt = (format or "html").lower()
