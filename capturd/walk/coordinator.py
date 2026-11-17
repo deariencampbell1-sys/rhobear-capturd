@@ -744,13 +744,15 @@ class DemoForge:
 
     def _write_poster(self, data: dict[str, Any], demo_id: str) -> None:
         """``poster.png``: the first shot's exported pixels, or none at all."""
+        from capturd._safe_files import atomic_write, safe_unlink
+
         poster = self.demo_dir(demo_id) / "poster.png"
         steps = data.get("steps") or []
         first = steps[0] if steps else {}
         if first.get("screenshotError") or not first.get("screenshotBase64"):
-            poster.unlink(missing_ok=True)
+            safe_unlink(poster)
             return
-        poster.write_bytes(base64.b64decode(first["screenshotBase64"]))
+        atomic_write(poster, base64.b64decode(first["screenshotBase64"]))
 
     def _inline_screenshots(self, data: dict[str, Any], demo_id: str) -> None:
         """Mutate ``data`` so each step has ``screenshotBase64`` populated.
