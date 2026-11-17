@@ -1,6 +1,6 @@
-"""Service-level proofs for the webhook + render-caps fix lane.
+"""Service-level proofs for the render-caps fix lane.
 
-Covers three red-team findings against the REAL app (FastAPI TestClient + a
+Covers two red-team findings against the REAL app (FastAPI TestClient + a
 real SQLite DB), not proxies:
 
   * Item 2 (HIGH) — the Free=1 gate used to be check-here/increment-there across
@@ -10,21 +10,17 @@ real SQLite DB), not proxies:
     generation split; the primitive stays as the load-protection seam.)
   * Item 1 (HIGH) — paid render had no cap on Pro. Now a per-account concurrency
     cap and a sliding hourly rate limit (429 + Retry-After), applied to Pro too.
-  * Item 3 (HIGH) — buy path: the webhook handler validates a Stripe signature
-    and flips the account to Pro on a valid ``checkout.session.completed``;
-    checkout degrades honestly (503) with no credentials.
+
+The Stripe buy path (old item 3) is gone with the separate checkout
+(GAPS-NOW W1/W6); its absence is pinned in tests/test_pro_retirement.py.
 
 run_job / the SSRF resolver are mocked here only because this box has no
-film.py rig and no network — the gates under test are the billing/caps logic,
+film.py rig and no network — the gates under test are the caps logic,
 not the render or the SSRF guard (the latter has its own test_ssrf_guard.py).
 """
 from __future__ import annotations
 
-import hashlib
-import hmac
-import json
 import sys
-import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -213,96 +209,3 @@ def test_concurrency_reject_refunds_the_rate_reservation(client, db):
     assert "in-flight" in r.json()["detail"]
     after = store.usage_count(u["id"], "render_request")
     assert before == after, "429 must refund the render_request reservation"
-
-
-# ---------------------------------------------------------------------------
-# Item 3 — buy path: webhook signature verify → grant Pro
-# ---------------------------------------------------------------------------
-
-
-def _signed_event(secret: str, event: dict) -> tuple[bytes, str]:
-    raw = json.dumps(event).encode()
-    ts = str(int(time.time()))
-    mac = hmac.new(secret.encode(), f"{ts}.".encode() + raw,
-                   hashlib.sha256).hexdigest()
-    return raw, f"t={ts},v1={mac}"
-
-
-def test_webhook_grants_pro_on_valid_signature(client, db, monkeypatch):
-    import app.config as config
-
-    store = db
-    secret = "whsec_test_signing_secret"
-    monkeypatch.setattr(config, "BILLING_WEBHOOK_SECRET", secret)
-    u = store.upsert_user("buyer@example.com")          # starts free
-    assert store.get_user(u["id"])["plan"] == "free"
-
-    raw, sig = _signed_event(secret, {
-        "type": "checkout.session.completed",
-        "data": {"object": {"client_reference_id": u["id"],
-                            "customer_email": "buyer@example.com"}},
-    })
-    r = client.post("/billing/webhook", content=raw,
-                    headers={"stripe-signature": sig})
-    assert r.status_code == 200
-    assert r.json().get("upgraded") == "buyer@example.com"
-    assert store.get_user(u["id"])["plan"] == "pro"
-
-
-def test_webhook_rejects_bad_signature(client, db, monkeypatch):
-    import app.config as config
-
-    store = db
-    monkeypatch.setattr(config, "BILLING_WEBHOOK_SECRET", "whsec_real")
-    u = store.upsert_user("attacker@example.com")
-
-    raw, _sig = _signed_event("whsec_real", {
-        "type": "checkout.session.completed",
-        "data": {"object": {"client_reference_id": u["id"]}},
-    })
-    # replay with a signature computed under a DIFFERENT secret
-    bad = _signed_event("whsec_wrong", {
-        "type": "checkout.session.completed",
-        "data": {"object": {"client_reference_id": u["id"]}},
-    })[1]
-    r = client.post("/billing/webhook", content=raw,
-                    headers={"stripe-signature": bad})
-    assert r.status_code == 400
-    assert store.get_user(u["id"])["plan"] == "free"   # not flipped
-
-
-def test_webhook_503_when_secret_unconfigured(client, db, monkeypatch):
-    import app.config as config
-
-    monkeypatch.setattr(config, "BILLING_WEBHOOK_SECRET", "")
-    r = client.post("/billing/webhook", content=b"{}",
-                    headers={"stripe-signature": "t=1,v1=x"})
-    assert r.status_code == 503   # honest, not a fake success
-
-
-def test_checkout_503_when_unconfigured(client, db, monkeypatch):
-    """With no Stripe key/price and no legacy URL, checkout says 503 plainly
-    instead of faking a broken buy button."""
-    import app.config as config
-
-    store = db
-    _authed(client, store, "nofunds@example.com", plan="free")
-    monkeypatch.setattr(config, "_BILLING_SESSION_READY", False)
-    monkeypatch.setattr(config, "PRO_CHECKOUT_URL", "")
-    r = client.get("/billing/checkout", follow_redirects=False)
-    assert r.status_code == 503
-
-
-def test_checkout_redirects_when_legacy_url_set(client, db, monkeypatch):
-    """Legacy PRO_CHECKOUT_URL path still completes the buy redirect, carrying
-    the user id so the webhook knows who paid."""
-    import app.config as config
-
-    store = db
-    u = _authed(client, store, "legacy@example.com", plan="free")
-    monkeypatch.setattr(config, "_BILLING_SESSION_READY", False)
-    monkeypatch.setattr(config, "PRO_CHECKOUT_URL", "https://pay.example.com/buy")
-    r = client.get("/billing/checkout", follow_redirects=False)
-    assert r.status_code == 303
-    assert r.headers["location"].startswith("https://pay.example.com/buy")
-    assert u["id"] in r.headers["location"]

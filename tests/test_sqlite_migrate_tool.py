@@ -750,8 +750,8 @@ def test_env_reads_vault_file_when_env_var_unset(tmp_path: Path):
     after the (lowercased) variable supplies the value when the env var is empty.
     """
     vault = tmp_path / "vault"
-    _write_vault(vault, "PRO_CHECKOUT_URL", "https://buy.example.com/capturd\n")
-    got = _run_env("PRO_CHECKOUT_URL", CAPTURD_VAULT_DIR=str(vault))
+    _write_vault(vault, "RHOBEAR_GW_API_KEY", "https://buy.example.com/capturd\n")
+    got = _run_env("RHOBEAR_GW_API_KEY", CAPTURD_VAULT_DIR=str(vault))
     assert got == "https://buy.example.com/capturd"
 
 
@@ -761,10 +761,10 @@ def test_env_vault_file_skips_blanks_and_comments(tmp_path: Path):
     """
     vault = tmp_path / "vault"
     _write_vault(
-        vault, "BILLING_WEBHOOK_SECRET",
+        vault, "CAPTURD_SESSION_SECRET",
         "# owners: paste the whsec_… value on its own line\n\n   \nwhsec_real_value\nwhsec_ignored\n",
     )
-    got = _run_env("BILLING_WEBHOOK_SECRET", CAPTURD_VAULT_DIR=str(vault))
+    got = _run_env("CAPTURD_SESSION_SECRET", CAPTURD_VAULT_DIR=str(vault))
     assert got == "whsec_real_value"
 
 
@@ -773,18 +773,18 @@ def test_env_var_beats_vault_file(tmp_path: Path):
     local vault without editing files on the box.
     """
     vault = tmp_path / "vault"
-    _write_vault(vault, "PRO_CHECKOUT_URL", "https://from-vault.example.com\n")
+    _write_vault(vault, "RHOBEAR_GW_API_KEY", "https://from-vault.example.com\n")
     got = _run_env(
-        "PRO_CHECKOUT_URL",
+        "RHOBEAR_GW_API_KEY",
         CAPTURD_VAULT_DIR=str(vault),
-        PRO_CHECKOUT_URL="https://from-env.example.com",
+        RHOBEAR_GW_API_KEY="https://from-env.example.com",
     )
     assert got == "https://from-env.example.com"
 
 
 def test_env_falls_back_to_default_when_nothing_configured(tmp_path: Path):
     """No env var, no vault file → the caller's default (never a fake credential)."""
-    got = _run_env("PRO_CHECKOUT_URL", "about:blank", CAPTURD_VAULT_DIR=str(tmp_path / "empty"))
+    got = _run_env("RHOBEAR_GW_API_KEY", "about:blank", CAPTURD_VAULT_DIR=str(tmp_path / "empty"))
     assert got == "about:blank"
 
 
@@ -793,8 +793,8 @@ def test_env_ignores_a_blank_env_var_and_uses_the_vault(tmp_path: Path):
     ``Environment=`` entries) and must not mask the vault file.
     """
     vault = tmp_path / "vault"
-    _write_vault(vault, "PRO_CHECKOUT_URL", "https://from-vault.example.com\n")
-    got = _run_env("PRO_CHECKOUT_URL", CAPTURD_VAULT_DIR=str(vault), PRO_CHECKOUT_URL="   ")
+    _write_vault(vault, "RHOBEAR_GW_API_KEY", "https://from-vault.example.com\n")
+    got = _run_env("RHOBEAR_GW_API_KEY", CAPTURD_VAULT_DIR=str(vault), RHOBEAR_GW_API_KEY="   ")
     assert got == "https://from-vault.example.com"
 
 

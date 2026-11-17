@@ -4,12 +4,8 @@ Everything the service needs is here. The OWNER-GATED credentials are read from
 env (or the agent vault) and each has an honest "configured?" flag so the app
 degrades gracefully and tells the truth instead of faking a broken flow.
 
-The ONLY hard stops for going live (owner's words: "you can't install something
-if my PayPal credentials aren't in there"):
-  * PRO_CHECKOUT_URL      — the buy button target (Stripe Payment Link / PayPal subscribe URL)
-  * BILLING_WEBHOOK_SECRET — verifies the "payment succeeded" callback that flips a user to Pro
-
-Drop them in the environment (or D:\rhobear-agent-vault\ files) and the flow is live.
+There is no separate checkout: the plan comes from central auth and the monthly
+plan and bank are L2's. Values may also come from agent-vault files.
 """
 from __future__ import annotations
 
@@ -89,24 +85,10 @@ RENDER_MAX_CONCURRENT = int(_env("CAPTURD_RENDER_MAX_CONCURRENT", "2"))
 RENDER_MAX_PER_HOUR = int(_env("CAPTURD_RENDER_MAX_PER_HOUR", "10"))
 
 # ---- OWNER-GATED credentials (honest flags) ----------------------------------
-# Billing — two paths. The CANON path (Lane K) creates a Stripe Checkout Session
-# server-side so the founder coupon auto-applies. The legacy path redirects to a
-# static PRO_CHECKOUT_URL (Payment Link). Session-creation wins when configured.
-STRIPE_SECRET_KEY = _env("STRIPE_SECRET_KEY")             # test: sk_test_...  (NEVER commit)
-CAPTURD_PRICE_ID = _env("CAPTURD_PRICE_ID")               # monthly plan price (Stripe lookup key)
-CAPTURD_COUPON_ID = _env("CAPTURD_COUPON_ID", "rhobear_capturd_founders_25")
-PRO_CHECKOUT_URL = _env("PRO_CHECKOUT_URL")               # buy button target (legacy static link)
-BILLING_WEBHOOK_SECRET = _env("BILLING_WEBHOOK_SECRET")
-
 GW_API_KEY = _env("RHOBEAR_GW_API_KEY")               # optional: agent self-drive
 
 # Central auth — identity comes from auth.rhobear.ai
 RHOBEAR_AUTH_BASE = _env("RHOBEAR_AUTH_BASE", "https://auth.rhobear.ai")
-
-# Billing is "configured" if EITHER checkout path is usable. The session-creation
-# path (canon) needs the secret key + price id; legacy needs a static URL.
-_BILLING_SESSION_READY = bool(STRIPE_SECRET_KEY and CAPTURD_PRICE_ID)
-_BILLING_LEGACY_READY = bool(PRO_CHECKOUT_URL)
 
 # Enterprise self-host: this whole service IS the enterprise edition when run on
 # the customer's own box. No separate build — same code, self-hosted.
@@ -116,9 +98,6 @@ EDITION = _env("CAPTURD_EDITION", "hosted")           # hosted | enterprise
 def status() -> dict:
     """Honest readiness — what's wired vs what waits on the owner's credentials."""
     return {
-        "billing_configured": bool(_BILLING_SESSION_READY or _BILLING_LEGACY_READY),
-        "billing_session_creation": _BILLING_SESSION_READY,
-        "webhook_configured": bool(BILLING_WEBHOOK_SECRET),
         "gateway_configured": bool(GW_API_KEY),
         "edition": EDITION,
     }

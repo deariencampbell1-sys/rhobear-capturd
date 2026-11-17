@@ -2,7 +2,7 @@
 
 Full lifecycle: auth → load-protection gates → render → deliver. Serves its
 own frontend. Reuses render_worker (cost cap) + the Director rig. Everything works
-end-to-end today except the owner's payment credentials (see billing.py / config.py).
+end-to-end today; the plan comes from central auth (the monthly plan is L2's).
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ APP_DIR = Path(__file__).resolve().parent
 SERVICE_DIR = APP_DIR.parent
 sys.path.insert(0, str(SERVICE_DIR))
 
-from app import auth, billing, config, store            # noqa: E402
+from app import auth, config, store                     # noqa: E402
 from app._http import read_json                          # noqa: E402
 from app.auth import current_user, require_user          # noqa: E402
 from capturd._net import is_private_ip                   # noqa: E402
@@ -111,7 +111,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Captur'd", lifespan=lifespan)
 app.include_router(auth.router)
-app.include_router(billing.router)
 
 
 @app.get("/healthz")

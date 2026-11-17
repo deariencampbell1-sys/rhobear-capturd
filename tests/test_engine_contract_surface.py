@@ -279,7 +279,7 @@ def test_service_reports_the_same_contract(server, service):
     assert body["engine_contract"]["ok"] is True
     assert {k: v for k, v in mcp_answer.items() if k != "manifestPath"} == body["engine_contract"]
     # /healthz keeps every field its current consumers read
-    assert "billing_configured" in body and "edition" in body
+    assert "edition" in body
 
 
 # ---------------------------------------------------------------------------

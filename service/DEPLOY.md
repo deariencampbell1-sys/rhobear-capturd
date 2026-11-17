@@ -1,8 +1,8 @@
 # Captur'd hosted service — deploy + go-live
 
-The service is **built, running, and proven end-to-end** (auth → generate → render → deliver →
-plan gate → billing → Pro unlock, all verified locally including the money-in path with stand-in
-credentials). This is the turn-key runbook to put it live.
+The service runs end-to-end locally (central-auth sign-in → generate → render → deliver). There is
+no separate Captur'd checkout or Pro unlock: the plan comes from central auth, and the monthly plan
+and bank are L2's.
 
 ## Run it locally (works right now)
 ```
@@ -15,13 +15,11 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8099
 
 | Step | Who | What |
 |---|---|---|
-| **Payment link** | **Owner** | Create a Stripe Payment Link (or PayPal subscribe URL) for Pro $19/mo → set `PRO_CHECKOUT_URL`. This is the buy button. |
-| **Webhook secret** | **Owner** | Stripe → webhook to `https://<domain>/billing/webhook` for `checkout.session.completed` → set `BILLING_WEBHOOK_SECRET`. Flips payers to Pro automatically. |
 | **Google OAuth** | **Owner** | OAuth client (redirect `https://<domain>/auth/google/callback`) → `GOOGLE_CLIENT_ID/SECRET`. (Dev login covers everything until then.) |
 | **Domain (G2)** | **Owner** | Point `capturd.rhobear.ai` (or chosen host) at the deploy box; set `CAPTURD_BASE_URL`. |
 | **Deploy target** | **Owner call** | Dedicated box **recommended** — render jobs peg CPU for minutes and would compete with the other live products on rhobear-vps. Don't co-locate on the shared prod box without accepting that risk. |
 
-Everything else is done. Drop the four env values, point the domain, and it takes money.
+Point the domain and set the base URL.
 
 ## Deploy (dedicated box or container)
 

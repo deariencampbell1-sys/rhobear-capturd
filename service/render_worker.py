@@ -15,8 +15,8 @@ What's real today:
 What plugs in later (documented, not faked):
   * Auto shot-list generation from {url, template} via the Director brain
     (scout → plan) — today run_job takes an explicit shot JSON like film.py does.
-  * HTTP API (see API.md), auth (Google OAuth), billing gate (Stripe), and the
-    dashboard wiring. None of those are money-in and none are built here yet.
+  * HTTP API (see API.md, built in app/), central-auth sign-in, and L2
+    metering (blocked on L2). There is no separate Captur'd checkout.
 
 CLI:  python render_worker.py <job.json>
 """
