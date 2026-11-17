@@ -1323,6 +1323,14 @@ class DemoRecorder:
         logger.info("demo recorder started: session=%s url=%s voice=%s headful=%s",
                      self.session_id, self.url, voice_ok, self.headful)
 
+    def request_stop(self) -> None:
+        """Ask a running agent session to stop at its next turn boundary.
+
+        The agent loop then tears the browser down and writes demo.json
+        itself; this only raises the flag, so it is safe from any thread.
+        """
+        self._stopped.set()
+
     def stop(self) -> DemoSpec:
         """Stop the recorder from any thread/loop and return the persisted spec.
 

@@ -78,6 +78,9 @@ def viewer_template_path() -> Path:
 # ---------------------------------------------------------------------------
 
 
+CANCELLED_MARKER = "cancelled.json"
+
+
 class DemoNotFound(DemoForgeError):
     pass
 
@@ -296,8 +299,26 @@ class DemoForge:
             self._demo_to_job[safe] = job_id
         return self.enrich_manager.get_status(job_id)
 
+    def mark_cancelled(self, demo_id: str, step_count: int) -> dict[str, Any]:
+        """Record that a recording was cancelled: its steps are a partial demo."""
+        marker = {"cancelled": True, "partial": True, "stepCount": step_count,
+                  "cancelledAt": datetime.now(timezone.utc).isoformat()}
+        (self.demo_dir(self._safe_demo_id(demo_id)) / CANCELLED_MARKER).write_text(
+            json.dumps(marker), encoding="utf-8")
+        return marker
+
     def get_status(self, demo_id: str) -> dict[str, Any]:
-        """Return a uniform status payload for a demo (across job or on-disk)."""
+        """Return a uniform status payload for a demo (across job or on-disk).
+
+        A cancelled recording also carries ``cancelled``/``partial: True``.
+        """
+        status = self._status(demo_id)
+        marker = self.demo_dir(status["demoId"]) / CANCELLED_MARKER
+        if marker.is_file():
+            status.update(cancelled=True, partial=True)
+        return status
+
+    def _status(self, demo_id: str) -> dict[str, Any]:
         safe = self._safe_demo_id(demo_id)
         job = self._resolve_demo_job(safe)
         if job is not None:

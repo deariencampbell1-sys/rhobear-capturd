@@ -500,6 +500,49 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
             "summary": _summary_hint(spec),
         }
 
+    # ---- demo.cancel ------------------------------------------------------
+
+    @mcp.tool(
+        name="demo.cancel",
+        description=(
+            "Cancel a recording session. The browser and its child processes "
+            "are shut down, the steps captured so far are kept on disk as a "
+            "partial demo, and no enrichment starts. An agent session stops at "
+            "its next step boundary. Cancelling a session that already ended "
+            "answers ok:false code:too_late and changes nothing."
+        ),
+        timeout=120.0,
+    )
+    async def demo_cancel(session_id: str) -> dict[str, Any]:
+        if not session_id:
+            raise ValueError("sessionId is required")
+        live = _live_sessions.get(session_id)
+        if live is None:
+            try:
+                status = forge.get_status(session_id)
+            except (DemoNotFound, DemoForgeError):
+                raise ValueError(f"unknown recording session: {session_id}")
+            return {"ok": False, "code": "too_late", "demoId": session_id,
+                    "detail": "the session already ended; nothing changed",
+                    "status": status}
+        recorder = live["recorder"]
+        if live["mode"] == "agent":
+            recorder.request_stop()
+            await asyncio.to_thread(live["thread"].join, 90.0)
+            if live["thread"].is_alive():
+                raise RuntimeError("agent session did not stop within 90s; call demo.cancel again")
+            spec = recorder.get_spec()
+        else:
+            try:
+                spec = await asyncio.wait_for(asyncio.to_thread(recorder.stop), timeout=60.0)
+            except DemoRecorderError as exc:
+                raise ValueError(str(exc)) from exc
+        forge.discard_recorder(session_id)
+        _live_sessions.pop(session_id, None)
+        marker = forge.mark_cancelled(spec.id, len(spec.steps))
+        return {"ok": True, "demoId": spec.id, "status": "cancelled",
+                "partial": True, "stepCount": marker["stepCount"]}
+
     # ---- demo.status ------------------------------------------------------
 
     @mcp.tool(
