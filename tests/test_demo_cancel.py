@@ -112,3 +112,41 @@ def test_cancel_of_an_unknown_session_is_refused(tmp_path):
     server = server_mod._build_server(DemoForge(demos_dir=tmp_path / "demos"))
     with pytest.raises(Exception, match="unknown recording session"):
         asyncio.run(server.call_tool("demo.cancel", {"session_id": "nope"}))
+
+
+@linux_only
+def test_cancel_interrupts_blocked_agent_and_preserves_partial(tmp_path, fixture_url, monkeypatch):
+    import capturd.walk.ai_pipeline as ai
+
+    entered = threading.Event()
+    release = threading.Event()
+    monkeypatch.setattr(ai, '_build_client', lambda: object())
+    async def blocked_vision(*args, **kwargs):
+        entered.set()
+        release.wait(20)
+        return '{"action":"done"}'
+    monkeypatch.setattr(ai, '_llm_vision', blocked_vision)
+    original_join = threading.Thread.join
+    def short_join(thread, timeout=None):
+        if thread.name.startswith('demo-agent-') and timeout == 90.0:
+            timeout = 0.1
+        return original_join(thread, timeout)
+    monkeypatch.setattr(threading.Thread, 'join', short_join)
+    forge = DemoForge(demos_dir=tmp_path / 'demos')
+    server = server_mod._build_server(forge)
+    before = _descendants()
+    try:
+        started = _call(server, 'demo.record', {'url': fixture_url, 'name': 'c', 'goal': 'g', 'mode': 'agent', 'visible': False})
+        session = started['sessionId']
+        assert entered.wait(15), 'agent did not enter blocked turn'
+        assert _descendants() - before, 'agent did not start a browser'
+        cancelled = _call(server, 'demo.cancel', {'session_id': session})
+        assert cancelled['partial'] is True
+        deadline = time.monotonic() + 5
+        while _descendants() - before and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert not _descendants() - before
+        status = forge.get_status(session)
+        assert status['partial'] and status['status'] != 'enriched'
+    finally:
+        release.set()
