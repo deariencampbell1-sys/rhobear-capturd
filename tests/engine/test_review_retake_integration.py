@@ -34,3 +34,15 @@ def test_replacing_approved_recaptured_file_blocks_export(tmp_path):
     path.write_bytes(b'replaced')
     with pytest.raises(DemoExportBlocked):
         forge.export_demo('demo1', fmt='html')
+
+
+def test_replaced_recapture_reopens_approval_with_history(tmp_path):
+    forge = _forge(tmp_path, pngs=(PNG_A,))
+    store = TakeStore(forge)
+    first = store.open_review('demo1')['takes'][0]
+    recaptured = store.recapture('demo1', 0, 0, pixels=PNG_B, expected_revision=first['sourceRevision'])
+    store.approve('demo1', 0, 1, by='Neo', expected_revision=recaptured['sourceRevision'])
+    (forge.demo_dir('demo1') / store.selected_sources('demo1')[0]).write_bytes(b'replaced')
+    review = store.open_review('demo1')
+    assert review['takes'][1]['state'] == 'ready'
+    assert review['history'][-1]['from'] == 'approved'
