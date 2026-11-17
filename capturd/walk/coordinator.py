@@ -81,6 +81,7 @@ def viewer_template_path() -> Path:
 
 
 CANCELLED_MARKER = "cancelled.json"
+INCOMPLETE_MARKER = "recording-incomplete"
 
 
 class DemoNotFound(DemoForgeError):
@@ -236,7 +237,9 @@ class DemoForge:
                     demo_id=entry.name,
                     name=data.get("name") or "",
                     step_count=len(steps),
-                    status="enriched" if enriched else "recorded",
+                    status=("cancelled" if (entry / CANCELLED_MARKER).is_file() else
+                            "partial" if (entry / INCOMPLETE_MARKER).is_file() else
+                            "enriched" if enriched else "recorded"),
                     created_at=data.get("createdAt") or "",
                     has_voiceover=any((s.get("voiceoverBase64") for s in steps)),
                 )
@@ -295,6 +298,8 @@ class DemoForge:
         for the same demo, the existing job is returned (idempotent).
         """
         safe = self._safe_demo_id(demo_id)
+        if any((self.demo_dir(safe) / marker).is_file() for marker in (CANCELLED_MARKER, INCOMPLETE_MARKER)):
+            raise DemoForgeError("partial demo cannot be enriched")
         with self._lock:
             existing = self._demo_to_job.get(safe)
         if existing:
@@ -325,7 +330,9 @@ class DemoForge:
         status = self._status(demo_id)
         marker = self.demo_dir(status["demoId"]) / CANCELLED_MARKER
         if marker.is_file():
-            status.update(cancelled=True, partial=True)
+            status.update(cancelled=True, partial=True, status="cancelled")
+        elif (self.demo_dir(status["demoId"]) / INCOMPLETE_MARKER).is_file():
+            status.update(partial=True, status="partial")
         return status
 
     def _status(self, demo_id: str) -> dict[str, Any]:
@@ -655,6 +662,8 @@ class DemoForge:
         viewer is driven frame-by-frame in headless Chromium and encoded by
         ffmpeg; voiceover audio is muxed at the timeline offsets.
         """
+        if any((self.demo_dir(demo_id) / marker).is_file() for marker in (CANCELLED_MARKER, INCOMPLETE_MARKER)):
+            raise DemoForgeError("partial demo cannot be exported as complete")
         fmt = (fmt or "html").lower()
         if fmt not in {"html", "mp4", "gif"}:
             raise DemoForgeError(f"unsupported export format: {fmt!r}")
