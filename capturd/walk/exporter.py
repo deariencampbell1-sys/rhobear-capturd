@@ -449,12 +449,18 @@ def _write_captions(steps: list[dict[str, Any]], audio_plan: list[dict[str, Any]
     """WebVTT + transcript beside the video, from the real narration only."""
     from capturd.walk.captions import build_cues, to_transcript, to_webvtt
 
+    from capturd._safe_files import atomic_write, safe_unlink
+
     cues = build_cues(steps, audio_plan)
+    vtt = out_path.with_suffix(".vtt")
+    transcript = out_path.with_name(out_path.stem + ".transcript.txt")
     if not cues:
+        safe_unlink(vtt)
+        safe_unlink(transcript)
         return
-    out_path.with_suffix(".vtt").write_text(to_webvtt(cues), encoding="utf-8")
-    out_path.with_name(out_path.stem + ".transcript.txt").write_text(
-        to_transcript(steps), encoding="utf-8")
+    included = {entry["stepIndex"] for entry in audio_plan}
+    atomic_write(vtt, to_webvtt(cues).encode("utf-8"))
+    atomic_write(transcript, to_transcript([step for i, step in enumerate(steps) if i in included]).encode("utf-8"))
 
 
 def export_video(
@@ -495,6 +501,7 @@ def export_video(
             _encode_gif(ffmpeg, frames_dir, fps, out_path)
         else:
             audio_clips: list[tuple[Path, int]] = []
+            included_plan: list[dict[str, Any]] = []
             steps = spec.get("steps") or []
             for entry in audio_plan:
                 idx = entry.get("stepIndex")
@@ -506,13 +513,17 @@ def export_video(
                     continue
                 clip = frames_dir / f"voice_{idx:03d}.mp3"
                 try:
-                    clip.write_bytes(base64.b64decode(b64))
+                    audio = base64.b64decode(b64, validate=True)
+                    if not audio:
+                        continue
+                    clip.write_bytes(audio)
                 except (ValueError, OSError) as exc:
                     logger.warning("skipping voiceover for step %d: %s", idx, exc)
                     continue
                 audio_clips.append((clip, at_ms))
+                included_plan.append(entry)
             _encode_mp4(ffmpeg, frames_dir, fps, duration_s, out_path, audio_clips)
-            _write_captions(steps, audio_plan, out_path)
+            _write_captions(steps, included_plan, out_path)
             _write_chapters(steps, frames_dir / PLAN_FILE, out_path)
 
     # The existence check and the size read are one mapped step: a file that
