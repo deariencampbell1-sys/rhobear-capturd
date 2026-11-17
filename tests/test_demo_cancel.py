@@ -112,3 +112,85 @@ def test_cancel_of_an_unknown_session_is_refused(tmp_path):
     server = server_mod._build_server(DemoForge(demos_dir=tmp_path / "demos"))
     with pytest.raises(Exception, match="unknown recording session"):
         asyncio.run(server.call_tool("demo.cancel", {"session_id": "nope"}))
+
+
+@linux_only
+def test_cancel_interrupts_blocked_agent_and_preserves_partial(tmp_path, fixture_url, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+
+    class BlockedGateway(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get('Content-Length', '0')))
+            entered.set()
+            release.wait(20)
+        def log_message(self, *args):
+            pass
+
+    gateway = http.server.ThreadingHTTPServer(('127.0.0.1', 0), BlockedGateway)
+    threading.Thread(target=gateway.serve_forever, daemon=True).start()
+    monkeypatch.setenv('RHOBEAR_GW_API_KEY', 'test-only')
+    monkeypatch.setenv('RHOBEAR_GW_BASE_URL', f'http://127.0.0.1:{gateway.server_port}/v1')
+    import signal
+    signals = []
+    killpg = os.killpg
+    def ignore_term(pid, sig):
+        signals.append(sig)
+        if sig != signal.SIGTERM:
+            killpg(pid, sig)
+    monkeypatch.setattr(server_mod.os, 'killpg', ignore_term)
+    forge = DemoForge(demos_dir=tmp_path / 'demos')
+    server = server_mod._build_server(forge)
+    before = _descendants()
+    try:
+        started = _call(server, 'demo.record', {'url': fixture_url, 'name': 'c', 'goal': 'g', 'mode': 'agent', 'visible': False})
+        session = started['sessionId']
+        assert entered.wait(15), 'agent did not enter blocked turn'
+        assert _descendants() - before, 'agent did not start a browser'
+        cancelled = _call(server, 'demo.cancel', {'session_id': session})
+        assert cancelled['partial'] is True
+        assert signal.SIGTERM in signals and signal.SIGKILL in signals
+        deadline = time.monotonic() + 5
+        while _descendants() - before and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert not _descendants() - before
+        status = forge.get_status(session)
+        assert status['partial'] and status['status'] != 'enriched'
+        with pytest.raises(Exception, match='(?i)(cancel|partial)'):
+            forge.export_demo(session)
+    finally:
+        release.set()
+        gateway.shutdown()
+
+
+@linux_only
+def test_agent_process_can_finish_and_stop_normally(tmp_path, fixture_url, monkeypatch):
+    import json
+    class Gateway(http.server.BaseHTTPRequestHandler):
+        count = 0
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get('Content-Length', '0')))
+            type(self).count += 1
+            reply = {'action': 'click', 'selector': '#signup-btn'} if self.count == 1 else {'action': 'done'}
+            body = json.dumps({'choices': [{'message': {'content': json.dumps(reply)}}]}).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        def log_message(self, *args):
+            pass
+    gateway = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Gateway)
+    threading.Thread(target=gateway.serve_forever, daemon=True).start()
+    monkeypatch.setenv('RHOBEAR_GW_API_KEY', 'test-only')
+    monkeypatch.setenv('RHOBEAR_GW_BASE_URL', f'http://127.0.0.1:{gateway.server_port}/v1')
+    forge = DemoForge(demos_dir=tmp_path / 'demos')
+    monkeypatch.setattr(forge, 'enrich_demo', lambda demo_id: {'status': 'pending', 'jobId': 'j'})
+    server = server_mod._build_server(forge)
+    try:
+        started = _call(server, 'demo.record', {'url': fixture_url, 'name': 'c', 'goal': 'g', 'mode': 'agent', 'visible': False})
+        stopped = _call(server, 'demo.stop', {'session_id': started['sessionId']})
+        assert stopped['stepCount'] >= 1
+        assert stopped['status'] != 'failed'
+        assert not (forge.demo_dir(started['sessionId']) / 'recording-incomplete').exists()
+    finally:
+        gateway.shutdown()
