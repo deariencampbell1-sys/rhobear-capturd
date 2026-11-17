@@ -110,18 +110,18 @@ def test_same_inputs_same_revision_and_a_change_is_a_new_revision(tmp_path):
 
 def test_approved_needs_the_whole_approval(tmp_path):
     forge = _approved_demo(tmp_path)
-    manifest, _ = _build(forge, approved_by="Neo", watched_complete=True)
+    manifest, _ = _build(forge, approved_by="Neo", watched_complete=True, privacy_reviewed=True)
     assert manifest["publicationState"] == "approved"
     assert manifest["approval"]["approvedBy"] == "Neo" and manifest["approval"]["watchedComplete"] is True
     with pytest.raises(PackageError, match="watched"):
-        _build(forge, approved_by="Neo", watched_complete=False)
+        _build(forge, approved_by="Neo", watched_complete=False, privacy_reviewed=True)
 
 
 def test_approved_needs_captions_and_transcript(tmp_path):
     forge = _approved_demo(tmp_path)
     (forge.demo_dir("d") / "walkthrough.vtt").unlink()
     with pytest.raises(PackageError, match="captions"):
-        _build(forge, approved_by="Neo", watched_complete=True)
+        _build(forge, approved_by="Neo", watched_complete=True, privacy_reviewed=True)
 
 
 def test_unapproved_takes_block_the_package(tmp_path):

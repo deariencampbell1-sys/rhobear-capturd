@@ -16,6 +16,9 @@ publishes anything.
   gives a new one; an existing revision folder is never rewritten.
 * `contentHash`: SHA-256 of the canonical manifest JSON (sorted keys, no
   whitespace) without the `contentHash` key.
+* Privacy: `privacy.scan_demo` over the demo's texts and the caption and
+  transcript files; any finding refuses the package. `approved` also needs a
+  person's `privacy_reviewed` for the frames (no OCR here).
 * `approved` requires a named approver, `watchedComplete: true`, captions and
   a transcript; without an approver the package is `pending`.
 """
@@ -32,6 +35,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from capturd.engine.take_store import TakeStore
+from capturd.walk.privacy import scan_demo
 
 SCHEMA = "rhobear.demo-package.v1"
 _REVISION = re.compile(r"[0-9a-f]{40}")
@@ -87,6 +91,7 @@ def _check_base(base_url: str) -> str:
 def build_package(forge: Any, demo_id: str, *, scenario_id: str, engine_or_product: str,
                   source_app: str, source_revision: str, base_url: str,
                   approved_by: str | None = None, watched_complete: bool = False,
+                  privacy_reviewed: bool = False,
                   approved_at: str | None = None) -> tuple[dict[str, Any], Path]:
     if not _REVISION.fullmatch(source_revision or ""):
         raise PackageError("source_revision must be 40 lowercase hex")
@@ -110,12 +115,22 @@ def build_package(forge: Any, demo_id: str, *, scenario_id: str, engine_or_produ
     if missing:
         raise PackageError(f"export the MP4 first; missing {missing}")
 
+    texts = {role: present[role].read_text(encoding="utf-8", errors="replace")
+             for role in ("captions", "transcript") if role in present}
+    findings = scan_demo(forge.load_spec(demo_id), texts=texts)
+    if findings:
+        raise PackageError("privacy check found possible secrets; retake or redact: " + "; ".join(
+            f"{f['where']}: {f['kind']}" for f in findings))
+
     approved = approved_by is not None
     if approved:
         if not isinstance(approved_by, str) or not approved_by.strip():
             raise PackageError("an approval names its person")
         if watched_complete is not True:
             raise PackageError("approval requires the whole result watched (watchedComplete)")
+        if privacy_reviewed is not True:
+            raise PackageError("approval requires a person to confirm all frames were checked "
+                               "for private material (privacy_reviewed)")
         if "captions" not in present or "transcript" not in present:
             raise PackageError("approval requires captions and a transcript (narrate the demo)")
         approved_at = approved_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -149,7 +164,9 @@ def build_package(forge: Any, demo_id: str, *, scenario_id: str, engine_or_produ
         "captionsUrl": url("captions") if "captions" in present else None,
         "transcriptUrl": url("transcript") if "transcript" in present else None,
         "evidence": {"inputs": {"takes": takes}, "runIds": [demo_id],
-                     "artifactHashes": list(hashes.values())},
+                     "artifactHashes": list(hashes.values()),
+                     "privacyCheck": {"automated": "clean",
+                                      "framesReviewedBy": approved_by if approved else None}},
         "approval": ({"approvedBy": approved_by, "approvedAt": approved_at, "watchedComplete": True}
                      if approved else None),
         "immutableUrls": True,

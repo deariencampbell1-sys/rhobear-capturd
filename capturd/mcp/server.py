@@ -752,20 +752,24 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
             "captions, transcript, chapters, interactive HTML and manifest.json "
             "under package/<packageRevision>/. Nothing is uploaded or published. "
             "base_url is the https location the folder will be served from. Pass "
-            "approved_by and watched_complete=true only after a person watched the "
-            "whole result; otherwise the package is pending."
+            "approved_by, watched_complete=true and privacy_reviewed=true only "
+            "after a person watched the whole result and checked every frame for "
+            "private material; otherwise the package is pending. Texts are "
+            "scanned for secrets automatically and a finding refuses the package."
         ),
     )
     async def demo_package(demo_id: str, scenario_id: str, engine_or_product: str,
                            source_app: str, source_revision: str, base_url: str,
                            approved_by: str | None = None,
-                           watched_complete: bool = False) -> dict[str, Any]:
+                           watched_complete: bool = False,
+                           privacy_reviewed: bool = False) -> dict[str, Any]:
         try:
             manifest, folder = await asyncio.to_thread(
                 build_package, forge, demo_id, scenario_id=scenario_id,
                 engine_or_product=engine_or_product, source_app=source_app,
                 source_revision=source_revision, base_url=base_url,
-                approved_by=approved_by, watched_complete=watched_complete)
+                approved_by=approved_by, watched_complete=watched_complete,
+                privacy_reviewed=privacy_reviewed)
         except DemoNotFound:
             raise ValueError(f"demo not found: {demo_id}")
         except PackageError as exc:
