@@ -99,3 +99,46 @@ def test_no_narration_writes_no_caption_file(tmp_path, monkeypatch):
     html.write_text("<html></html>")
     exporter.export_video({"steps": [{"index": 0}]}, html, tmp_path / "walkthrough.mp4")
     assert not (tmp_path / "walkthrough.vtt").exists()
+
+
+def test_export_captions_only_include_clips_passed_to_encoder(tmp_path, monkeypatch):
+    monkeypatch.setattr(exporter, "find_ffmpeg", lambda: "ffmpeg")
+    async def capture(*args):
+        return 2, 5.0, [{"stepIndex": i, "atMs": i * 1000} for i in range(3)]
+    monkeypatch.setattr(exporter, "_capture_frames", capture)
+    received = []
+    def encode(*args):
+        received.extend(args[-1])
+        args[4].write_bytes(b"mp4")
+    monkeypatch.setattr(exporter, "_encode_mp4", encode)
+    html = tmp_path / "viewer.html"
+    html.write_text("viewer")
+    steps = [
+        {"voiceoverWords": _words(("Spoken", 0, 500)), "voiceoverBase64": "YXVkaW8="},
+        {"voiceoverWords": _words(("Missing", 0, 500))},
+        {"voiceoverWords": _words(("Invalid", 0, 500)), "voiceoverBase64": "!!!"},
+    ]
+    exporter.export_video({"steps": steps}, html, tmp_path / "walkthrough.mp4")
+    assert len(received) == 1
+    assert "Spoken" in (tmp_path / "walkthrough.vtt").read_text()
+    assert "Missing" not in (tmp_path / "walkthrough.vtt").read_text()
+    assert "Invalid" not in (tmp_path / "walkthrough.vtt").read_text()
+    assert (tmp_path / "walkthrough.transcript.txt").read_text() == "Spoken\n"
+
+
+def test_silent_reexport_removes_previous_caption_sidecars(tmp_path, monkeypatch):
+    monkeypatch.setattr(exporter, "find_ffmpeg", lambda: "ffmpeg")
+    async def capture(*args):
+        return 2, 2.0, [{"stepIndex": 0, "atMs": 0}]
+    monkeypatch.setattr(exporter, "_capture_frames", capture)
+    monkeypatch.setattr(exporter, "_encode_mp4", lambda *a: a[4].write_bytes(b"mp4"))
+    html = tmp_path / "viewer.html"
+    html.write_text("viewer")
+    out = tmp_path / "walkthrough.mp4"
+    narrated = {"steps": [{"voiceoverWords": _words(("Narrated", 0, 500)), "voiceoverBase64": "YXVkaW8="}]}
+    exporter.export_video(narrated, html, out)
+    assert out.with_suffix(".vtt").exists()
+    assert out.with_name("walkthrough.transcript.txt").exists()
+    exporter.export_video({"steps": [{"voiceoverWords": _words(("Narrated", 0, 500))}]}, html, out)
+    assert not out.with_suffix(".vtt").exists()
+    assert not out.with_name("walkthrough.transcript.txt").exists()
