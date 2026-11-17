@@ -833,7 +833,8 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
             "Direction-only retake of one shot: keeps the exact pixels "
             "(same sourceRevision) and makes a new ready take with the new "
             "direction. direction = {caption: the on-screen line, note: the "
-            "person's own words, camera: 'semantic'}; other fields are refused "
+            "person's own words, camera: 'semantic', holdMs: 0-10000, effect: "
+            "'spotlight'|'none'}; other fields are refused "
             "by name. The shot keeps its selected take until a person approves "
             "the new one with take.approve."
         ),

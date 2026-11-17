@@ -65,11 +65,14 @@ class DirectionError(TakeStoreError):
 
 #: The direction fields a take can carry today, each one rendered or kept:
 #: `caption` replaces the step's on-screen line in the export, `note` keeps the
-#: person's own words for the agent, `camera` is the semantic camera. Voice,
-#: cursor, effect and transition direction are refused by name until the
-#: export renders them (GAPS-NOW M6).
-_CAPTION_MAX, _NOTE_MAX = 500, 2000
+#: person's own words for the agent, `camera` is the semantic camera, `holdMs`
+#: and `effect: "spotlight"` become the viewer's own hold and spotlight
+#: keyframes for the shot. Voice, cursor and transition direction are refused
+#: by name until the export renders them (GAPS-NOW M6).
+_CAPTION_MAX, _NOTE_MAX, _HOLD_MAX_MS = 500, 2000, 10_000
 _CAMERAS = ("semantic",)
+_EFFECTS = ("none", "spotlight")
+_FIELDS = ("caption", "note", "camera", "holdMs", "effect")
 
 
 def validate_direction(direction: Any) -> dict[str, Any]:
@@ -77,7 +80,7 @@ def validate_direction(direction: Any) -> dict[str, Any]:
     if not isinstance(direction, dict) or not direction:
         raise DirectionError("direction", "is a non-empty object")
     for field in direction:
-        if field not in ("caption", "note", "camera"):
+        if field not in _FIELDS:
             raise DirectionError(field, "is not a direction this engine renders yet")
     for field, limit in (("caption", _CAPTION_MAX), ("note", _NOTE_MAX)):
         value = direction.get(field)
@@ -86,8 +89,31 @@ def validate_direction(direction: Any) -> dict[str, Any]:
     camera = direction.get("camera", "semantic")
     if camera not in _CAMERAS:
         raise DirectionError("camera", f"is one of {list(_CAMERAS)}")
-    return {"caption": direction.get("caption"), "note": direction.get("note"),
-            "camera": camera}
+    hold = direction.get("holdMs")
+    if hold is not None and (not isinstance(hold, int) or isinstance(hold, bool)
+                             or not 0 <= hold <= _HOLD_MAX_MS):
+        raise DirectionError("holdMs", f"is whole milliseconds from 0 to {_HOLD_MAX_MS}")
+    effect = direction.get("effect", "none")
+    if effect not in _EFFECTS:
+        raise DirectionError("effect", f"is one of {list(_EFFECTS)}")
+    clean = {"caption": direction.get("caption"), "note": direction.get("note"), "camera": camera}
+    if hold is not None:
+        clean["holdMs"] = hold
+    if effect != "none" or "effect" in direction:
+        clean["effect"] = effect
+    return clean
+
+
+def direction_keyframes(shot: int, direction: dict[str, Any], target: str) -> list[dict[str, Any]]:
+    """The viewer keyframes a direction asks for on one shot (none for none)."""
+    frames = []
+    if direction.get("effect") == "spotlight":
+        frames.append({"stepIndex": shot, "action": "spotlightOn", "target": target,
+                       "duration": 500, "easing": "ease-in-out"})
+    if direction.get("holdMs"):
+        frames.append({"stepIndex": shot, "action": "hold", "duration": direction["holdMs"],
+                       "easing": "linear"})
+    return frames
 
 
 def _now() -> str:

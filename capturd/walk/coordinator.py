@@ -706,7 +706,7 @@ class DemoForge:
         if not self.viewer_template.is_file():
             raise DemoForgeError(f"viewer template not found: {self.viewer_template}")
         data = self.load_spec(demo_id)
-        from capturd.engine.take_store import TakeStore
+        from capturd.engine.take_store import TakeStore, direction_keyframes
 
         review = TakeStore(self)
         blocks = review.export_blocks(demo_id)
@@ -715,9 +715,15 @@ class DemoForge:
         # The selected take's caption is the line that ships (the saved spec
         # itself is never changed by a take).
         steps = data.get("steps") or []
+        timeline = (data.setdefault("aiAnnotations", {})
+                    .setdefault("animationTimeline", []))
         for shot, direction in review.selected_directions(demo_id).items():
-            if 0 <= shot < len(steps) and direction.get("caption") is not None:
+            if not 0 <= shot < len(steps):
+                continue
+            if direction.get("caption") is not None:
                 steps[shot]["annotation"] = direction["caption"]
+            target = ((steps[shot].get("interaction") or {}).get("target") or {})
+            timeline.extend(direction_keyframes(shot, direction, target.get("selector") or "body"))
         for shot, name in review.selected_sources(demo_id).items():
             if 0 <= shot < len(steps):
                 steps[shot].update(screenshotPath=name, screenshotBase64=None,
