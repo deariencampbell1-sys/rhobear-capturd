@@ -79,7 +79,8 @@ def test_mp4_export_writes_captions_and_transcript_beside_the_video(tmp_path, mo
     monkeypatch.setattr(exporter, "_encode_mp4", fake_encode)
     html = tmp_path / "export.html"
     html.write_text("<html></html>")
-    out = exporter.export_video({"steps": STEPS}, html, tmp_path / "walkthrough.mp4")
+    narrated = [dict(step, voiceoverBase64="YXVkaW8=") for step in STEPS]
+    out = exporter.export_video({"steps": narrated}, html, tmp_path / "walkthrough.mp4")
     vtt = (tmp_path / "walkthrough.vtt").read_text()
     assert re.search(r"00:00:06\.000 --> ", vtt)
     assert (tmp_path / "walkthrough.transcript.txt").read_text() == to_transcript(STEPS)
