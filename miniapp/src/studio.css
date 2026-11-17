@@ -1,0 +1,9 @@
+:root { color-scheme: light dark; font-family: Lato, sans-serif; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+.studio { min-height: 100dvh; padding: 16px 16px max(24px, env(safe-area-inset-bottom)); }
+.studio header { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.studio h1 { font-family: Girassol, serif; }
+.stage { min-height: 220px; display: grid; place-items: center; border: 1px solid #3aa7ff; border-radius: 12px; padding: 16px; }
+:focus-visible { outline: 2px solid #3aa7ff; outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0s !important; transition-duration: 0s !important; } }
