@@ -503,3 +503,16 @@ def test_mcp_state_has_forge() -> None:
 
     server = _build_server()
     assert isinstance(server.state["forge"], DemoForge)  # type: ignore[index]
+
+
+def test_server_identity_is_capturd():
+    """GAPS-NOW W2: agents see `capturd`, at the manifest's engine version."""
+    from capturd import engine
+    from capturd.mcp.server import _build_server
+
+    manifest = engine.load_manifest()
+    server = _build_server()
+    assert server.name == manifest["engine"] == "capturd"
+    assert server.version == manifest["engineVersion"]
+    assert "DemoForge" not in (server.instructions or "")
+    assert manifest["displayName"] in server.instructions
