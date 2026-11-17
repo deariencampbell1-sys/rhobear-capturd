@@ -199,9 +199,14 @@ class DemoForge:
             raise DemoCorrupt(f"demo.json is not valid JSON: {exc}") from exc
 
     def save_spec(self, demo_id: str, data: dict[str, Any]) -> Path:
+        from capturd.engine.take_store import TakeStore
+        store = TakeStore(self)
+        had_review = store.review(demo_id) is not None
         path = self.demo_json_path(demo_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+        if had_review:
+            store.open_review(demo_id)
         return path
 
     def list_demos(self) -> list[DemoSummary]:
