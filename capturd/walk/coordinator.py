@@ -94,6 +94,20 @@ class DemoExportMissingSourceError(DemoExportError):
     """
 
 
+class DemoExportBlocked(DemoExportError):
+    """Contract §6: an open review has selected takes that are not exportable.
+
+    ``blocks`` is ``shots.export_blocked``'s list — each names the shot, the
+    take and what is needed. A blocked export is a normal state, not a crash.
+    """
+
+    def __init__(self, blocks: list[dict[str, Any]]):
+        needed = "; ".join(
+            f"shot {b['shotIndex']} take {b['takeIndex']}: {b['needed']}" for b in blocks)
+        super().__init__(f"export blocked until {needed}")
+        self.blocks = blocks
+
+
 
 # ---------------------------------------------------------------------------
 # DemoForge — the coordinator
@@ -616,6 +630,11 @@ class DemoForge:
         if not self.viewer_template.is_file():
             raise DemoForgeError(f"viewer template not found: {self.viewer_template}")
         data = self.load_spec(demo_id)
+        from capturd.engine.take_store import TakeStore
+
+        blocks = TakeStore(self).export_blocks(demo_id)
+        if blocks:
+            raise DemoExportBlocked(blocks)
         self._inline_screenshots(data, demo_id)
         # Carry the semantic target metadata into the embedded viewer so the
         # HTML export resolves the same camera as the recorder (W1-03-r1).
@@ -725,6 +744,7 @@ class DemoForge:
 __all__ = [
     "DEMOS_DIR_NAME",
     "DemoCorrupt",
+    "DemoExportBlocked",
     "DemoExportMissingSourceError",
     "DemoForge",
     "DemoForgeError",

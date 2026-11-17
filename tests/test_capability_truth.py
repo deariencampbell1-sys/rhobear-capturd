@@ -34,6 +34,6 @@ def test_the_readme_tool_list_is_the_server_tool_list():
 
     block = re.search(r"```text\n(# @capturd tools.*?)```", README, re.DOTALL)
     assert block, "README has no ```text block starting '# @capturd tools'"
-    listed = set(re.findall(r"\b(?:demo|capture|engine)\.[a-z_]+\b", block.group(1)))
+    listed = set(re.findall(r"\b(?:demo|capture|engine|take)\.[a-z_]+\b", block.group(1)))
     served = {tool.name for tool in asyncio.run(_build_server().list_tools())}
     assert listed == served, {"missing": sorted(served - listed), "extra": sorted(listed - served)}

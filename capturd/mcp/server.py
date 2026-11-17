@@ -62,10 +62,12 @@ from urllib.parse import urlparse
 
 from capturd._net import is_private_ip
 from capturd.engine.contract import engine_contract
+from capturd.engine.take_store import RevisionConflict, TakeStore, TakeStoreError
 from fastmcp import FastMCP
 
 from capturd.walk.recorder import DemoRecorderError
 from capturd.walk.coordinator import (
+    DemoExportBlocked,
     DemoForge,
     DemoForgeError,
     DemoNotFound,
@@ -635,6 +637,10 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
             )
         except DemoNotFound:
             raise ValueError(f"demo not found: {demo_id}")
+        except DemoExportBlocked as exc:
+            # §6: a blocked export is a normal, explainable state.
+            return {"ok": False, "error": "export_blocked", "demoId": demo_id,
+                    "blocks": exc.blocks, "detail": str(exc)}
         except DemoForgeError as exc:
             raise ValueError(str(exc))
         return {
@@ -642,6 +648,70 @@ def _build_server(forge: DemoForge | None = None) -> FastMCP:
             "demoId": demo_id,
             "format": fmt,
         }
+
+    # ---- take review (contract §2–§6) -------------------------------------
+
+    takes = TakeStore(forge)
+
+    def _take_call(fn, *args, **kwargs) -> dict[str, Any]:
+        try:
+            return {"ok": True, "take": fn(*args, **kwargs)}
+        except RevisionConflict as exc:
+            return {"ok": False, **exc.payload(), "detail": str(exc)}
+        except TakeStoreError as exc:
+            return {"ok": False, "code": "invalid", "detail": str(exc)}
+
+    @mcp.tool(
+        name="take.list",
+        description=(
+            "Open (on first call) or read a demo's review: one take per "
+            "recorded shot, each ready or failed, with its sourceRevision, "
+            "the selected take per shot, and what still blocks export. Once a "
+            "review is open, demo.export refuses until every selected take is "
+            "approved by a named person."
+        ),
+    )
+    async def take_list(demo_id: str) -> dict[str, Any]:
+        if not demo_id:
+            raise ValueError("demo_id is required")
+        try:
+            review = await asyncio.to_thread(takes.open_review, demo_id)
+        except DemoNotFound:
+            raise ValueError(f"demo not found: {demo_id}")
+        return {"ok": True, "demoId": demo_id, "takes": review["takes"],
+                "selection": {str(k): v for k, v in review["selection"].items()},
+                "exportBlocks": takes.export_blocks(demo_id)}
+
+    @mcp.tool(
+        name="take.approve",
+        description=(
+            "Approve one ready take. approved_by is the person approving "
+            "(never the agent); expected_revision is the take's "
+            "sourceRevision as you last saw it — a mismatch is a conflict and "
+            "changes nothing."
+        ),
+    )
+    async def take_approve(demo_id: str, shot_index: int, take_index: int,
+                           approved_by: str, expected_revision: str) -> dict[str, Any]:
+        return _take_call(takes.approve, demo_id, shot_index, take_index,
+                          by=approved_by, expected_revision=expected_revision)
+
+    @mcp.tool(
+        name="take.reject",
+        description="Reject one ready take with the reason; it stays in history.",
+    )
+    async def take_reject(demo_id: str, shot_index: int, take_index: int,
+                          reason: str) -> dict[str, Any]:
+        return _take_call(takes.reject, demo_id, shot_index, take_index, reason=reason)
+
+    @mcp.tool(
+        name="take.revoke",
+        description="Revoke an approval (who and why are recorded); the take returns to ready.",
+    )
+    async def take_revoke(demo_id: str, shot_index: int, take_index: int,
+                          revoked_by: str, reason: str) -> dict[str, Any]:
+        return _take_call(takes.revoke, demo_id, shot_index, take_index,
+                          by=revoked_by, reason=reason)
 
     # ---- W4: demo.zoom ---------------------------------------------------
 

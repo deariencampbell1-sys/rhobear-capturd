@@ -47,7 +47,7 @@ tidy a spec without changing an approved one.
 
 **Not supported yet, stated plainly:** canvas / WebGL / game pages are *detected and labelled*
 (`contentMode`), but there is no video-mode playback for them in the viewer or the export. Hosted
-metering, take review and publication are being built in this repo; see `GAPS-NOW.md`.
+metering, retakes and publication are being built in this repo; see `GAPS-NOW.md`.
 
 ### `capturd serve`: the `@capturd` MCP
 
@@ -62,6 +62,7 @@ demo.spotlight  demo.overlay                                    # composition
 demo.reorder    demo.trim     demo.branch                       # structure
 demo.stylize    demo.regenerate                                 # restyle
 demo.audit      demo.optimize demo.revision                     # check, tidy, revisions
+take.list       take.approve  take.reject     take.revoke       # shot review; export waits for approval
 engine.contract                                                 # manifest + contract version (also /healthz)
 ```
 

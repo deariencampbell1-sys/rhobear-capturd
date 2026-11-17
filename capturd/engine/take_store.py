@@ -1,0 +1,174 @@
+"""The local take store: one take file per demo, the §3 records on disk.
+
+The stdio `@capturd` adapter's durable review state (GAPS-NOW U1/M2). The
+demo id is the job id locally; the hosted job store is L8d's and this is not
+it. A review opens by seeding one take per recorded step: the take's
+`sourceRevision` is the SHA-1 of the step's pixels (40 lowercase hex, §3), a
+step without pixels is a `failed` take (never `ready`), and each shot selects
+take 0. Every write goes through `persistence.dumps` and an atomic replace,
+so a crash leaves the previous file whole.
+
+State moves are the engine's own: `approval.approve/reject/revoke`; the
+export gate is `shots.export_blocked` over the selected takes (§6).
+"""
+from __future__ import annotations
+
+import base64
+import binascii
+import hashlib
+import json
+import os
+import threading
+import uuid
+from datetime import datetime, timezone
+from typing import Any
+
+from . import approval, persistence
+from .shots import export_blocked
+from .takes import KIND, TakeError
+
+FILENAME = "takes.json"
+
+
+class TakeStoreError(ValueError):
+    """The review or the take named does not exist, or the move is refused."""
+
+
+class RevisionConflict(TakeStoreError):
+    """§4: `expectedRevision` is not the take's revision. No state changed."""
+
+    def __init__(self, expected: str, actual: str):
+        super().__init__(f"revision conflict: expected {expected!r}, take is at {actual!r}")
+        self.expected, self.actual = expected, actual
+
+    def payload(self) -> dict[str, Any]:
+        return {"code": "conflict",
+                "details": {"reason": "revision_conflict",
+                            "expected": self.expected, "actual": self.actual}}
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _seed_take(demo_id: str, shot: int, step: dict[str, Any], created_at: str) -> dict[str, Any]:
+    pixels = None
+    if step.get("screenshotBase64") and not step.get("screenshotError"):
+        try:
+            pixels = base64.b64decode(step["screenshotBase64"], validate=True)
+        except (binascii.Error, ValueError):
+            pixels = None
+    digest = hashlib.sha1(pixels if pixels else b"").hexdigest()
+    return {
+        "shotIndex": shot,
+        "takeIndex": 0,
+        "state": "ready" if pixels else "failed",
+        "jobId": demo_id,
+        "attemptId": f"att_{uuid.uuid4().hex}",
+        "sourceRevision": digest,
+        "sourceArtifactId": f"local_{digest[:16]}" if pixels else None,
+        "kind": KIND,
+        "direction": {"caption": step.get("annotation"), "voiceover": step.get("voiceover"),
+                      "camera": "semantic"},
+        "durationMs": None,
+        "createdAt": created_at,
+        "approvedBy": None,
+        "approvedAt": None,
+        "rejectedReason": None,
+        "revokedBy": None,
+        "revokedAt": None,
+        "revokedReason": None,
+    }
+
+
+class TakeStore:
+    """Review state for the demos one `DemoForge` owns."""
+
+    def __init__(self, forge: Any):
+        self._forge = forge
+        self._lock = threading.Lock()
+
+    # ---- file ------------------------------------------------------------
+
+    def _path(self, demo_id: str):
+        return self._forge.demo_dir(demo_id) / FILENAME
+
+    def _read(self, demo_id: str) -> dict[str, Any] | None:
+        path = self._path(demo_id)
+        if not path.is_file():
+            return None
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        return {"takes": [persistence.loads(text) for text in doc["takes"]],
+                "selection": {int(k): v for k, v in doc["selection"].items()}}
+
+    def _write(self, demo_id: str, review: dict[str, Any]) -> None:
+        path = self._path(demo_id)
+        doc = {"takes": [persistence.dumps(t) for t in review["takes"]],
+               "selection": {str(k): v for k, v in sorted(review["selection"].items())}}
+        tmp = path.with_name(f".{FILENAME}.{uuid.uuid4().hex}.tmp")
+        tmp.write_text(json.dumps(doc, indent=1), encoding="utf-8")
+        os.replace(tmp, path)
+
+    # ---- reads -----------------------------------------------------------
+
+    def review(self, demo_id: str) -> dict[str, Any] | None:
+        """The demo's take set and selection, or None if no review is open."""
+        return self._read(demo_id)
+
+    def open_review(self, demo_id: str) -> dict[str, Any]:
+        """Seed one take per step on first call; later calls return it as is."""
+        with self._lock:
+            existing = self._read(demo_id)
+            if existing is not None:
+                return existing
+            data = self._forge.load_spec(demo_id)
+            self._forge._inline_screenshots(data, demo_id)
+            at = _now()
+            takes = [_seed_take(demo_id, shot, step, at)
+                     for shot, step in enumerate(data.get("steps") or [])]
+            review = {"takes": takes, "selection": {t["shotIndex"]: 0 for t in takes}}
+            self._write(demo_id, review)
+            return review
+
+    def export_blocks(self, demo_id: str) -> list[dict[str, Any]] | None:
+        """§6 blocks for exporting the selected takes; None without a review."""
+        review = self._read(demo_id)
+        if review is None:
+            return None
+        shots = sorted({t["shotIndex"] for t in review["takes"]})
+        included = sorted(review["selection"].items())
+        return export_blocked(shots, review["takes"], review["selection"], included)
+
+    # ---- moves -----------------------------------------------------------
+
+    def _move(self, demo_id: str, shot: int, take: int, change) -> dict[str, Any]:
+        with self._lock:
+            review = self._read(demo_id)
+            if review is None:
+                raise TakeStoreError(f"no review is open for demo {demo_id!r}; call take.list first")
+            for i, record in enumerate(review["takes"]):
+                if record["shotIndex"] == shot and record["takeIndex"] == take:
+                    try:
+                        updated = change(record)
+                    except (approval.ApprovalError, TakeError) as exc:
+                        raise TakeStoreError(str(exc)) from exc
+                    review["takes"][i] = updated
+                    self._write(demo_id, review)
+                    return updated
+            raise TakeStoreError(f"demo {demo_id!r} has no shot {shot} take {take}")
+
+    def approve(self, demo_id: str, shot: int, take: int, *, by: str,
+                expected_revision: str) -> dict[str, Any]:
+        def change(record):
+            if expected_revision != record["sourceRevision"]:
+                raise RevisionConflict(expected_revision, record["sourceRevision"])
+            return approval.approve(record, by=by, at=_now(), source_revision=expected_revision)
+        return self._move(demo_id, shot, take, change)
+
+    def reject(self, demo_id: str, shot: int, take: int, *, reason: str) -> dict[str, Any]:
+        return self._move(demo_id, shot, take,
+                          lambda record: approval.reject(record, reason=reason))
+
+    def revoke(self, demo_id: str, shot: int, take: int, *, by: str, reason: str) -> dict[str, Any]:
+        return self._move(demo_id, shot, take,
+                          lambda record: approval.revoke(record, by=by, at=_now(), reason=reason))
