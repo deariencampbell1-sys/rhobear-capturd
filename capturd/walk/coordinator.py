@@ -234,31 +234,15 @@ class DemoForge:
         except json.JSONDecodeError as exc:
             raise DemoCorrupt(f"demo.json is not valid JSON: {exc}") from exc
 
-    def _guard_review(self, demo_id: str) -> None:
-        """W10: no spec change lands under an approved take.
-
-        Any approved take refuses the change by shot; with none approved the
-        open review is closed, and the next take.list seeds it from the new
-        spec.
-        """
-        from capturd.engine.take_store import FILENAME, TakeStore
-
-        review = TakeStore(self).review(demo_id)
-        if review is None:
-            return
-        approved = sorted({t["shotIndex"] for t in review["takes"] if t["state"] == "approved"})
-        if approved:
-            raise DemoReviewLocked(
-                "the review has approved takes on "
-                + ", ".join(f"shot {s}" for s in approved)
-                + "; revoke them first, or change one shot with take.retake / take.recapture")
-        (self.demo_dir(demo_id) / FILENAME).unlink(missing_ok=True)
-
     def save_spec(self, demo_id: str, data: dict[str, Any]) -> Path:
-        self._guard_review(demo_id)
+        from capturd.engine.take_store import TakeStore
+        store = TakeStore(self)
+        had_review = store.review(demo_id) is not None
         path = self.demo_json_path(demo_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+        if had_review:
+            store.open_review(demo_id)
         return path
 
     def list_demos(self) -> list[DemoSummary]:
@@ -342,7 +326,6 @@ class DemoForge:
         for the same demo, the existing job is returned (idempotent).
         """
         safe = self._safe_demo_id(demo_id)
-        self._guard_review(safe)
         with self._lock:
             existing = self._demo_to_job.get(safe)
         if existing:
