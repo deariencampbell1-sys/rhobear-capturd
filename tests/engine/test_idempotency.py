@@ -139,3 +139,34 @@ def test_crash_after_side_effect_is_not_replayed(tmp_path):
     with pytest.raises(Exception, match='(?i)(unknown|reconcil)'):
         OperationLedger(path).run('crash', {'tool': 'export', 'demo': 'd'}, lambda: counter.write_text('ran again'))
     assert counter.read_text() == 'run\n'
+
+
+def _crash_while_committing_result(path, counter):
+    import os
+    ledger = OperationLedger(path)
+    save = ledger._save
+    calls = 0
+    def crash_second_save(entries):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            os._exit(24)
+        save(entries)
+    ledger._save = crash_second_save
+    def work():
+        counter.write_text('completed')
+        return {'job': 'recoverable'}
+    ledger.run('commit-crash', {'tool': 'export', 'demo': 'd'}, work)
+
+
+def test_recovers_durable_result_after_commit_crash(tmp_path):
+    import multiprocessing
+    ctx = multiprocessing.get_context('fork')
+    path, counter = tmp_path / 'ops.json', tmp_path / 'completed'
+    process = ctx.Process(target=_crash_while_committing_result, args=(path, counter))
+    process.start()
+    process.join(10)
+    assert process.exitcode == 24
+    assert counter.read_text() == 'completed'
+    result = OperationLedger(path).run('commit-crash', {'tool': 'export', 'demo': 'd'}, lambda: pytest.fail('work reran'))
+    assert result == {'job': 'recoverable'}
