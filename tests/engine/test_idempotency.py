@@ -83,3 +83,58 @@ def test_demo_export_with_an_operation_id_is_idempotent(tmp_path, monkeypatch):
     assert a == b and exports == ["html"]
     clash = call({"demo_id": "d1", "format": "mp4", "operation_id": "op-e"})
     assert clash["ok"] is False and clash["code"] == "idempotency_mismatch"
+
+
+def _concurrent_process(path, counter, start, results):
+    import time
+    start.wait()
+    def work():
+        with open(counter, 'a') as stream:
+            stream.write('run\n')
+        time.sleep(0.25)
+        return {'job': 'once'}
+    try:
+        results.put(OperationLedger(path).run('shared', {'tool': 'export', 'demo': 'd'}, work))
+    except Exception as exc:
+        results.put({'error': str(exc)})
+
+
+def _crash_after_side_effect(path, counter):
+    import os
+    def work():
+        with open(counter, 'a') as stream:
+            stream.write('run\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        os._exit(23)
+    OperationLedger(path).run('crash', {'tool': 'export', 'demo': 'd'}, work)
+
+
+def test_same_operation_runs_once_across_processes(tmp_path):
+    import multiprocessing
+    ctx = multiprocessing.get_context('fork')
+    start, results = ctx.Event(), ctx.Queue()
+    path, counter = tmp_path / 'ops.json', tmp_path / 'calls'
+    processes = [ctx.Process(target=_concurrent_process, args=(path, counter, start, results)) for _ in range(3)]
+    for process in processes:
+        process.start()
+    start.set()
+    responses = [results.get(timeout=10) for _ in processes]
+    for process in processes:
+        process.join(10)
+        assert process.exitcode == 0
+    assert counter.read_text().splitlines() == ['run']
+    assert responses == [{'job': 'once'}] * 3
+
+
+def test_crash_after_side_effect_is_not_replayed(tmp_path):
+    import multiprocessing
+    ctx = multiprocessing.get_context('fork')
+    path, counter = tmp_path / 'ops.json', tmp_path / 'calls'
+    process = ctx.Process(target=_crash_after_side_effect, args=(path, counter))
+    process.start()
+    process.join(10)
+    assert process.exitcode == 23
+    with pytest.raises(Exception, match='(?i)(unknown|reconcil)'):
+        OperationLedger(path).run('crash', {'tool': 'export', 'demo': 'd'}, lambda: counter.write_text('ran again'))
+    assert counter.read_text() == 'run\n'
