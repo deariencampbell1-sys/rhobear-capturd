@@ -27,13 +27,15 @@ import hashlib
 import json
 import logging
 import os
+import errno
+import stat
 import re
 import shutil
 import threading
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from capturd.walk.ai_pipeline import (
@@ -873,23 +875,43 @@ class DemoForge:
                     f"missing export source for step {step.get('index', i)}"
                 )
                 continue
-            # Recorder stores relative paths like ``demos/{id}/step_NNN.png``.
-            # Resolve both that and the basename inside our demo_dir.
-            candidates: list[Path] = []
+            if not isinstance(rel, str) or '\\' in rel or Path(rel).is_absolute() or PureWindowsPath(rel).is_absolute() or PureWindowsPath(rel).drive:
+                raise DemoForgeError('refusing unsafe screenshot path')
+            parts = Path(rel).parts
+            safe = self._safe_demo_id(demo_id)
+            if parts[:2] == ('demos', safe):
+                parts = parts[2:]
+            elif parts[:1] == (safe,):
+                parts = parts[1:]
+            if not parts or any(part in ('.', '..') for part in parts):
+                raise DemoForgeError('refusing unsafe screenshot path')
+            root = d.resolve()
+            candidate = d.joinpath(*parts)
+            if any(d.joinpath(*parts[:n]).is_symlink() for n in range(1, len(parts) + 1)):
+                raise DemoForgeError('refusing symlinked screenshot path')
+            if not candidate.resolve().is_relative_to(root):
+                raise DemoForgeError('refusing screenshot outside demo')
+            # Open each component without following links, so replacement after
+            # the realpath check cannot redirect the read.
+            opened = []
             try:
-                if (d / Path(rel).name).is_file():
-                    candidates.append(d / Path(rel).name)
-            except (OSError, ValueError):
-                pass
-            p_rel = Path(rel)
-            if p_rel.is_absolute() and p_rel.is_file():
-                candidates.append(p_rel)
-            for cand in candidates:
-                try:
-                    step["screenshotBase64"] = base64.b64encode(cand.read_bytes()).decode("ascii")
-                    break
-                except OSError:
-                    continue
+                current = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                opened.append(current)
+                for part in parts[:-1]:
+                    current = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current)
+                    opened.append(current)
+                fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=current)
+                opened.append(fd)
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise DemoForgeError('screenshot must be a regular file')
+                with os.fdopen(os.dup(fd), 'rb') as image:
+                    step['screenshotBase64'] = base64.b64encode(image.read()).decode('ascii')
+            except OSError as exc:
+                if exc.errno not in (errno.ENOENT, errno.ENOTDIR):
+                    raise DemoForgeError('refusing unsafe screenshot path') from exc
+            finally:
+                for fd in reversed(opened):
+                    os.close(fd)
             if not step.get("screenshotBase64"):
                 step["screenshotError"] = (
                     f"missing export source for step {step.get('index', i)}"
