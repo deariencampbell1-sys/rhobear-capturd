@@ -142,3 +142,25 @@ def test_silent_reexport_removes_previous_caption_sidecars(tmp_path, monkeypatch
     exporter.export_video({"steps": [{"voiceoverWords": _words(("Narrated", 0, 500))}]}, html, out)
     assert not out.with_suffix(".vtt").exists()
     assert not out.with_name("walkthrough.transcript.txt").exists()
+
+
+@pytest.mark.parametrize('name', ['walkthrough.vtt', 'walkthrough.transcript.txt'])
+def test_caption_sidecars_refuse_symlinks(tmp_path, name):
+    sentinel = tmp_path / 'sentinel'
+    sentinel.write_text('unchanged')
+    (tmp_path / name).symlink_to(sentinel)
+    with pytest.raises(OSError):
+        exporter._write_captions(STEPS, PLAN, tmp_path / 'walkthrough.mp4')
+    assert sentinel.read_text() == 'unchanged'
+
+
+def test_caption_sidecars_refuse_symlinked_parent(tmp_path):
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    sentinel = outside / 'walkthrough.vtt'
+    sentinel.write_text('unchanged')
+    link = tmp_path / 'link'
+    link.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(OSError):
+        exporter._write_captions(STEPS, PLAN, link / 'walkthrough.mp4')
+    assert sentinel.read_text() == 'unchanged'
