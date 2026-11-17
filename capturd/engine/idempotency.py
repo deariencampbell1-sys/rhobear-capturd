@@ -80,6 +80,36 @@ class OperationLedger:
         finally:
             tmp.unlink(missing_ok=True)
 
+    def _receipt_path(self, key: str) -> Path:
+        return self._path.with_name(f".{self._path.name}.{key}.result")
+
+    def _write_receipt(self, key: str, digest: str, result: Any) -> None:
+        path = self._receipt_path(key)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            json.dump({'payload': digest, 'result': result}, stream, sort_keys=True)
+            stream.flush()
+            os.fsync(stream.fileno())
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+    def _read_receipt(self, key: str, digest: str) -> Any:
+        path = self._receipt_path(key)
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, 'r', encoding='utf-8') as stream:
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    return None
+                data = json.load(stream)
+            if not isinstance(data, dict) or data.get('payload') != digest or 'result' not in data:
+                return None
+            return data
+        except (FileNotFoundError, OSError, ValueError, UnicodeError):
+            return None
+
     def run(self, operation_id: str, payload: Any, work: Callable[[], Any]) -> Any:
         digest = _digest(payload)
         key = hashlib.sha256(operation_id.encode('utf-8')).hexdigest()
@@ -94,12 +124,23 @@ class OperationLedger:
                         raise IdempotencyMismatch(operation_id)
                     if 'result' in entry:
                         return entry['result']
-                    raise OperationUnknown(operation_id)
+                    receipt = self._read_receipt(key, digest)
+                    if receipt is None:
+                        raise OperationUnknown(operation_id)
+                    entries[operation_id] = {'payload': digest, 'state': 'complete', 'result': receipt['result']}
+                    self._save(entries)
+                    self._receipt_path(key).unlink(missing_ok=True)
+                    return receipt['result']
                 entries[operation_id] = {'payload': digest, 'state': 'claimed'}
                 self._save(entries)
             result = json.loads(json.dumps(work(), sort_keys=True, default=str))
+            # The durable receipt bridges a crash while the ledger's complete
+            # transition is being committed. Before a result exists, the claim
+            # remains unknown and is never speculatively repeated.
+            self._write_receipt(key, digest, result)
             with self._guard('ledger'):
                 entries = self._load()
                 entries[operation_id] = {'payload': digest, 'state': 'complete', 'result': result}
                 self._save(entries)
+            self._receipt_path(key).unlink(missing_ok=True)
             return result
