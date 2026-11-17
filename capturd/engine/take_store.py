@@ -18,6 +18,7 @@ import binascii
 import hashlib
 import json
 import os
+import stat
 import threading
 import uuid
 import fcntl
@@ -108,12 +109,18 @@ class TakeStore:
     @contextmanager
     def _guard(self, demo_id: str):
         path = self._forge.demo_dir(demo_id) / '.takes.lock'
-        with self._lock, path.open('a+b') as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        with self._lock:
+            fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                os.close(fd)
+                raise TakeStoreError('review lock must be a regular file')
+            handle = os.fdopen(fd, 'r+b')
+            with handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def _snapshot(self, demo_id: str) -> dict[str, Any]:
         data = self._forge.load_spec(demo_id)
