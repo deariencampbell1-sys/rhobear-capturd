@@ -63,3 +63,45 @@ def test_symlinked_demo_cannot_write_outside_root(tmp_path):
     with pytest.raises(DemoForgeError):
         _store(forge).open_review('linked')
     assert not (outside / 'takes.json').exists()
+
+
+def test_changed_pixels_never_keep_old_source_revision(tmp_path):
+    import base64
+    import hashlib
+    forge = _forge(tmp_path, pngs=(PNG_A,))
+    store = _store(forge)
+    old = store.open_review('demo1')['takes'][0]
+    store.approve('demo1', 0, 0, by='Neo', expected_revision=old['sourceRevision'])
+    data = forge.load_spec('demo1')
+    data['steps'][0]['screenshotBase64'] = base64.b64encode(b'new pixels').decode()
+    forge.save_spec('demo1', data)
+    reopened = store.open_review('demo1')['takes'][0]
+    assert reopened['state'] == 'ready'
+    assert reopened['sourceRevision'] == hashlib.sha1(b'new pixels').hexdigest()
+
+
+def _approve_process(root, revision, barrier, queue):
+    from capturd.walk.coordinator import DemoForge
+    store = take_store.TakeStore(DemoForge(demos_dir=root))
+    barrier.wait()
+    try:
+        store.approve('demo1', 0, 0, by='Neo', expected_revision=revision)
+        queue.put('approved')
+    except take_store.TakeStoreError:
+        queue.put('refused')
+
+
+def test_processes_cannot_both_approve(tmp_path):
+    import multiprocessing
+    ctx = multiprocessing.get_context('spawn')
+    forge = _forge(tmp_path, pngs=(PNG_A,))
+    revision = _store(forge).open_review('demo1')['takes'][0]['sourceRevision']
+    barrier = ctx.Barrier(2)
+    queue = ctx.Queue()
+    processes = [ctx.Process(target=_approve_process, args=(forge.demos_dir, revision, barrier, queue)) for _ in range(2)]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(15)
+        assert process.exitcode == 0
+    assert sorted(queue.get(timeout=3) for _ in processes) == ['approved', 'refused']
