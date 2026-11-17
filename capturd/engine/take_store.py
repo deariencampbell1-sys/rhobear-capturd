@@ -437,7 +437,8 @@ class TakeStore:
                 raise TakeStoreError(
                     f"shot {shot} recaptured the same pixels; nothing new to review")
             source = self._forge.demo_dir(demo_id) / source_file(revision)
-            source.write_bytes(pixels)
+            from capturd._safe_files import atomic_write
+            atomic_write(source, pixels)
             try:
                 draft = shots.recapture(
                     base, take_index=max(t["takeIndex"] for t in shot_takes) + 1,
