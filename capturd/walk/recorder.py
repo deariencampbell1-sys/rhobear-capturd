@@ -887,6 +887,8 @@ class DemoRecorder:
         from playwright.async_api import async_playwright
 
         self._loop = asyncio.get_running_loop()
+        self._agent_checkpoint = True
+        self._write_outputs()
         self._playwright = await async_playwright().start()
         self._browser = await _launch_demo_browser(self._playwright, headless=not self.headful)
         self._context = await self._browser.new_context(
@@ -1916,6 +1918,7 @@ class DemoRecorder:
         """Persist demo.json next to the screenshots; the session is over."""
         out_path = self._write_spec()
         self._mark_session("stopped")
+
         logger.info("wrote %s (%d steps)", out_path, len(self.spec.steps))
 
     # ----- public read-only handle -------------------------------------------
