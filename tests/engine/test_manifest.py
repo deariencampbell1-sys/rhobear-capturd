@@ -391,7 +391,8 @@ def test_the_wheel_test_removes_its_egg_info():
     assert after == before, (
         "the packaging test added artifacts to the repo tree: "
         f"{sorted(set(after) - set(before))}")
-    assert not after, f"repository tree is not clean after the wheel test: {after}"
+    # Not `assert not after`: the documented `pip install -e ".[dev]"` creates
+    # capturd.egg-info before any test runs, so the tree is never empty (G62-1).
 
 
 # ---------------------------------------------------------------------------
