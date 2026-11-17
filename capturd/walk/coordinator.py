@@ -84,6 +84,7 @@ def viewer_template_path() -> Path:
 
 CANCELLED_MARKER = "cancelled.json"
 _EXPORT_KINDS = {"html": "text/html", "mp4": "video/mp4", "gif": "image/gif"}
+INCOMPLETE_MARKER = "recording-incomplete"
 
 
 def _pid_alive(pid: Any) -> bool:
@@ -265,7 +266,9 @@ class DemoForge:
                     demo_id=entry.name,
                     name=data.get("name") or "",
                     step_count=len(steps),
-                    status="enriched" if enriched else "recorded",
+                    status=("cancelled" if (entry / CANCELLED_MARKER).is_file() else
+                            "partial" if (entry / INCOMPLETE_MARKER).is_file() else
+                            "enriched" if enriched else "recorded"),
                     created_at=data.get("createdAt") or "",
                     has_voiceover=any((s.get("voiceoverBase64") for s in steps)),
                 )
@@ -324,6 +327,8 @@ class DemoForge:
         for the same demo, the existing job is returned (idempotent).
         """
         safe = self._safe_demo_id(demo_id)
+        if any((self.demo_dir(safe) / marker).is_file() for marker in (CANCELLED_MARKER, INCOMPLETE_MARKER)):
+            raise DemoForgeError("partial demo cannot be enriched")
         with self._lock:
             existing = self._demo_to_job.get(safe)
         if existing:
@@ -354,7 +359,9 @@ class DemoForge:
         status = self._status(demo_id)
         folder = self.demo_dir(status["demoId"])
         if (folder / CANCELLED_MARKER).is_file():
-            status.update(cancelled=True, partial=True)
+            status.update(cancelled=True, partial=True, status="cancelled")
+        elif (folder / INCOMPLETE_MARKER).is_file():
+            status.update(partial=True, status="partial")
         session = folder / SESSION_MARKER
         if session.is_file():
             try:
@@ -363,6 +370,7 @@ class DemoForge:
                 state = None
             if state == "interrupted":
                 status.update(interrupted=True, partial=True)
+
         return status
 
     def recover_interrupted(self) -> list[str]:
@@ -713,6 +721,8 @@ class DemoForge:
         viewer is driven frame-by-frame in headless Chromium and encoded by
         ffmpeg; voiceover audio is muxed at the timeline offsets.
         """
+        if any((self.demo_dir(demo_id) / marker).is_file() for marker in (CANCELLED_MARKER, INCOMPLETE_MARKER)):
+            raise DemoForgeError("partial demo cannot be exported as complete")
         fmt = (fmt or "html").lower()
         if fmt not in {"html", "mp4", "gif"}:
             raise DemoForgeError(f"unsupported export format: {fmt!r}")
@@ -849,13 +859,15 @@ class DemoForge:
 
     def _write_poster(self, data: dict[str, Any], demo_id: str) -> None:
         """``poster.png``: the first shot's exported pixels, or none at all."""
+        from capturd._safe_files import atomic_write, safe_unlink
+
         poster = self.demo_dir(demo_id) / "poster.png"
         steps = data.get("steps") or []
         first = steps[0] if steps else {}
         if first.get("screenshotError") or not first.get("screenshotBase64"):
-            poster.unlink(missing_ok=True)
+            safe_unlink(poster)
             return
-        poster.write_bytes(base64.b64decode(first["screenshotBase64"]))
+        atomic_write(poster, base64.b64decode(first["screenshotBase64"]))
 
     def _inline_screenshots(self, data: dict[str, Any], demo_id: str) -> None:
         """Mutate ``data`` so each step has ``screenshotBase64`` populated.
