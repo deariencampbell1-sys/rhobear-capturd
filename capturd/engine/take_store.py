@@ -20,6 +20,8 @@ import json
 import os
 import threading
 import uuid
+import fcntl
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any
 
@@ -120,6 +122,16 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+def _content_revision(data: dict[str, Any]) -> str:
+    encoded = json.dumps(data, sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False)
+    return hashlib.sha1(encoded.encode('utf-8')).hexdigest()
+
+
+def _take_content_revision(data: dict[str, Any], take: dict[str, Any]) -> str:
+    return _content_revision({'demo': data, 'pixelRevision': take['sourceRevision'],
+                              'direction': take['direction']})
+
+
 def _seed_take(demo_id: str, shot: int, step: dict[str, Any], created_at: str) -> dict[str, Any]:
     pixels = None
     if step.get("screenshotBase64") and not step.get("screenshotError"):
@@ -162,21 +174,47 @@ class TakeStore:
     def _path(self, demo_id: str):
         return self._forge.demo_dir(demo_id) / FILENAME
 
+    @contextmanager
+    def _guard(self, demo_id: str):
+        path = self._forge.demo_dir(demo_id) / '.takes.lock'
+        with self._lock, path.open('a+b') as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def _snapshot(self, demo_id: str) -> dict[str, Any]:
+        data = self._forge.load_spec(demo_id)
+        self._forge._inline_screenshots(data, demo_id)
+        return data
+
     def _read(self, demo_id: str) -> dict[str, Any] | None:
         path = self._path(demo_id)
         if not path.is_file():
             return None
         doc = json.loads(path.read_text(encoding="utf-8"))
         return {"takes": [persistence.loads(text) for text in doc["takes"]],
-                "selection": {int(k): v for k, v in doc["selection"].items()}}
+                "selection": {int(k): v for k, v in doc["selection"].items()},
+                "storeRevision": doc.get("storeRevision", 0),
+                "contentRevision": doc.get("contentRevision"),
+                "sourceFiles": doc.get("sourceFiles", {}),
+                "approvedContent": doc.get("approvedContent", {}),
+                "history": doc.get("history", [])}
 
     def _write(self, demo_id: str, review: dict[str, Any]) -> None:
         path = self._path(demo_id)
         doc = {"takes": [persistence.dumps(t) for t in review["takes"]],
-               "selection": {str(k): v for k, v in sorted(review["selection"].items())}}
+               "selection": {str(k): v for k, v in sorted(review["selection"].items())},
+               "storeRevision": review.get("storeRevision", 0) + 1,
+               "contentRevision": review.get("contentRevision"),
+               "sourceFiles": review.get("sourceFiles", {}),
+               "approvedContent": review.get("approvedContent", {}),
+               "history": review.get("history", [])}
         tmp = path.with_name(f".{FILENAME}.{uuid.uuid4().hex}.tmp")
         tmp.write_text(json.dumps(doc, indent=1), encoding="utf-8")
         os.replace(tmp, path)
+        review['storeRevision'] = doc['storeRevision']
 
     # ---- reads -----------------------------------------------------------
 
@@ -186,33 +224,80 @@ class TakeStore:
 
     def open_review(self, demo_id: str) -> dict[str, Any]:
         """Seed one take per step on first call; later calls return it as is."""
-        with self._lock:
+        with self._guard(demo_id):
             existing = self._read(demo_id)
             if existing is not None:
+                snapshot = self._snapshot(demo_id)
+                revision = _content_revision(snapshot)
+                old = existing['contentRevision']
+                if old != revision:
+                    for index, take in enumerate(existing['takes']):
+                        if take['state'] == 'approved':
+                            existing['history'].append({'shotIndex': take['shotIndex'], 'takeIndex': take['takeIndex'],
+                                'from': 'approved', 'to': 'reopened', 'oldContentRevision': old,
+                                'newContentRevision': revision, 'at': _now()})
+                            existing['takes'][index] = approval.revoke(take, by='system', at=_now(), reason='content changed')
+                    # Take zero tracks the recorded step. Retakes and recaptures
+                    # retain their own source pixels and are never rewritten here.
+                    steps = snapshot.get('steps') or []
+                    for shot, step in enumerate(steps):
+                        seeded = _seed_take(demo_id, shot, step, _now())
+                        original = next((t for t in existing['takes'] if t['shotIndex'] == shot and t['takeIndex'] == 0), None)
+                        if original is None:
+                            existing['takes'].append(seeded)
+                            existing['selection'][shot] = 0
+                        elif original['sourceRevision'] != seeded['sourceRevision']:
+                            original['sourceRevision'] = seeded['sourceRevision']
+                            original['sourceArtifactId'] = seeded['sourceArtifactId']
+                            original['state'] = seeded['state']
+                    existing['selection'] = {shot: take for shot, take in existing['selection'].items() if shot < len(steps)}
+                    existing['approvedContent'] = {}
+                    existing['contentRevision'] = revision
+                    self._write(demo_id, existing)
                 return existing
             data = self._forge.load_spec(demo_id)
             self._forge._inline_screenshots(data, demo_id)
             at = _now()
             takes = [_seed_take(demo_id, shot, step, at)
                      for shot, step in enumerate(data.get("steps") or [])]
-            review = {"takes": takes, "selection": {t["shotIndex"]: 0 for t in takes}}
+            review = {"takes": takes, "selection": {t["shotIndex"]: 0 for t in takes},
+                      "contentRevision": _content_revision(data), "approvedContent": {}, "history": []}
             self._write(demo_id, review)
             return review
 
-    def export_blocks(self, demo_id: str) -> list[dict[str, Any]] | None:
+    def export_blocks(self, demo_id: str, data: dict[str, Any] | None = None) -> list[dict[str, Any]] | None:
         """§6 blocks for exporting the selected takes; None without a review."""
         review = self._read(demo_id)
         if review is None:
             return None
-        shots = sorted({t["shotIndex"] for t in review["takes"]})
+        shots = sorted(review['selection'])
         included = sorted(review["selection"].items())
-        return export_blocked(shots, review["takes"], review["selection"], included)
+        blocks = export_blocked(shots, review["takes"], review["selection"], included)
+        current = _content_revision(data if data is not None else self._snapshot(demo_id))
+        snapshot = data if data is not None else self._snapshot(demo_id)
+        for shot, take in included:
+            record = next((t for t in review['takes'] if t['shotIndex'] == shot and t['takeIndex'] == take), None)
+            if current != review['contentRevision'] or record is None or review['approvedContent'].get(f'{shot}:{take}') != _take_content_revision(snapshot, record):
+                blocks.append({'code': 'content_changed', 'shotIndex': shot, 'takeIndex': take,
+                               'needed': 'approval of the current content'})
+            if record is not None:
+                revision = record['sourceRevision']
+                name = review['sourceFiles'].get(revision)
+                if name:
+                    path = self._forge.demo_dir(demo_id) / name
+                    if not path.is_file() or hashlib.sha1(path.read_bytes()).hexdigest() != revision:
+                        blocks.append({'code': 'source_changed', 'shotIndex': shot, 'takeIndex': take,
+                                       'needed': 'the approved source pixels'})
+        return blocks
 
     # ---- moves -----------------------------------------------------------
 
     def _move(self, demo_id: str, shot: int, take: int, change) -> dict[str, Any]:
-        with self._lock:
+        observed = self._read(demo_id)
+        with self._guard(demo_id):
             review = self._read(demo_id)
+            if observed is not None and review is not None and observed['storeRevision'] != review['storeRevision']:
+                raise TakeStoreError('stale review store revision')
             if review is None:
                 raise TakeStoreError(f"no review is open for demo {demo_id!r}; call take.list first")
             for i, record in enumerate(review["takes"]):
@@ -222,9 +307,17 @@ class TakeStore:
                     except (approval.ApprovalError, TakeError) as exc:
                         raise TakeStoreError(str(exc)) from exc
                     review["takes"][i] = updated
-                    if updated["state"] == "approved":
-                        # A person chose this take for the shot.
-                        review["selection"][shot] = take
+                    key = f'{shot}:{take}'
+                    if updated['state'] == 'approved':
+                        snapshot = self._snapshot(demo_id)
+                        current = _content_revision(snapshot)
+                        if current != review['contentRevision']:
+                            raise TakeStoreError('content changed; reopen review first')
+                        review['approvedContent'][key] = _take_content_revision(snapshot, updated)
+                        review['selection'][shot] = take
+                    else:
+                        review['approvedContent'].pop(key, None)
+
                     self._write(demo_id, review)
                     return updated
             raise TakeStoreError(f"demo {demo_id!r} has no shot {shot} take {take}")
@@ -253,8 +346,11 @@ class TakeStore:
         selected until a person approves it; every other record is untouched.
         """
         clean = validate_direction(direction)
-        with self._lock:
+        observed = self._read(demo_id)
+        with self._guard(demo_id):
             review = self._read(demo_id)
+            if observed is not None and review is not None and observed['storeRevision'] != review['storeRevision']:
+                raise TakeStoreError('stale review store revision')
             if review is None:
                 raise TakeStoreError(f"no review is open for demo {demo_id!r}; call take.list first")
             shot_takes = [t for t in review["takes"] if t["shotIndex"] == shot]
@@ -293,8 +389,11 @@ class TakeStore:
         no recapture. The new take is `ready`, unselected until approved.
         """
         revision = hashlib.sha1(pixels).hexdigest()
-        with self._lock:
+        observed = self._read(demo_id)
+        with self._guard(demo_id):
             review = self._read(demo_id)
+            if observed is not None and review is not None and observed['storeRevision'] != review['storeRevision']:
+                raise TakeStoreError('stale review store revision')
             if review is None:
                 raise TakeStoreError(f"no review is open for demo {demo_id!r}; call take.list first")
             shot_takes = [t for t in review["takes"] if t["shotIndex"] == shot]
@@ -318,6 +417,7 @@ class TakeStore:
                 raise TakeStoreError(str(exc)) from exc
             new = transition(draft, "ready")
             review["takes"].append(new)
+            review['sourceFiles'][revision] = source.name
             self._write(demo_id, review)
             return new
 
