@@ -170,3 +170,18 @@ def test_recovers_durable_result_after_commit_crash(tmp_path):
     assert counter.read_text() == 'completed'
     result = OperationLedger(path).run('commit-crash', {'tool': 'export', 'demo': 'd'}, lambda: pytest.fail('work reran'))
     assert result == {'job': 'recoverable'}
+
+
+def test_recovery_does_not_accept_a_different_demo_or_operation(tmp_path):
+    import multiprocessing
+    ctx = multiprocessing.get_context('fork')
+    path, counter = tmp_path / 'ops.json', tmp_path / 'completed'
+    process = ctx.Process(target=_crash_while_committing_result, args=(path, counter))
+    process.start()
+    process.join(10)
+    assert process.exitcode == 24
+    ledger = OperationLedger(path)
+    for changed in ({'tool': 'export', 'demo': 'other'}, {'tool': 'record', 'demo': 'd'}):
+        with pytest.raises(IdempotencyMismatch):
+            ledger.run('commit-crash', changed, lambda: pytest.fail('work reran'))
+    assert ledger.run('commit-crash', {'tool': 'export', 'demo': 'd'}, lambda: pytest.fail('work reran')) == {'job': 'recoverable'}
