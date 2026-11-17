@@ -19,12 +19,12 @@
     "bridgeContract": "rhobear75/rhobear-north-star main a9a9cb1 (L8d CONTRACT §9)"
   },
   "scripts": {
-    "preinstall": "node scripts/fetch-kit.mjs",
-    "fetch-kit": "node scripts/fetch-kit.mjs",
+    "preinstall": "node src/fetch-kit.mjs",
+    "fetch-kit": "node src/fetch-kit.mjs",
     "typecheck": "tsc --noEmit",
     "test": "tsc --noEmit && vitest run",
     "test:bridge": "vitest run tests/bridge.test.ts",
-    "build": "tsc --noEmit && esbuild src/main.tsx --bundle --format=esm --minify --sourcemap --outdir=dist --loader:.woff2=file --loader:.woff=file --loader:.ttf=file --loader:.otf=file && node -e \"require(\\\"fs\\\").copyFileSync(\\\"src/index.html\\\",\\\"dist/index.html\\\")\""
+    "build": "tsc --noEmit && esbuild src/main.tsx --bundle --format=esm --minify --sourcemap --outdir=dist --loader:.woff2=file --loader:.woff=file --loader:.ttf=file --loader:.otf=file && cp src/index.html dist/index.html"
   },
   "dependencies": {
     "@rhobear/family-kit": "file:vendor/rhobear-family-kit-1.0.0.tgz",

@@ -2,7 +2,7 @@ import React, {useEffect, useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import '@rhobear/family-kit/tokens.css';
 import '@rhobear/family-kit/fonts.css';
-import '@rhobear/family-kit/react/button.css';
+import '@rhobear/family-kit/react/controls.css';
 import './studio.css';
 import {makeFrame, parseHostFrame, reduceJob, type Job} from './bridge';
 import {Studio} from './Studio';
