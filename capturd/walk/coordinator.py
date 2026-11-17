@@ -209,7 +209,10 @@ class DemoForge:
 
     def demo_dir(self, demo_id: str) -> Path:
         safe = self._safe_demo_id(demo_id)
-        return self.demos_dir / safe
+        path = self.demos_dir / safe
+        if path.is_symlink() or path.resolve().parent != self.demos_dir.resolve():
+            raise DemoNotFound(f"refusing demo outside demos/: {demo_id}")
+        return path
 
     def demo_json_path(self, demo_id: str) -> Path:
         return self.demo_dir(demo_id) / "demo.json"
@@ -708,12 +711,11 @@ class DemoForge:
         data = self.load_spec(demo_id)
         from capturd.engine.take_store import TakeStore
 
+        self._inline_screenshots(data, demo_id)
         review = TakeStore(self)
-        blocks = review.export_blocks(demo_id)
+        blocks = review.export_blocks(demo_id, data=data)
         if blocks:
             raise DemoExportBlocked(blocks)
-        # The selected take's caption is the line that ships (the saved spec
-        # itself is never changed by a take).
         steps = data.get("steps") or []
         for shot, direction in review.selected_directions(demo_id).items():
             if 0 <= shot < len(steps) and direction.get("caption") is not None:
