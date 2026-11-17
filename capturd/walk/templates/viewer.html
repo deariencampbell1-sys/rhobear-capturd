@@ -9,13 +9,14 @@
     /*  Reset + base                                                       */
     /* ------------------------------------------------------------------ */
     *, *::before, *::after { box-sizing: border-box; }
+    :root { --accent: #3aa7ff; --accent-ink: #04121f; --accent-rgb: 58, 167, 255; }
     html, body { margin: 0; padding: 0; height: 100%; background: #0a0e13; color: #e8eef2;
                  font-family: -apple-system, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI",
                               system-ui, "Helvetica Neue", sans-serif;
                  overflow: hidden; }
     button { font: inherit; color: inherit; background: transparent; border: 0;
              cursor: pointer; padding: 0; }
-    button:focus-visible { outline: 2px solid #f2c230; outline-offset: 2px; border-radius: 4px; }
+    button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
 
     /* ------------------------------------------------------------------ */
     /*  Viewer shell                                                       */
@@ -61,7 +62,7 @@
     }
     #hotspot-ring {
       fill: none;
-      stroke: #f2c230;
+      stroke: var(--accent);
       stroke-width: 2;
       pointer-events: auto;
       cursor: pointer;
@@ -190,20 +191,20 @@
     }
     .progress-segment:hover { height: 6px; }
     .progress-segment.done   { background: rgba(255,255,255,0.55); }
-    .progress-segment.current{ background: #f2c230; height: 6px; }
+    .progress-segment.current{ background: var(--accent); height: 6px; }
     .progress-segment:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
-    /* Camera-hold span — a flat gold segment over the portion of the step  */
+    /* Camera-hold span — a flat accent segment over the portion of the step  */
     /* where the timeline is holding on the target (capturd HUD spec).     */
     .progress-segment__hold {
       position: absolute; top: 0; bottom: 0;
-      background: rgba(242,194,48,0.55);
+      background: rgba(var(--accent-rgb), 0.55);
       border-radius: 2px;
       pointer-events: none;
     }
-    /* Zoom/pan keyframe — a gold diamond marker on the track.              */
+    /* Zoom/pan keyframe — an accent diamond marker on the track.              */
     .progress-segment__marker {
       position: absolute; top: 50%; width: 6px; height: 6px;
-      background: #f2c230; transform: translate(-50%, -50%) rotate(45deg);
+      background: var(--accent); transform: translate(-50%, -50%) rotate(45deg);
       border-radius: 1px; pointer-events: none;
     }
     /* Voice beat — a tick mark under the track.                            */
@@ -255,7 +256,7 @@
     .ctrl-btn[aria-disabled="true"] {
       opacity: 0.35; cursor: not-allowed;
     }
-    .ctrl-btn.primary { background: #f2c230; color: #1a1206; width: 44px; height: 44px; }
+    .ctrl-btn.primary { background: var(--accent); color: var(--accent-ink); width: 44px; height: 44px; }
     .ctrl-btn.primary:hover { background: #dfae2c; }
 
     /* ------------------------------------------------------------------ */
@@ -302,7 +303,7 @@
       transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
     }
     .choice-btn:hover, .choice-btn:focus-visible {
-      background: rgba(242,194,48,0.16); border-color: #f2c230; outline: none;
+      background: rgba(var(--accent-rgb), 0.16); border-color: var(--accent); outline: none;
     }
     .choice-btn:active { transform: scale(0.985); }
     @media (prefers-reduced-motion: reduce) {
@@ -319,7 +320,7 @@
         <img id="screenshot" alt="" />
         <svg id="hotspot-layer" aria-hidden="true">
           <circle id="hotspot-ring" cx="-9999" cy="-9999" r="14" />
-          <circle id="hotspot"      cx="-9999" cy="-9999" r="14" fill="#f2c230" fill-opacity="0.85" />
+          <circle id="hotspot"      cx="-9999" cy="-9999" r="14" style="fill: var(--accent)" fill-opacity="0.85" />
         </svg>
         <div id="spotlight-overlay" aria-hidden="true"></div>
         <div id="cursor" aria-hidden="true">
@@ -1647,8 +1648,8 @@
     }
 
     // Real camera-timeline data (authored or synthesized default) projected
-    // onto a step's segment: hold spans (flat gold) + zoom/pan keyframes
-    // (gold diamond), positioned by their real cumulative offset within the
+    // onto a step's segment: hold spans (flat accent) + zoom/pan keyframes
+    // (accent diamond), positioned by their real cumulative offset within the
     // step's total keyframe duration. No fabricated data — same timeline
     // playTimeline() actually executes.
     function stepTimelineMarkers(stepIndex) {
@@ -2173,12 +2174,12 @@
       // Hover halo just before the click, then a bright expanding ripple on it.
       if (preClick && tMs > clickAt - 340 && tMs < clickAt) {
         const hb = 1 + 0.12 * Math.sin(2 * Math.PI * ((tMs % 900) / 900));
-        $hotspotRing.style.stroke = '#f2c230';
+        $hotspotRing.style.stroke = 'var(--accent)';
         $hotspotRing.style.transform = 'scale(' + (1.05 * hb) + ')';
         $hotspotRing.style.opacity = '0.45';
       } else if (tMs >= clickAt && tMs - clickAt < 520) {
         const rp = (tMs - clickAt) / 520;
-        $hotspotRing.style.stroke = '#f2c230';
+        $hotspotRing.style.stroke = 'var(--accent)';
         $hotspotRing.style.transform = 'scale(' + (0.5 + rp * 2.1) + ')';
         $hotspotRing.style.opacity = String(Math.max(0, 0.95 * (1 - rp)));
       } else {

@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 #   * draws the Captur'd recorder HUD top-right (not click-captured), per
 #     rhobear-capturd-design: bg1 @92% + hairline + radius 8, REC pill with
 #     elapsed timer, a voice-state pill (idle/listening/transcribing/acting,
-#     sun-gold when non-idle), and a serif "last heard" line. Draggable.
+#     Captur'd blue when non-idle), and a serif "last heard" line. Draggable.
 #   * listens for clicks in capture phase
 #   * builds a CSS selector, bounding rect, and percentage hotspot
 #   * pushes the payload to Python via window.recordClick (expose_function)
@@ -87,7 +87,7 @@ OVERLAY_JS = r"""
       '#__demo-recorder-indicator .__demo-hud__pill--voice[data-state="listening"],' +
       '#__demo-recorder-indicator .__demo-hud__pill--voice[data-state="transcribing"],' +
       '#__demo-recorder-indicator .__demo-hud__pill--voice[data-state="acting"] {' +
-      '  color: #f2c230; border-color: #f2c230;' +
+      '  color: #3aa7ff; border-color: #3aa7ff;' +
       '}' +
       '@media (prefers-reduced-motion: reduce) {' +
       '  #__demo-recorder-indicator .__demo-hud__dot { animation: none; }' +
@@ -419,7 +419,7 @@ CURSOR_OVERLAY_JS = r"""
     ring.style.cssText = [
       'position: fixed', 'left: -200px', 'top: -200px',
       'width: 20px', 'height: 20px', 'margin: -10px 0 0 -10px', 'border-radius: 50%',
-      'border: 3px solid rgba(242,194,48,0.9)', 'z-index: 2147483645', /* sun-gold */
+      'border: 3px solid rgba(58,167,255,0.9)', 'z-index: 2147483645', /* Captur'd blue #3aa7ff */
       'pointer-events: none', 'opacity: 0', 'visibility: hidden',
     ].join(';');
     (document.body || document.documentElement).appendChild(c);

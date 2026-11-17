@@ -85,16 +85,16 @@ MIC_BUTTON_CSS = """
   background: rgba(151,183,196,0.22);
 }
 #__demo-recorder-indicator__mic.active {
-  background: #f2c230;
-  color: #1a1206;
+  background: #3aa7ff;
+  color: #04121f;
   transform: scale(1.15);
-  box-shadow: 0 0 0 0 rgba(242,194,48,0.5);
+  box-shadow: 0 0 0 0 rgba(58,167,255,0.5);
   animation: __demoMicPulse 0.8s ease-out infinite;
 }
 @keyframes __demoMicPulse {
-  0% { box-shadow: 0 0 0 0 rgba(242,194,48,0.5); }
-  70% { box-shadow: 0 0 0 14px rgba(242,194,48,0); }
-  100% { box-shadow: 0 0 0 0 rgba(242,194,48,0); }
+  0% { box-shadow: 0 0 0 0 rgba(58,167,255,0.5); }
+  70% { box-shadow: 0 0 0 14px rgba(58,167,255,0); }
+  100% { box-shadow: 0 0 0 0 rgba(58,167,255,0); }
 }
 """
 
