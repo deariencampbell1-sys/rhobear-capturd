@@ -163,6 +163,13 @@ class TakeStore:
         self._forge._inline_screenshots(data, demo_id)
         return data
 
+    def _source_valid(self, demo_id: str, review: dict[str, Any], take: dict[str, Any]) -> bool:
+        revision = take['sourceRevision']
+        if revision not in review.get('sourceFiles', {}):
+            return True
+        path = self._forge.demo_dir(demo_id) / source_file(revision)
+        return path.is_file() and hashlib.sha1(path.read_bytes()).hexdigest() == revision
+
     def _read(self, demo_id: str) -> dict[str, Any] | None:
         path = self._path(demo_id)
         if not path.is_file():
@@ -228,6 +235,23 @@ class TakeStore:
                     existing['approvedContent'] = {}
                     existing['contentRevision'] = revision
                     self._write(demo_id, existing)
+                else:
+                    changed = False
+                    for index, take in enumerate(existing['takes']):
+                        if take['state'] == 'approved' and not self._source_valid(demo_id, existing, take):
+                            key = f"{take['shotIndex']}:{take['takeIndex']}"
+                            path = self._forge.demo_dir(demo_id) / source_file(take['sourceRevision'])
+                            actual = hashlib.sha1(path.read_bytes()).hexdigest() if path.is_file() else None
+                            existing['history'].append({'shotIndex': take['shotIndex'], 'takeIndex': take['takeIndex'],
+                                'from': 'approved', 'to': 'reopened',
+                                'oldContentRevision': existing['approvedContent'].get(key),
+                                'newContentRevision': _content_revision({'contentRevision': revision, 'source': actual}),
+                                'at': _now()})
+                            existing['takes'][index] = approval.revoke(take, by='system', at=_now(), reason='source changed')
+                            existing['approvedContent'].pop(key, None)
+                            changed = True
+                    if changed:
+                        self._write(demo_id, existing)
                 return existing
             data = self._forge.load_spec(demo_id)
             self._forge._inline_screenshots(data, demo_id)
@@ -256,10 +280,8 @@ class TakeStore:
                                'needed': 'approval of the current content'})
             if record is not None:
                 revision = record['sourceRevision']
-                name = review['sourceFiles'].get(revision)
-                if name:
-                    path = self._forge.demo_dir(demo_id) / name
-                    if not path.is_file() or hashlib.sha1(path.read_bytes()).hexdigest() != revision:
+                if revision in review['sourceFiles']:
+                    if not self._source_valid(demo_id, review, record):
                         blocks.append({'code': 'source_changed', 'shotIndex': shot, 'takeIndex': take,
                                        'needed': 'the approved source pixels'})
         return blocks
@@ -283,6 +305,8 @@ class TakeStore:
                     review["takes"][i] = updated
                     key = f'{shot}:{take}'
                     if updated['state'] == 'approved':
+                        if not self._source_valid(demo_id, review, updated):
+                            raise TakeStoreError('source changed; recapture it again')
                         snapshot = self._snapshot(demo_id)
                         current = _content_revision(snapshot)
                         if current != review['contentRevision']:
