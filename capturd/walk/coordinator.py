@@ -180,7 +180,10 @@ class DemoForge:
 
     def demo_dir(self, demo_id: str) -> Path:
         safe = self._safe_demo_id(demo_id)
-        return self.demos_dir / safe
+        path = self.demos_dir / safe
+        if path.is_symlink() or path.resolve().parent != self.demos_dir.resolve():
+            raise DemoNotFound(f"refusing demo outside demos/: {demo_id}")
+        return path
 
     def demo_json_path(self, demo_id: str) -> Path:
         return self.demo_dir(demo_id) / "demo.json"
@@ -632,10 +635,10 @@ class DemoForge:
         data = self.load_spec(demo_id)
         from capturd.engine.take_store import TakeStore
 
-        blocks = TakeStore(self).export_blocks(demo_id)
+        self._inline_screenshots(data, demo_id)
+        blocks = TakeStore(self).export_blocks(demo_id, data=data)
         if blocks:
             raise DemoExportBlocked(blocks)
-        self._inline_screenshots(data, demo_id)
         # Carry the semantic target metadata into the embedded viewer so the
         # HTML export resolves the same camera as the recorder (W1-03-r1).
         from capturd.walk.viewer import (
