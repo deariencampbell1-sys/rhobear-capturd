@@ -1,0 +1,15 @@
+Do this job yourself. Do not start subagents or other workers.
+
+Reuse before you write: before new code, check in order whether it is needed at all, whether we already have it (this repo, our other repos), whether the standard library or platform does it, and whether an approved, pinned, unmodified open-source package or official SDK does it; only then write the smallest change, red test first, and list what you checked in your FIXES or PR body.
+
+# Captur'd: finish the engine (Trinity, L0)
+
+Neo, 2026-11-17: get Captur'd fully built so it can be tested once, end to end, not build-test-build-test. You are the builder for this lane until it is done. The North Star is the spec; never ask Neo what it already answers.
+
+Repo(s): rhobear-capturd. It still lives at deariencampbell1-sys/rhobear-capturd (this checkout); Neo is moving it to rhobear75/rhobear-capturd. Until L0 tells you that repo exists, commit on local branches and push nowhere; never open PRs on the old repo (this checkout: ~/work/w-lane-capturd). Spec: rhobear75/rhobear-north-star docs/north-star/lanes/L8c-capturd/ (JOURNEY.md, SCREENS.md, STATE.md, briefs/) and the family board outputs/family-boards/engines.html (Captur'd sections). Captur'd is the studio inside Builds that records the public demos. For step 1, write GAPS-NOW.md and commit it locally, then escalate with the commit sha instead of a PR url.
+
+1. **Gap list first (one commit, no code).** Read the lane spec and compare it with the current default branch. Write `GAPS-NOW.md` at the repo root: one row per spec item with BUILT / BUILT-UNWIRED / WRONG / MISSING, the file:line evidence, and what "done" means. Start from any existing GAPS.md and re-verify every row against today's code; do not trust it. Push it on a branch `agent/worker/lane-capturd-gaps` and open it as a draft PR titled "Captur'd: gap list". Escalate once: python3 /home/builder/lanes/_telegram/board.py escalate --to L0 --kind ready --from "Worker (lane-capturd)" "Captur'd gap list: <counts> at <PR url>".
+2. **Then build, without waiting for me.** Work the list in this order: WRONG first, then BUILT-UNWIRED (wire what exists), then MISSING, smallest complete user-visible piece first. One PR per coherent piece on rhobear75, branch from the current default branch, red test first, full test suite green before you push. Each PR body lists its GAPS-NOW rows and what you checked for reuse. After each PR: escalate ready to L0 with "<repo>#<n> head <sha>, tests <counts>", then start the next item immediately; do not wait for review. Keep GAPS-NOW.md current in each PR.
+3. **Durable.** Commit at every green step. If your session hits a usage limit, the next session resumes from GAPS-NOW.md and your branches. If blocked on something only Neo can give (an account, a key, a physical device), escalate to L0 with the exact ask and move to the next item.
+
+Rules: no deploys, no production changes, no secrets in code or logs; models, providers, URLs and keys are never hard-coded. UX follows the North Star screens and the shared kit exactly. Stop only when every row is BUILT or blocked with a recorded reason.
