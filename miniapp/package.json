@@ -1,0 +1,44 @@
+{
+  "name": "@rhobear/capturd-studio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Captur'd studio: the untrusted engine mini app Builds mounts under Engines.",
+  "engines": {
+    "node": ">=22"
+  },
+  "rhobear": {
+    "familyKit": {
+      "version": "1.0.0",
+      "sourceSha": "f27df9aec5eeeb1f91d2e9dfb9b631ea4cb1e3a7",
+      "repo": "rhobear75/rhobear-north-star",
+      "release": "family-kit-v1.0.0",
+      "asset": "rhobear-family-kit-1.0.0.tgz",
+      "sha256": "c5118f3e9a43d471439b1a1541190e475af83057e49cb4844d1b007f41c2b225"
+    },
+    "bridgeContract": "rhobear75/rhobear-north-star#1 @ 08d3b84b6c01f0859cd1298f412a4cc4fdc559d8 (L8d CONTRACT §9)"
+  },
+  "scripts": {
+    "preinstall": "node scripts/fetch-kit.mjs",
+    "fetch-kit": "node scripts/fetch-kit.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "tsc --noEmit && vitest run",
+    "test:bridge": "vitest run tests/bridge.test.ts",
+    "build": "tsc --noEmit && esbuild src/main.tsx --bundle --format=esm --minify --sourcemap --outdir=dist --loader:.woff2=file --loader:.woff=file --loader:.ttf=file --loader:.otf=file && node scripts/copy-index.mjs"
+  },
+  "dependencies": {
+    "@rhobear/family-kit": "file:vendor/rhobear-family-kit-1.0.0.tgz",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@testing-library/dom": "10.4.0",
+    "@testing-library/react": "16.1.0",
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "esbuild": "0.24.2",
+    "jsdom": "25.0.1",
+    "typescript": "5.6.3",
+    "vitest": "2.1.8"
+  }
+}
